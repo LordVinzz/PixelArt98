@@ -1,0 +1,72 @@
+#include "ui/AppSettings.hpp"
+
+#include <fstream>
+#include <nlohmann/json.hpp>
+
+namespace px {
+
+namespace {
+
+void set_error(std::string* error, const std::string& value) {
+    if (error != nullptr) {
+        *error = value;
+    }
+}
+
+} // namespace
+
+std::filesystem::path default_app_settings_path() {
+    std::error_code error;
+    const std::filesystem::path base = std::filesystem::current_path(error);
+    if (error) {
+        return std::filesystem::path("pixelart98_settings.json");
+    }
+    return base / "pixelart98_settings.json";
+}
+
+AppSettings load_app_settings() {
+    return load_app_settings(default_app_settings_path());
+}
+
+AppSettings load_app_settings(const std::filesystem::path& path, std::string* error) {
+    AppSettings settings;
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return settings;
+    }
+
+    try {
+        nlohmann::json root;
+        file >> root;
+        if (root.contains("show_splash_screen")) {
+            settings.show_splash_screen = root.at("show_splash_screen").get<bool>();
+        }
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("Could not load settings: ") + exception.what());
+    }
+    return settings;
+}
+
+bool save_app_settings(const AppSettings& settings, std::string* error) {
+    return save_app_settings(settings, default_app_settings_path(), error);
+}
+
+bool save_app_settings(const AppSettings& settings, const std::filesystem::path& path, std::string* error) {
+    try {
+        nlohmann::json root;
+        root["show_splash_screen"] = settings.show_splash_screen;
+
+        std::ofstream file(path, std::ios::trunc);
+        if (!file.is_open()) {
+            set_error(error, "Could not save settings: " + path.string());
+            return false;
+        }
+        file << root.dump(2) << '\n';
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("Could not save settings: ") + exception.what());
+        return false;
+    }
+    return true;
+}
+
+} // namespace px

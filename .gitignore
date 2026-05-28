@@ -1,0 +1,52 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+dist/
+package/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+DartConfiguration.tcl
+Testing/
+Makefile
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+
+# Compiled objects, libraries, and binaries
+*.o
+*.obj
+*.d
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.app/
+*.dSYM/
+
+# Generated dependency directories
+_deps/
+*-build/
+*-subbuild/
+
+# Local editor and OS files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local ImGui state
+imgui.ini
+pixelart98_settings.json
+
+# Local export/test artefacts
+animation.gif
+export.png
+*.pixart.tmp

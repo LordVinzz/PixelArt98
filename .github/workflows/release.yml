@@ -1,0 +1,193 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: macos-latest
+            platform: macos-universal
+          - os: ubuntu-latest
+            platform: linux-x64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev \
+            libgtk-3-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            libxrender-dev \
+            pkg-config \
+            xorg-dev
+
+      - name: Configure CMake
+        if: runner.os != 'macOS'
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          -DPIXELART_BUILD_BOTH=OFF
+          -DPIXELART_BACKEND=SDL2
+          -DPIXELART_BUILD_TESTS=ON
+
+      - name: Configure CMake for macOS universal binary
+        if: runner.os == 'macOS'
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          -DPIXELART_BUILD_BOTH=OFF
+          -DPIXELART_BACKEND=SDL2
+          -DPIXELART_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --target pixelart_sdl2 pixelart_tests pixelart_io_tests pixelart_opengl_smoke
+
+      - name: Test
+        run: ctest --test-dir build --build-config ${{ env.BUILD_TYPE }} --output-on-failure
+
+      - name: Install package files
+        run: cmake --install build --config ${{ env.BUILD_TYPE }} --prefix package/PixelArt98-${{ matrix.platform }}
+
+      - name: Package executable on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="package/PixelArt98-${{ matrix.platform }}"
+          cmake -E rename "${package_dir}/pixelart_sdl2" "${package_dir}/PixelArt98"
+          cmake -E copy README.md "${package_dir}/README.md"
+          cmake -E make_directory dist
+          cmake -E chdir package cmake -E tar cfv "../dist/PixelArt98-${{ matrix.platform }}.zip" --format=zip -- "PixelArt98-${{ matrix.platform }}"
+
+      - name: Package executable on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $packageDir = "package/PixelArt98-${{ matrix.platform }}"
+          cmake -E rename "$packageDir/pixelart_sdl2.exe" "$packageDir/PixelArt98.exe"
+          cmake -E copy README.md "$packageDir/README.md"
+          cmake -E make_directory dist
+          cmake -E chdir package cmake -E tar cfv "../dist/PixelArt98-${{ matrix.platform }}.zip" --format=zip -- "PixelArt98-${{ matrix.platform }}"
+
+      - name: Upload executable archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: pixelart98-${{ matrix.platform }}
+          path: dist/PixelArt98-${{ matrix.platform }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  source:
+    name: Package source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Create source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -E make_directory dist
+          version="${GITHUB_REF_NAME:-snapshot}"
+          safe_version="$(printf '%s' "$version" | sed 's#[/\\]#-#g')"
+          git archive --format=zip --prefix="PixelArt98-${safe_version}/" HEAD -o "dist/PixelArt98-source-${safe_version}.zip"
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: pixelart98-source
+          path: dist/PixelArt98-source-*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
+    needs:
+      - build
+      - source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download release archives
+        uses: actions/download-artifact@v5
+        with:
+          path: release-assets
+          pattern: pixelart98-*
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            release_tag="$GITHUB_REF_NAME"
+            release_title="PixelArt98 ${GITHUB_REF_NAME}"
+            create_args=(--title "$release_title" --generate-notes)
+          else
+            release_tag="continuous"
+            release_title="PixelArt98 Continuous Build"
+            release_notes="Automated build from main at ${GITHUB_SHA}."
+            create_args=(--title "$release_title" --notes "$release_notes" --prerelease --latest=false --target "$GITHUB_SHA")
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag --force "$release_tag" "$GITHUB_SHA"
+            git push --force origin "refs/tags/${release_tag}"
+          fi
+
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$release_tag" release-assets/*.zip --repo "$GITHUB_REPOSITORY" --clobber
+            if [[ "$release_tag" == "continuous" ]]; then
+              gh release edit "$release_tag" --repo "$GITHUB_REPOSITORY" --title "$release_title" --notes "$release_notes" --prerelease --target "$GITHUB_SHA"
+            fi
+          else
+            gh release create "$release_tag" release-assets/*.zip --repo "$GITHUB_REPOSITORY" "${create_args[@]}"
+          fi
