@@ -51,6 +51,29 @@ static void test_fill_and_selection() {
     assert(!doc.selection.contains(0, 0));
 }
 
+static void test_selection_combine_modes_and_nudge() {
+    auto doc = Document::create(8, 8);
+    doc.selection.select_rect(1, 1, 3, 3, SelectionCombineMode::Replace);
+    assert(doc.selection.contains(1, 1));
+    doc.selection.select_rect(5, 5, 6, 6, SelectionCombineMode::Add);
+    assert(doc.selection.contains(6, 6));
+    doc.selection.select_rect(2, 2, 6, 6, SelectionCombineMode::Subtract);
+    assert(doc.selection.contains(1, 1));
+    assert(!doc.selection.contains(3, 3));
+    assert(!doc.selection.contains(6, 6));
+
+    doc.selection.select_rect(0, 0, 7, 7, SelectionCombineMode::Replace);
+    doc.selection.select_rect(2, 2, 4, 4, SelectionCombineMode::Intersect);
+    assert(doc.selection.contains(3, 3));
+    assert(!doc.selection.contains(1, 1));
+
+    doc.selection.select_rect(3, 3, 3, 3, SelectionCombineMode::Invert);
+    assert(!doc.selection.contains(3, 3));
+    doc.selection.translate(1, -1);
+    assert(doc.selection.contains(3, 1));
+    assert(!doc.selection.contains(2, 2));
+}
+
 static void test_thin_ellipse_strokes_are_continuous() {
     auto horizontal = Document::create(36, 16);
     draw_ellipse(horizontal, 2, 7, 33, 9, rgba(255, 0, 0, 255), 1, false);
@@ -86,6 +109,8 @@ static void test_constrained_tool_endpoints() {
             std::array<int, 2>{10, 25}));
     assert((constrained_tool_endpoint(ToolType::Gradient, 10, 10, 13, 25, true) ==
             std::array<int, 2>{13, 25}));
+    assert((constrained_tool_endpoint(ToolType::RectSelect, 10, 10, 18, 12, true) ==
+            std::array<int, 2>{18, 18}));
     assert((constrained_tool_endpoint(ToolType::Rectangle, 10, 10, 18, 12, false) ==
             std::array<int, 2>{18, 12}));
 }
@@ -467,6 +492,7 @@ static void test_project_io() {
 int main() {
     test_canvas_and_undo();
     test_fill_and_selection();
+    test_selection_combine_modes_and_nudge();
     test_thin_ellipse_strokes_are_continuous();
     test_constrained_tool_endpoints();
     test_selection_clips_drawing_and_delete();

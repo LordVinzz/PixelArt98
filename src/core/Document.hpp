@@ -10,6 +10,14 @@
 
 namespace px {
 
+enum class SelectionCombineMode {
+    Replace,
+    Add,
+    Subtract,
+    Intersect,
+    Invert
+};
+
 struct SelectionMask {
     int width = 0;
     int height = 0;
@@ -20,7 +28,12 @@ struct SelectionMask {
     void clear();
     void select_all();
     void select_rect(int x0, int y0, int x1, int y1, bool replace = true);
+    void select_rect(int x0, int y0, int x1, int y1, SelectionCombineMode mode);
     void select_polygon(const std::vector<std::array<int, 2>>& points, bool replace = true);
+    void select_polygon(const std::vector<std::array<int, 2>>& points, SelectionCombineMode mode);
+    void combine_with_mask(const std::vector<std::uint8_t>& source, SelectionCombineMode mode);
+    void invert();
+    void translate(int dx, int dy);
     bool contains(int x, int y) const;
     int selected_count() const;
     std::optional<std::array<int, 4>> bounds() const;

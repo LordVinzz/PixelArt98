@@ -69,6 +69,47 @@ ImTextureID gl_texture_id(unsigned int id) {
     return static_cast<ImTextureID>(static_cast<unsigned long long>(id));
 }
 
+bool action_modifier_down(const ImGuiIO& io) {
+    return io.KeyCtrl || io.KeySuper;
+}
+
+bool shortcut_ctrl_or_super(ImGuiKey key) {
+    return ImGui::Shortcut(ImGuiMod_Ctrl | key) || ImGui::Shortcut(ImGuiMod_Super | key);
+}
+
+SelectionCombineMode selection_mode_from_input(const ImGuiIO& io, bool right_button) {
+    const bool action_modifier = action_modifier_down(io);
+    if (right_button && action_modifier) {
+        return SelectionCombineMode::Invert;
+    }
+    if (right_button && io.KeyAlt) {
+        return SelectionCombineMode::Intersect;
+    }
+    if (action_modifier) {
+        return SelectionCombineMode::Add;
+    }
+    if (io.KeyAlt) {
+        return SelectionCombineMode::Subtract;
+    }
+    return SelectionCombineMode::Replace;
+}
+
+const char* selection_undo_name(const char* base, SelectionCombineMode mode) {
+    switch (mode) {
+        case SelectionCombineMode::Replace:
+            return base;
+        case SelectionCombineMode::Add:
+            return "Add to Selection";
+        case SelectionCombineMode::Subtract:
+            return "Subtract from Selection";
+        case SelectionCombineMode::Intersect:
+            return "Intersect Selection";
+        case SelectionCombineMode::Invert:
+            return "Invert Selection";
+    }
+    return base;
+}
+
 float radians(float degrees) {
     return degrees * 3.14159265358979323846f / 180.0f;
 }
@@ -696,6 +737,35 @@ bool EditorApp::accept_dialog_result(const DialogResult& result, std::string& ou
     return true;
 }
 
+void EditorApp::clear_selection(const char* undo_name) {
+    if (!document_.selection.active) {
+        return;
+    }
+    const SelectionMask before = document_.selection;
+    document_.selection.clear();
+    document_.commit_selection_edit(undo_name, before);
+}
+
+void EditorApp::nudge_canvas_selection(int dx, int dy) {
+    if (dx == 0 && dy == 0) {
+        return;
+    }
+    if (tool_.tool == ToolType::MovePixels && document_.selection.active && !document_.floating_selection.active) {
+        std::vector<Pixel> before = document_.snapshot_active_cel();
+        if (document_.begin_floating_selection()) {
+            document_.move_floating_selection(dx, dy);
+            document_.commit_floating_selection("Nudge Selected Pixels", std::move(before));
+            texture_dirty_ = true;
+        }
+        return;
+    }
+    if (document_.selection.active && !document_.floating_selection.active) {
+        const SelectionMask before = document_.selection;
+        document_.selection.translate(dx, dy);
+        document_.commit_selection_edit("Nudge Selection", before);
+    }
+}
+
 void EditorApp::draw_dockspace() {
     ImGuiID dockspace_id = ImGui::GetID("PixelArt98Dockspace");
     ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1145,9 +1215,24 @@ void EditorApp::draw_canvas() {
 }
 
 void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool hovered) {
+    ImGuiIO& io = ImGui::GetIO();
     int px_i = 0;
     int py_i = 0;
     bool over_pixel = hovered && mouse_to_pixel(origin, px_i, py_i);
+    const bool can_use_canvas_shortcuts = !text_box_.active && !io.WantTextInput && !ImGui::IsAnyItemActive();
+
+    if (hovered && action_modifier_down(io) && io.MouseWheel != 0.0f) {
+        zoom_ = std::clamp(pixel_zoom(zoom_) + io.MouseWheel, 1.0f, 64.0f);
+    }
+    const bool space_down = ImGui::IsKeyDown(ImGuiKey_Space);
+    if (hovered && space_down && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
+        ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
+        ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+        return;
+    }
+    if (hovered && space_down && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        return;
+    }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         if (pixel_drag_preview_active_) {
@@ -1161,28 +1246,83 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
         } else if (text_box_.active) {
             cancel_text_box();
         } else if (document_.selection.active) {
-            auto before = document_.selection;
-            document_.selection.clear();
-            document_.commit_selection_edit("Clear Selection", before);
+            clear_selection("Clear Selection");
         }
     }
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z)) {
+    if (shortcut_ctrl_or_super(ImGuiKey_Z)) {
         texture_dirty_ = document_.undo() || texture_dirty_;
     }
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y)) {
+    if (shortcut_ctrl_or_super(ImGuiKey_Y) ||
+        ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z) ||
+        ImGui::Shortcut(ImGuiMod_Super | ImGuiMod_Shift | ImGuiKey_Z)) {
         texture_dirty_ = document_.redo() || texture_dirty_;
     }
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_A)) {
+    if (!io.WantTextInput && shortcut_ctrl_or_super(ImGuiKey_A)) {
         auto before = document_.selection;
         document_.selection.select_all();
         document_.commit_selection_edit("Select All", before);
     }
+    if (!io.WantTextInput && shortcut_ctrl_or_super(ImGuiKey_D)) {
+        clear_selection("Deselect");
+    }
+    if (!io.WantTextInput && shortcut_ctrl_or_super(ImGuiKey_I)) {
+        const SelectionMask before = document_.selection;
+        document_.selection.invert();
+        document_.commit_selection_edit("Invert Selection", before);
+    }
+    if (can_use_canvas_shortcuts && (shortcut_ctrl_or_super(ImGuiKey_Equal) || shortcut_ctrl_or_super(ImGuiKey_KeypadAdd))) {
+        zoom_ = std::min(64.0f, pixel_zoom(zoom_) + 1.0f);
+    }
+    if (can_use_canvas_shortcuts && (shortcut_ctrl_or_super(ImGuiKey_Minus) || shortcut_ctrl_or_super(ImGuiKey_KeypadSubtract))) {
+        zoom_ = std::max(1.0f, pixel_zoom(zoom_) - 1.0f);
+    }
+    if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_0)) {
+        zoom_ = 12.0f;
+    }
     if (text_box_.active && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))) {
         commit_text_box();
+    }
+    if (!text_box_.active && can_use_canvas_shortcuts &&
+        (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))) {
+        clear_selection("Deselect");
     }
     if (!text_box_.active && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() &&
         (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace))) {
         delete_selection_contents();
+    }
+    if (can_use_canvas_shortcuts) {
+        int nudge_x = 0;
+        int nudge_y = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true)) {
+            --nudge_x;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true)) {
+            ++nudge_x;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)) {
+            --nudge_y;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) {
+            ++nudge_y;
+        }
+        if (nudge_x != 0 || nudge_y != 0) {
+            if (space_down) {
+                constexpr float kKeyboardPanStep = 24.0f;
+                ImGui::SetScrollX(ImGui::GetScrollX() + static_cast<float>(nudge_x) * kKeyboardPanStep);
+                ImGui::SetScrollY(ImGui::GetScrollY() + static_cast<float>(nudge_y) * kKeyboardPanStep);
+            } else {
+                const int step = action_modifier_down(io) ? 10 : 1;
+                nudge_canvas_selection(nudge_x * step, nudge_y * step);
+            }
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, true)) {
+            const int step = action_modifier_down(io) ? 5 : 1;
+            tool_.brush_size = std::max(1, tool_.brush_size - step);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_RightBracket, true)) {
+            const int step = action_modifier_down(io) ? 5 : 1;
+            tool_.brush_size = std::min(128, tool_.brush_size + step);
+        }
     }
 
     if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && tool_.tool == ToolType::CloneStamp) {
@@ -1191,8 +1331,42 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
         set_status("Clone source set");
     }
 
+    if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && tool_.tool == ToolType::Bucket) {
+        fill_bucket(document_, px_i, py_i, tool_.secondary, tool_.tolerance, tool_.contiguous != io.KeyShift);
+        texture_dirty_ = true;
+        drag_active_ = false;
+    }
+
+    if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && tool_.tool == ToolType::MagicWand) {
+        selection_before_ = document_.selection;
+        const SelectionCombineMode mode = selection_mode_from_input(io, true);
+        magic_wand(document_, px_i, py_i, tool_.tolerance, tool_.contiguous != io.KeyShift, mode);
+        document_.commit_selection_edit(selection_undo_name("Magic Wand", mode), selection_before_);
+        drag_active_ = false;
+    }
+
+    if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
+        (tool_.tool == ToolType::RectSelect || tool_.tool == ToolType::LassoSelect)) {
+        drag_active_ = true;
+        canvas_drag_button_ = ImGuiMouseButton_Right;
+        drag_start_x_ = px_i;
+        drag_start_y_ = py_i;
+        drag_current_x_ = px_i;
+        drag_current_y_ = py_i;
+        last_x_ = px_i;
+        last_y_ = py_i;
+        selection_before_ = document_.selection;
+        selection_drag_mode_ = selection_mode_from_input(io, true);
+        if (tool_.tool == ToolType::LassoSelect) {
+            lasso_points_.clear();
+            lasso_points_.push_back({px_i, py_i});
+            lasso_active_ = true;
+        }
+    }
+
     if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         drag_active_ = true;
+        canvas_drag_button_ = ImGuiMouseButton_Left;
         drag_start_x_ = px_i;
         drag_start_y_ = py_i;
         drag_current_x_ = px_i;
@@ -1210,7 +1384,7 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
                 texture_dirty_ = true;
                 break;
             case ToolType::Bucket:
-                fill_bucket(document_, px_i, py_i, tool_.primary, tool_.tolerance, tool_.contiguous);
+                fill_bucket(document_, px_i, py_i, tool_.primary, tool_.tolerance, tool_.contiguous != io.KeyShift);
                 texture_dirty_ = true;
                 drag_active_ = false;
                 break;
@@ -1223,8 +1397,9 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
                 break;
             case ToolType::MagicWand:
                 selection_before_ = document_.selection;
-                magic_wand(document_, px_i, py_i, tool_.tolerance, tool_.contiguous, true);
-                document_.commit_selection_edit("Magic Wand", selection_before_);
+                selection_drag_mode_ = selection_mode_from_input(io, false);
+                magic_wand(document_, px_i, py_i, tool_.tolerance, tool_.contiguous != io.KeyShift, selection_drag_mode_);
+                document_.commit_selection_edit(selection_undo_name("Magic Wand", selection_drag_mode_), selection_before_);
                 drag_active_ = false;
                 break;
             case ToolType::CloneStamp:
@@ -1264,12 +1439,14 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
                 break;
             case ToolType::LassoSelect:
                 selection_before_ = document_.selection;
+                selection_drag_mode_ = selection_mode_from_input(io, false);
                 lasso_points_.clear();
                 lasso_points_.push_back({px_i, py_i});
                 lasso_active_ = true;
                 break;
             case ToolType::RectSelect:
                 selection_before_ = document_.selection;
+                selection_drag_mode_ = selection_mode_from_input(io, false);
                 break;
             case ToolType::Line:
             case ToolType::Rectangle:
@@ -1284,7 +1461,7 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
         }
     }
 
-    if (drag_active_ && over_pixel && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    if (drag_active_ && over_pixel && ImGui::IsMouseDown(static_cast<ImGuiMouseButton>(canvas_drag_button_))) {
         drag_current_x_ = px_i;
         drag_current_y_ = py_i;
     }
@@ -1311,7 +1488,7 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
         document_.move_floating_selection(px_i - move_start_x_, py_i - move_start_y_);
     }
 
-    if (lasso_active_ && over_pixel && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    if (lasso_active_ && over_pixel && ImGui::IsMouseDown(static_cast<ImGuiMouseButton>(canvas_drag_button_))) {
         if (lasso_points_.empty() || lasso_points_.back()[0] != px_i || lasso_points_.back()[1] != py_i) {
             lasso_points_.push_back({px_i, py_i});
         }
@@ -1329,10 +1506,10 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
         move_drag_active_ = false;
         drag_active_ = false;
         texture_dirty_ = true;
-    } else if (lasso_active_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+    } else if (lasso_active_ && ImGui::IsMouseReleased(static_cast<ImGuiMouseButton>(canvas_drag_button_))) {
         if (lasso_points_.size() >= 3) {
-            document_.selection.select_polygon(lasso_points_, true);
-            document_.commit_selection_edit("Lasso Selection", selection_before_);
+            document_.selection.select_polygon(lasso_points_, selection_drag_mode_);
+            document_.commit_selection_edit(selection_undo_name("Lasso Selection", selection_drag_mode_), selection_before_);
         }
         lasso_points_.clear();
         lasso_active_ = false;
@@ -1340,7 +1517,7 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
     } else if (pixel_drag_preview_active_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         update_pixel_drag_preview();
         commit_pixel_drag_preview();
-    } else if (drag_active_ && over_pixel && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+    } else if (drag_active_ && over_pixel && ImGui::IsMouseReleased(static_cast<ImGuiMouseButton>(canvas_drag_button_))) {
         finish_drag(px_i, py_i);
     }
 }
@@ -1353,8 +1530,10 @@ bool EditorApp::mouse_to_pixel(const ImVec2& origin, int& out_x, int& out_y) con
 }
 
 void EditorApp::finish_drag(int x, int y) {
+    const bool constrain = tool_.tool == ToolType::RectSelect ? ImGui::GetIO().KeyShift
+                                                              : action_modifier_down(ImGui::GetIO());
     const auto constrained_end =
-        constrained_tool_endpoint(tool_.tool, drag_start_x_, drag_start_y_, x, y, ImGui::GetIO().KeyCtrl);
+        constrained_tool_endpoint(tool_.tool, drag_start_x_, drag_start_y_, x, y, constrain);
     const int end_x = constrained_end[0];
     const int end_y = constrained_end[1];
     switch (tool_.tool) {
@@ -1389,8 +1568,8 @@ void EditorApp::finish_drag(int x, int y) {
             texture_dirty_ = true;
             break;
         case ToolType::RectSelect:
-            document_.selection.select_rect(drag_start_x_, drag_start_y_, x, y, true);
-            document_.commit_selection_edit("Rectangle Selection", selection_before_);
+            document_.selection.select_rect(drag_start_x_, drag_start_y_, end_x, end_y, selection_drag_mode_);
+            document_.commit_selection_edit(selection_undo_name("Rectangle Selection", selection_drag_mode_), selection_before_);
             break;
         default:
             break;
@@ -1415,7 +1594,7 @@ void EditorApp::update_pixel_drag_preview() {
                                                           drag_start_y_,
                                                           drag_current_x_,
                                                           drag_current_y_,
-                                                          ImGui::GetIO().KeyCtrl);
+                                                          action_modifier_down(ImGui::GetIO()));
     const int end_x = constrained_end[0];
     const int end_y = constrained_end[1];
     switch (tool_.tool) {
@@ -1662,7 +1841,13 @@ void EditorApp::draw_tool_drag_preview(ImDrawList* draw_list, const ImVec2& orig
 
     ImVec2 min_pos;
     ImVec2 max_pos;
-    pixel_rect(drag_start_x_, drag_start_y_, drag_current_x_, drag_current_y_, min_pos, max_pos);
+    const auto constrained_end = constrained_tool_endpoint(ToolType::RectSelect,
+                                                          drag_start_x_,
+                                                          drag_start_y_,
+                                                          drag_current_x_,
+                                                          drag_current_y_,
+                                                          ImGui::GetIO().KeyShift);
+    pixel_rect(drag_start_x_, drag_start_y_, constrained_end[0], constrained_end[1], min_pos, max_pos);
 
     draw_list->AddRectFilled(min_pos, max_pos, selection_fill);
     draw_list->AddRect(min_pos, max_pos, shadow, 0.0f, 0, 3.0f);

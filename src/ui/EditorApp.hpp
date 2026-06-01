@@ -116,6 +116,8 @@ private:
     int model_transform_mode_ = 0;
     int model_transform_axis_ = 0;
     int model_transform_hover_axis_ = -1;
+    int canvas_drag_button_ = ImGuiMouseButton_Left;
+    SelectionCombineMode selection_drag_mode_ = SelectionCombineMode::Replace;
     EffectPreviewKind effect_preview_kind_ = EffectPreviewKind::None;
     int drag_start_x_ = 0;
     int drag_start_y_ = 0;
@@ -198,6 +200,8 @@ private:
     DialogResult open_file_dialog(FileFilterList filters, const char* remembered_path);
     DialogResult save_file_dialog(FileFilterList filters, const char* remembered_path);
     bool accept_dialog_result(const DialogResult& result, std::string& out_path);
+    void clear_selection(const char* undo_name);
+    void nudge_canvas_selection(int dx, int dy);
 
     void handle_canvas_input(const ImVec2& origin, const ImVec2& size, bool hovered);
     bool mouse_to_pixel(const ImVec2& origin, int& out_x, int& out_y) const;

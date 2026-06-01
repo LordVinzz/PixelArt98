@@ -70,6 +70,7 @@ void fill_bucket(Document& doc, int x, int y, Pixel color, int tolerance, bool c
 void fill_gradient(Document& doc, int x0, int y0, int x1, int y1, Pixel a, Pixel b);
 std::optional<Pixel> pick_color(const Document& doc, int x, int y);
 void magic_wand(Document& doc, int x, int y, int tolerance, bool contiguous, bool replace = true);
+void magic_wand(Document& doc, int x, int y, int tolerance, bool contiguous, SelectionCombineMode mode);
 void clone_stamp_raw(Document& doc, const std::vector<Pixel>& source, int sx, int sy, int dx, int dy, int brush_size);
 void clone_stamp(Document& doc, int sx, int sy, int dx, int dy, int brush_size);
 std::vector<std::array<int, 2>> raster_text_points(int x, int y, const std::string& text);

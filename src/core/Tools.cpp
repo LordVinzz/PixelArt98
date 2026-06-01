@@ -55,7 +55,8 @@ std::array<int, 2> constrained_tool_endpoint(ToolType tool,
 
     switch (tool) {
         case ToolType::Rectangle:
-        case ToolType::Ellipse: {
+        case ToolType::Ellipse:
+        case ToolType::RectSelect: {
             const int side = std::max(std::abs(dx), std::abs(dy));
             return {start_x + positive_when_zero_sign(dx) * side,
                     start_y + positive_when_zero_sign(dy) * side};
@@ -377,26 +378,28 @@ std::optional<Pixel> pick_color(const Document& doc, int x, int y) {
 }
 
 void magic_wand(Document& doc, int x, int y, int tolerance, bool contiguous, bool replace) {
+    magic_wand(doc, x, y, tolerance, contiguous, replace ? SelectionCombineMode::Replace : SelectionCombineMode::Add);
+}
+
+void magic_wand(Document& doc, int x, int y, int tolerance, bool contiguous, SelectionCombineMode mode) {
     if (!doc.in_bounds(x, y)) {
         return;
-    }
-    if (replace) {
-        doc.selection.clear();
     }
 
     const auto& pixels = doc.active_cel().pixels;
     Pixel target = pixels[static_cast<std::size_t>(doc.pixel_index(x, y))];
-    doc.selection.active = true;
+    std::vector<std::uint8_t> source(static_cast<std::size_t>(doc.width * doc.height), 0);
 
     if (!contiguous) {
         for (int py = 0; py < doc.height; ++py) {
             for (int px_i = 0; px_i < doc.width; ++px_i) {
                 std::size_t i = static_cast<std::size_t>(doc.pixel_index(px_i, py));
                 if (color_matches(pixels[i], target, tolerance)) {
-                    doc.selection.mask[i] = 1;
+                    source[i] = 1;
                 }
             }
         }
+        doc.selection.combine_with_mask(source, mode);
         return;
     }
 
@@ -411,7 +414,7 @@ void magic_wand(Document& doc, int x, int y, int tolerance, bool contiguous, boo
         if (!color_matches(pixels[i], target, tolerance)) {
             continue;
         }
-        doc.selection.mask[i] = 1;
+        source[i] = 1;
         constexpr int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
         for (const auto& dir : dirs) {
             int nx = cx + dir[0];
@@ -425,7 +428,7 @@ void magic_wand(Document& doc, int x, int y, int tolerance, bool contiguous, boo
             }
         }
     }
-    doc.selection.active = doc.selection.selected_count() > 0;
+    doc.selection.combine_with_mask(source, mode);
 }
 
 void clone_stamp(Document& doc, int sx, int sy, int dx, int dy, int brush_size) {

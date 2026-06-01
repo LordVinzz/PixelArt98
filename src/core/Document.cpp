@@ -24,34 +24,38 @@ void SelectionMask::select_all() {
 }
 
 void SelectionMask::select_rect(int x0, int y0, int x1, int y1, bool replace) {
-    if (replace) {
-        std::fill(mask.begin(), mask.end(), 0);
-    }
+    select_rect(x0, y0, x1, y1, replace ? SelectionCombineMode::Replace : SelectionCombineMode::Add);
+}
+
+void SelectionMask::select_rect(int x0, int y0, int x1, int y1, SelectionCombineMode mode) {
     if (width <= 0 || height <= 0) {
         active = false;
         return;
     }
+    std::vector<std::uint8_t> source(mask.size(), 0);
     int min_x = std::clamp(std::min(x0, x1), 0, width - 1);
     int max_x = std::clamp(std::max(x0, x1), 0, width - 1);
     int min_y = std::clamp(std::min(y0, y1), 0, height - 1);
     int max_y = std::clamp(std::max(y0, y1), 0, height - 1);
     for (int y = min_y; y <= max_y; ++y) {
         for (int x = min_x; x <= max_x; ++x) {
-            mask[static_cast<std::size_t>(y * width + x)] = 1;
+            source[static_cast<std::size_t>(y * width + x)] = 1;
         }
     }
-    active = selected_count() > 0;
+    combine_with_mask(source, mode);
 }
 
 void SelectionMask::select_polygon(const std::vector<std::array<int, 2>>& points, bool replace) {
-    if (replace) {
-        std::fill(mask.begin(), mask.end(), 0);
-    }
+    select_polygon(points, replace ? SelectionCombineMode::Replace : SelectionCombineMode::Add);
+}
+
+void SelectionMask::select_polygon(const std::vector<std::array<int, 2>>& points, SelectionCombineMode mode) {
     if (points.size() < 3 || width <= 0 || height <= 0) {
         active = selected_count() > 0;
         return;
     }
 
+    std::vector<std::uint8_t> source(mask.size(), 0);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             float px = static_cast<float>(x) + 0.5f;
@@ -69,10 +73,73 @@ void SelectionMask::select_polygon(const std::vector<std::array<int, 2>>& points
                 }
             }
             if (inside) {
-                mask[static_cast<std::size_t>(y * width + x)] = 1;
+                source[static_cast<std::size_t>(y * width + x)] = 1;
             }
         }
     }
+    combine_with_mask(source, mode);
+}
+
+void SelectionMask::combine_with_mask(const std::vector<std::uint8_t>& source, SelectionCombineMode mode) {
+    if (source.size() != mask.size()) {
+        return;
+    }
+    switch (mode) {
+        case SelectionCombineMode::Replace:
+            mask = source;
+            break;
+        case SelectionCombineMode::Add:
+            for (std::size_t i = 0; i < mask.size(); ++i) {
+                mask[i] = static_cast<std::uint8_t>(mask[i] != 0 || source[i] != 0);
+            }
+            break;
+        case SelectionCombineMode::Subtract:
+            for (std::size_t i = 0; i < mask.size(); ++i) {
+                if (source[i] != 0) {
+                    mask[i] = 0;
+                }
+            }
+            break;
+        case SelectionCombineMode::Intersect:
+            for (std::size_t i = 0; i < mask.size(); ++i) {
+                mask[i] = static_cast<std::uint8_t>(mask[i] != 0 && source[i] != 0);
+            }
+            break;
+        case SelectionCombineMode::Invert:
+            for (std::size_t i = 0; i < mask.size(); ++i) {
+                if (source[i] != 0) {
+                    mask[i] = static_cast<std::uint8_t>(mask[i] == 0);
+                }
+            }
+            break;
+    }
+    active = selected_count() > 0;
+}
+
+void SelectionMask::invert() {
+    for (auto& value : mask) {
+        value = static_cast<std::uint8_t>(value == 0);
+    }
+    active = selected_count() > 0;
+}
+
+void SelectionMask::translate(int dx, int dy) {
+    if (!active || (dx == 0 && dy == 0) || width <= 0 || height <= 0) {
+        return;
+    }
+    std::vector<std::uint8_t> translated(mask.size(), 0);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int src_x = x - dx;
+            const int src_y = y - dy;
+            if (src_x < 0 || src_y < 0 || src_x >= width || src_y >= height) {
+                continue;
+            }
+            translated[static_cast<std::size_t>(y * width + x)] =
+                mask[static_cast<std::size_t>(src_y * width + src_x)];
+        }
+    }
+    mask = std::move(translated);
     active = selected_count() > 0;
 }
 
