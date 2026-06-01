@@ -1170,6 +1170,8 @@ void EditorApp::draw_canvas() {
     float z = pixel_zoom(zoom_);
     ImVec2 canvas_size(pixel_scale(document_.width, z), pixel_scale(document_.height, z));
     ImGui::BeginChild("CanvasScroll", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+    const bool canvas_active = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) ||
+                               ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     ImVec2 origin = floor_screen_pos(ImGui::GetCursorScreenPos());
     ImGui::InvisibleButton("CanvasHitTarget", canvas_size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
     bool hovered = ImGui::IsItemHovered();
@@ -1208,33 +1210,33 @@ void EditorApp::draw_canvas() {
     draw_selection_overlay(draw_list, origin);
     draw_lasso_preview(draw_list, origin);
     draw_tool_drag_preview(draw_list, origin);
-    handle_canvas_input(origin, canvas_size, hovered);
+    handle_canvas_input(origin, canvas_size, hovered, canvas_active);
     draw_list->Flags = old_flags;
     ImGui::EndChild();
     ImGui::End();
 }
 
-void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool hovered) {
+void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool image_hovered, bool canvas_active) {
     ImGuiIO& io = ImGui::GetIO();
     int px_i = 0;
     int py_i = 0;
-    bool over_pixel = hovered && mouse_to_pixel(origin, px_i, py_i);
-    const bool can_use_canvas_shortcuts = !text_box_.active && !io.WantTextInput && !ImGui::IsAnyItemActive();
+    bool over_pixel = image_hovered && mouse_to_pixel(origin, px_i, py_i);
+    const bool can_use_canvas_shortcuts = canvas_active && !text_box_.active && !io.WantTextInput && !ImGui::IsAnyItemActive();
 
-    if (hovered && action_modifier_down(io) && io.MouseWheel != 0.0f) {
+    if (canvas_active && action_modifier_down(io) && io.MouseWheel != 0.0f) {
         zoom_ = std::clamp(pixel_zoom(zoom_) + io.MouseWheel, 1.0f, 64.0f);
     }
     const bool space_down = ImGui::IsKeyDown(ImGuiKey_Space);
-    if (hovered && space_down && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
+    if (canvas_active && space_down && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
         ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
         ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
         return;
     }
-    if (hovered && space_down && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    if (canvas_active && space_down && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         return;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+    if (canvas_active && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         if (pixel_drag_preview_active_) {
             cancel_pixel_drag_preview();
         } else if (document_.floating_selection.active) {
@@ -1249,23 +1251,23 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool ho
             clear_selection("Clear Selection");
         }
     }
-    if (shortcut_ctrl_or_super(ImGuiKey_Z)) {
+    if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_Z)) {
         texture_dirty_ = document_.undo() || texture_dirty_;
     }
-    if (shortcut_ctrl_or_super(ImGuiKey_Y) ||
+    if (can_use_canvas_shortcuts && (shortcut_ctrl_or_super(ImGuiKey_Y) ||
         ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z) ||
-        ImGui::Shortcut(ImGuiMod_Super | ImGuiMod_Shift | ImGuiKey_Z)) {
+        ImGui::Shortcut(ImGuiMod_Super | ImGuiMod_Shift | ImGuiKey_Z))) {
         texture_dirty_ = document_.redo() || texture_dirty_;
     }
-    if (!io.WantTextInput && shortcut_ctrl_or_super(ImGuiKey_A)) {
+    if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_A)) {
         auto before = document_.selection;
         document_.selection.select_all();
         document_.commit_selection_edit("Select All", before);
     }
-    if (!io.WantTextInput && shortcut_ctrl_or_super(ImGuiKey_D)) {
+    if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_D)) {
         clear_selection("Deselect");
     }
-    if (!io.WantTextInput && shortcut_ctrl_or_super(ImGuiKey_I)) {
+    if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_I)) {
         const SelectionMask before = document_.selection;
         document_.selection.invert();
         document_.commit_selection_edit("Invert Selection", before);

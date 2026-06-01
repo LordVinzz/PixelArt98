@@ -203,7 +203,7 @@ private:
     void clear_selection(const char* undo_name);
     void nudge_canvas_selection(int dx, int dy);
 
-    void handle_canvas_input(const ImVec2& origin, const ImVec2& size, bool hovered);
+    void handle_canvas_input(const ImVec2& origin, const ImVec2& size, bool image_hovered, bool canvas_active);
     bool mouse_to_pixel(const ImVec2& origin, int& out_x, int& out_y) const;
     void finish_drag(int x, int y);
     void commit_stroke();
