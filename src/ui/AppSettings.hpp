@@ -7,6 +7,7 @@ namespace px {
 
 struct AppSettings {
     bool show_splash_screen = true;
+    bool auto_open_error_console = true;
 };
 
 [[nodiscard]] std::filesystem::path default_app_settings_path();

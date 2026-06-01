@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace px {
@@ -395,7 +396,21 @@ void draw_line_vertices(unsigned int shader_program,
     glBindVertexArray(0);
 }
 
-unsigned int compile_shader(unsigned int type, const char* source) {
+const char* shader_type_name(unsigned int type) {
+    if (type == GL_VERTEX_SHADER) {
+        return "vertex";
+    }
+    if (type == GL_FRAGMENT_SHADER) {
+        return "fragment";
+    }
+    return "unknown";
+}
+
+void set_error(std::string& target, const std::string& value) {
+    target = value;
+}
+
+unsigned int compile_shader(unsigned int type, const char* source, std::string& error) {
     unsigned int shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
     glCompileShader(shader);
@@ -404,7 +419,8 @@ unsigned int compile_shader(unsigned int type, const char* source) {
     if (!ok) {
         char log[1024]{};
         glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "Renderer3D shader compile failed: %s\n", log);
+        set_error(error, std::string("Renderer3D ") + shader_type_name(type) + " shader compile failed: " + log);
+        std::fprintf(stderr, "%s\n", error.c_str());
         glDeleteShader(shader);
         return 0;
     }
@@ -473,6 +489,7 @@ bool Renderer3D::ensure_program() {
     if (shader_program_ != 0) {
         return true;
     }
+    last_error_.clear();
     const char* vertex_source = R"GLSL(
         #version 330 core
         layout(location = 0) in vec3 in_pos;
@@ -511,8 +528,8 @@ bool Renderer3D::ensure_program() {
             out_color = color;
         }
     )GLSL";
-    unsigned int vs = compile_shader(GL_VERTEX_SHADER, vertex_source);
-    unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, fragment_source);
+    unsigned int vs = compile_shader(GL_VERTEX_SHADER, vertex_source, last_error_);
+    unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, fragment_source, last_error_);
     if (vs == 0 || fs == 0) {
         if (vs) glDeleteShader(vs);
         if (fs) glDeleteShader(fs);
@@ -529,7 +546,8 @@ bool Renderer3D::ensure_program() {
     if (!ok) {
         char log[1024]{};
         glGetProgramInfoLog(shader_program_, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "Renderer3D shader link failed: %s\n", log);
+        set_error(last_error_, std::string("Renderer3D shader link failed: ") + log);
+        std::fprintf(stderr, "%s\n", last_error_.c_str());
         glDeleteProgram(shader_program_);
         shader_program_ = 0;
         return false;
@@ -565,7 +583,12 @@ bool Renderer3D::ensure_target(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_texture_, 0);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_buffer_);
-    return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    const GLenum framebuffer_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (framebuffer_status != GL_FRAMEBUFFER_COMPLETE) {
+        set_error(last_error_, "Renderer3D framebuffer is incomplete: status " + std::to_string(framebuffer_status));
+        return false;
+    }
+    return true;
 }
 
 bool Renderer3D::render_model_to_texture(const ModelDocument& model,

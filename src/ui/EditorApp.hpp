@@ -13,6 +13,7 @@
 
 #include <array>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace px {
@@ -60,6 +61,12 @@ enum class EffectPreviewKind {
     Relief
 };
 
+struct ErrorConsoleEntry {
+    int sequence = 0;
+    std::string context;
+    std::string details;
+};
+
 class EditorApp {
 public:
     explicit EditorApp(FileDialogProvider* dialogs = nullptr, AppSettings settings = {});
@@ -102,6 +109,9 @@ private:
     bool effect_preview_active_ = false;
     bool effect_preview_dirty_ = false;
     bool effect_preview_popup_requested_ = false;
+    bool error_console_open_ = false;
+    bool error_console_scroll_to_bottom_ = false;
+    bool model_render_error_reported_ = false;
     int uv_drag_mode_ = 0;
     int model_transform_mode_ = 0;
     int model_transform_axis_ = 0;
@@ -127,6 +137,7 @@ private:
     std::vector<Pixel> clone_source_pixels_;
     SelectionMask selection_before_;
     std::vector<std::array<int, 2>> lasso_points_;
+    std::vector<ErrorConsoleEntry> error_console_entries_;
     TextBox text_box_;
     Document effect_preview_document_;
 
@@ -144,6 +155,7 @@ private:
     char tag_name_[96] = "Tag";
     char text_buffer_[128] = "TEXT";
     char status_[512] = "Ready";
+    int error_console_sequence_ = 0;
 
     int new_width_ = 64;
     int new_height_ = 64;
@@ -166,6 +178,7 @@ private:
     void update_playback();
     void refresh_texture();
     void set_status(const std::string& status);
+    void report_error(std::string_view context, std::string_view details);
     void save_settings();
 
     void draw_dockspace();
@@ -179,6 +192,7 @@ private:
     void draw_model_panel();
     void draw_model_preview_window();
     void draw_effect_preview_popup();
+    void draw_error_console();
     void draw_status_bar();
 
     DialogResult open_file_dialog(FileFilterList filters, const char* remembered_path);

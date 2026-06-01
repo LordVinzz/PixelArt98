@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -597,6 +598,7 @@ void EditorApp::render() {
     draw_model_panel();
     draw_model_preview_window();
     draw_effect_preview_popup();
+    draw_error_console();
     draw_status_bar();
 }
 
@@ -640,10 +642,26 @@ void EditorApp::set_status(const std::string& status) {
     std::snprintf(status_, sizeof(status_), "%s", status.c_str());
 }
 
+void EditorApp::report_error(std::string_view context, std::string_view details) {
+    constexpr std::size_t kMaxErrorEntries = 200;
+    const std::string status = details.empty() ? std::string(context) : std::string(details);
+    set_status(status);
+    error_console_entries_.push_back({++error_console_sequence_, std::string(context), std::string(details)});
+    if (error_console_entries_.size() > kMaxErrorEntries) {
+        const std::size_t extra_count = error_console_entries_.size() - kMaxErrorEntries;
+        error_console_entries_.erase(error_console_entries_.begin(),
+                                     error_console_entries_.begin() + static_cast<std::ptrdiff_t>(extra_count));
+    }
+    if (settings_.auto_open_error_console) {
+        error_console_open_ = true;
+        error_console_scroll_to_bottom_ = true;
+    }
+}
+
 void EditorApp::save_settings() {
     std::string error;
     if (!save_app_settings(settings_, &error)) {
-        set_status(error);
+        report_error("Save settings", error);
     }
 }
 
@@ -663,11 +681,15 @@ DialogResult EditorApp::save_file_dialog(FileFilterList filters, const char* rem
 
 bool EditorApp::accept_dialog_result(const DialogResult& result, std::string& out_path) {
     if (!result.accepted) {
-        set_status(result.error.empty() ? "File dialog canceled" : result.error);
+        if (result.error.empty()) {
+            set_status("File dialog canceled");
+        } else {
+            report_error("File dialog", result.error);
+        }
         return false;
     }
     if (result.path.empty()) {
-        set_status("No file selected");
+        report_error("File dialog", "No file selected");
         return false;
     }
     out_path = result.path;
@@ -704,7 +726,7 @@ void EditorApp::draw_main_menu() {
                 copy_path(project_path_, sizeof(project_path_), path);
                 std::string error;
                 if (save_project(path, document_, model_, &error)) set_status(std::string("Saved ") + path);
-                else set_status(error);
+                else report_error("Save project: " + path, error);
             }
         }
         if (ImGui::MenuItem("Load Project...")) {
@@ -719,7 +741,7 @@ void EditorApp::draw_main_menu() {
                     texture_dirty_ = true;
                     set_status(std::string("Loaded ") + path);
                 } else {
-                    set_status(error);
+                    report_error("Load project: " + path, error);
                 }
             }
         }
@@ -738,7 +760,7 @@ void EditorApp::draw_main_menu() {
                     texture_dirty_ = true;
                     set_status(std::string("Imported ") + path);
                 } else {
-                    set_status(error);
+                    report_error("Import image as document: " + path, error);
                 }
             }
         }
@@ -751,7 +773,7 @@ void EditorApp::draw_main_menu() {
                     texture_dirty_ = true;
                     set_status(std::string("Imported image layer ") + path);
                 } else {
-                    set_status(error);
+                    report_error("Import image as layer: " + path, error);
                 }
             }
         }
@@ -763,7 +785,7 @@ void EditorApp::draw_main_menu() {
                 copy_path(png_path_, sizeof(png_path_), path);
                 std::string error;
                 if (export_png(path, document_, document_.active_frame, &error)) set_status(std::string("Exported ") + path);
-                else set_status(error);
+                else report_error("Export current PNG: " + path, error);
             }
         }
         if (ImGui::MenuItem("Export Spritesheet...")) {
@@ -775,7 +797,7 @@ void EditorApp::draw_main_menu() {
                 copy_path(spritesheet_json_path_, sizeof(spritesheet_json_path_), json_path);
                 std::string error;
                 if (export_spritesheet(png_path, json_path, document_, &error)) set_status("Exported spritesheet");
-                else set_status(error);
+                else report_error("Export spritesheet: " + png_path, error);
             }
         }
         if (ImGui::MenuItem("Export GIF...")) {
@@ -785,7 +807,7 @@ void EditorApp::draw_main_menu() {
                 copy_path(gif_path_, sizeof(gif_path_), path);
                 std::string error;
                 if (export_gif(path, document_, &error)) set_status(std::string("Exported ") + path);
-                else set_status(error);
+                else report_error("Export GIF: " + path, error);
             }
         }
         if (ImGui::MenuItem("Export APNG...")) {
@@ -795,7 +817,7 @@ void EditorApp::draw_main_menu() {
                 copy_path(apng_path_, sizeof(apng_path_), path);
                 std::string error;
                 if (export_apng(path, document_, &error)) set_status(std::string("Exported ") + path);
-                else set_status(error);
+                else report_error("Export APNG: " + path, error);
             }
         }
         ImGui::Separator();
@@ -813,7 +835,7 @@ void EditorApp::draw_main_menu() {
                     texture_dirty_ = true;
                     set_status(std::string("Imported ") + path);
                 } else {
-                    set_status(error);
+                    report_error("Import Aseprite: " + path, error);
                 }
             }
         }
@@ -824,7 +846,7 @@ void EditorApp::draw_main_menu() {
                 copy_path(aseprite_path_, sizeof(aseprite_path_), path);
                 std::string error;
                 if (export_aseprite(path, document_, &error)) set_status(std::string("Exported ") + path);
-                else set_status(error);
+                else report_error("Export Aseprite: " + path, error);
             }
         }
         ImGui::Separator();
@@ -834,7 +856,7 @@ void EditorApp::draw_main_menu() {
                 copy_path(model_path_, sizeof(model_path_), path);
                 std::string error;
                 if (import_model_json(path, model_, &error)) set_status(std::string("Imported ") + path);
-                else set_status(error);
+                else report_error("Import model JSON: " + path, error);
             }
         }
         if (ImGui::MenuItem("Export Model JSON...")) {
@@ -844,7 +866,7 @@ void EditorApp::draw_main_menu() {
                 copy_path(model_path_, sizeof(model_path_), path);
                 std::string error;
                 if (export_model_json(path, model_, &error)) set_status(std::string("Exported ") + path);
-                else set_status(error);
+                else report_error("Export model JSON: " + path, error);
             }
         }
         if (ImGui::MenuItem("Import Minecraft Model...")) {
@@ -853,7 +875,7 @@ void EditorApp::draw_main_menu() {
                 copy_path(minecraft_model_path_, sizeof(minecraft_model_path_), path);
                 std::string error;
                 if (import_minecraft_model(path, model_, &error)) set_status(std::string("Imported ") + path);
-                else set_status(error);
+                else report_error("Import Minecraft model: " + path, error);
             }
         }
         if (ImGui::MenuItem("Export Minecraft Model...")) {
@@ -870,7 +892,7 @@ void EditorApp::draw_main_menu() {
                     ok = export_png(texture_path, document_, document_.active_frame, &error);
                 }
                 if (ok) set_status("Exported Minecraft model and texture");
-                else set_status(error);
+                else report_error("Export Minecraft model: " + model_path, error);
             }
         }
         ImGui::Separator();
@@ -1011,6 +1033,7 @@ void EditorApp::draw_main_menu() {
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Grid", nullptr, &show_grid_);
         ImGui::MenuItem("Checkerboard", nullptr, &show_checker_);
+        ImGui::MenuItem("Error Console", nullptr, &error_console_open_);
         int zoom_value = static_cast<int>(pixel_zoom(zoom_));
         if (ImGui::SliderInt("Zoom", &zoom_value, 1, 64, "%dx")) {
             zoom_ = static_cast<float>(zoom_value);
@@ -1019,6 +1042,9 @@ void EditorApp::draw_main_menu() {
     }
     if (ImGui::BeginMenu("Options")) {
         if (ImGui::MenuItem("Show Splash Screen", nullptr, &settings_.show_splash_screen)) {
+            save_settings();
+        }
+        if (ImGui::MenuItem("Auto-open Error Console", nullptr, &settings_.auto_open_error_console)) {
             save_settings();
         }
         ImGui::EndMenu();
@@ -2507,9 +2533,16 @@ void EditorApp::draw_model_preview() {
 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(38, 42, 46, 255));
-    if (renderer3d_.render_model_to_texture(model_, canvas_texture_.id(), document_.width, document_.height,
-                                            model_viewport_, static_cast<int>(size.x), static_cast<int>(size.y),
-                                            composite_)) {
+    const bool rendered_model = renderer3d_.render_model_to_texture(model_,
+                                                                    canvas_texture_.id(),
+                                                                    document_.width,
+                                                                    document_.height,
+                                                                    model_viewport_,
+                                                                    static_cast<int>(size.x),
+                                                                    static_cast<int>(size.y),
+                                                                    composite_);
+    if (rendered_model) {
+        model_render_error_reported_ = false;
         draw_list->AddImage(gl_texture_id(renderer3d_.texture_id()),
                             origin,
                             ImVec2(origin.x + size.x, origin.y + size.y),
@@ -2542,6 +2575,13 @@ void EditorApp::draw_model_preview() {
             }
         }
     } else {
+        if (!model_render_error_reported_) {
+            const std::string details = renderer3d_.last_error().empty()
+                                            ? "Renderer3D failed without returning a diagnostic message."
+                                            : renderer3d_.last_error();
+            report_error("3D preview render", details);
+            model_render_error_reported_ = true;
+        }
         draw_list->AddText(ImVec2(origin.x + 12, origin.y + 12), IM_COL32(255, 255, 255, 230), "OpenGL preview unavailable");
     }
     draw_list->AddRect(origin, ImVec2(origin.x + size.x, origin.y + size.y),
@@ -2609,6 +2649,63 @@ void EditorApp::draw_status_bar() {
                 document_.active_frame + 1, static_cast<int>(document_.frames.size()),
                 document_.active_layer + 1, static_cast<int>(document_.layers.size()),
                 tool_name(tool_.tool));
+    ImGui::End();
+}
+
+void EditorApp::draw_error_console() {
+    if (!error_console_open_) {
+        return;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 260.0f), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Error Console", &error_console_open_)) {
+        ImGui::TextDisabled("%d captured error%s",
+                            static_cast<int>(error_console_entries_.size()),
+                            error_console_entries_.size() == 1U ? "" : "s");
+        ImGui::SameLine();
+        if (ImGui::Button("Copy")) {
+            std::string text;
+            for (const ErrorConsoleEntry& entry : error_console_entries_) {
+                text += "#";
+                text += std::to_string(entry.sequence);
+                text += " ";
+                text += entry.context;
+                text += "\n";
+                if (!entry.details.empty()) {
+                    text += entry.details;
+                    text += "\n";
+                }
+                text += "\n";
+            }
+            ImGui::SetClipboardText(text.c_str());
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+            error_console_entries_.clear();
+        }
+
+        ImGui::Separator();
+        if (error_console_entries_.empty()) {
+            ImGui::TextDisabled("No errors captured.");
+        } else {
+            if (ImGui::BeginChild("ErrorConsoleScroll", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar)) {
+                for (const ErrorConsoleEntry& entry : error_console_entries_) {
+                    ImGui::PushID(entry.sequence);
+                    ImGui::TextColored(ImVec4(0.72f, 0.08f, 0.08f, 1.0f), "#%d %s", entry.sequence, entry.context.c_str());
+                    if (!entry.details.empty()) {
+                        ImGui::TextWrapped("%s", entry.details.c_str());
+                    }
+                    ImGui::Separator();
+                    ImGui::PopID();
+                }
+                if (error_console_scroll_to_bottom_) {
+                    ImGui::SetScrollHereY(1.0f);
+                    error_console_scroll_to_bottom_ = false;
+                }
+            }
+            ImGui::EndChild();
+        }
+    }
     ImGui::End();
 }
 

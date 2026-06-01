@@ -3,6 +3,7 @@
 #include "core/Model.hpp"
 #include "core/Pixel.hpp"
 
+#include <string>
 #include <vector>
 
 namespace px {
@@ -54,6 +55,7 @@ public:
     unsigned int texture_id() const { return color_texture_; }
     int width() const { return width_; }
     int height() const { return height_; }
+    [[nodiscard]] const std::string& last_error() const noexcept { return last_error_; }
 
 private:
     bool ensure_target(int width, int height);
@@ -68,6 +70,7 @@ private:
     int width_ = 0;
     int height_ = 0;
     bool initialized_ = false;
+    std::string last_error_;
 };
 
 } // namespace px

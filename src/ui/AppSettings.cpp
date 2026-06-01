@@ -41,6 +41,11 @@ AppSettings load_app_settings(const std::filesystem::path& path, std::string* er
         if (root.contains("show_splash_screen")) {
             settings.show_splash_screen = root.at("show_splash_screen").get<bool>();
         }
+        if (root.contains("auto_open_error_console")) {
+            settings.auto_open_error_console = root.at("auto_open_error_console").get<bool>();
+        } else if (root.contains("show_error_console")) {
+            settings.auto_open_error_console = root.at("show_error_console").get<bool>();
+        }
     } catch (const std::exception& exception) {
         set_error(error, std::string("Could not load settings: ") + exception.what());
     }
@@ -55,6 +60,7 @@ bool save_app_settings(const AppSettings& settings, const std::filesystem::path&
     try {
         nlohmann::json root;
         root["show_splash_screen"] = settings.show_splash_screen;
+        root["auto_open_error_console"] = settings.auto_open_error_console;
 
         std::ofstream file(path, std::ios::trunc);
         if (!file.is_open()) {

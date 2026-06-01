@@ -366,10 +366,12 @@ static void test_app_settings_roundtrip() {
     std::string error;
     AppSettings settings;
     settings.show_splash_screen = false;
+    settings.auto_open_error_console = false;
     assert(save_app_settings(settings, settings_path, &error));
 
     const AppSettings loaded = load_app_settings(settings_path, &error);
     assert(!loaded.show_splash_screen);
+    assert(!loaded.auto_open_error_console);
     std::filesystem::remove(settings_path);
 }
 
