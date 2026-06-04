@@ -198,6 +198,54 @@ static void test_animation_layers() {
     assert(doc.frames[0].cels.size() == 1);
 }
 
+static void test_layer_masks_and_clipping() {
+    auto doc = Document::create(2, 1);
+    doc.active_cel().pixels[0] = rgba(20, 20, 20, 255);
+    doc.active_cel().pixels[1] = rgba(20, 20, 20, 0);
+    doc.add_layer("Clipped");
+    doc.layers[1].mask_enabled = true;
+    doc.layers[1].clip_to_below = true;
+    doc.layers[1].mask = {255, 255};
+    doc.cel(0, 1).pixels[0] = rgba(200, 0, 0, 255);
+    doc.cel(0, 1).pixels[1] = rgba(0, 200, 0, 255);
+
+    auto clipped = doc.composite_active();
+    assert(r(clipped[0]) == 200);
+    assert(g(clipped[1]) == 0);
+    assert(a(clipped[1]) == 0);
+
+    doc.layers[1].clip_to_below = false;
+    doc.layers[1].mask[0] = 0;
+    auto masked = doc.composite_active();
+    assert(r(masked[0]) == 20);
+    assert(g(masked[1]) == 200);
+}
+
+static void test_mask_editing_tools() {
+    auto doc = Document::create(5, 3);
+    doc.active_cel().pixels[0] = rgba(255, 0, 0, 255);
+    doc.active_cel().pixels[static_cast<std::size_t>(doc.pixel_index(1, 0))] = rgba(255, 0, 0, 255);
+    doc.selection.select_rect(1, 0, 4, 2, true);
+
+    plot_mask_brush_raw(doc, 0, 0, 0, 1);
+    assert(!doc.layers[0].mask_enabled);
+    assert(doc.layers[0].mask.empty());
+    plot_mask_brush_raw(doc, 1, 0, 0, 1);
+    assert(doc.layers[0].mask_enabled);
+    assert(doc.layers[0].mask[static_cast<std::size_t>(doc.pixel_index(0, 0))] == 255);
+    assert(doc.layers[0].mask[static_cast<std::size_t>(doc.pixel_index(1, 0))] == 0);
+
+    draw_mask_line_raw(doc, 1, 1, 4, 1, 128, 1);
+    assert(doc.layers[0].mask[static_cast<std::size_t>(doc.pixel_index(2, 1))] == 128);
+
+    fill_mask_bucket(doc, 2, 1, 255, 0, true);
+    assert(doc.layers[0].mask[static_cast<std::size_t>(doc.pixel_index(2, 1))] == 255);
+    assert(doc.layers[0].mask[static_cast<std::size_t>(doc.pixel_index(1, 0))] == 0);
+
+    auto composite = doc.composite_active();
+    assert(a(composite[static_cast<std::size_t>(doc.pixel_index(1, 0))]) == 0);
+}
+
 static void test_v2_tools_and_undo() {
     auto doc = Document::create(12, 12);
 
@@ -383,7 +431,7 @@ static void test_model_transform_helpers() {
 
     rotate_cuboid(cuboid, 2, 67.0f, true);
     assert(cuboid.rotation_axis == 2);
-    assert(std::abs(cuboid.rotation_angle - 45.0f) < 0.001f);
+    assert(std::abs(cuboid.rotation_angle - 60.0f) < 0.001f);
 }
 
 static void test_app_settings_roundtrip() {
@@ -498,6 +546,8 @@ int main() {
     test_selection_clips_drawing_and_delete();
     test_filters();
     test_animation_layers();
+    test_layer_masks_and_clipping();
+    test_mask_editing_tools();
     test_v2_tools_and_undo();
     test_v2_layers_frames_tags();
     test_layer_blend_modes();

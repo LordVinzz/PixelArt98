@@ -107,6 +107,10 @@ Document make_document() {
     document.add_layer("Highlights");
     document.layers[1].opacity = 1.0f;
     document.layers[1].blend_mode = LayerBlendMode::Normal;
+    document.layers[1].mask_enabled = true;
+    document.layers[1].clip_to_below = true;
+    document.layers[1].mask.assign(static_cast<std::size_t>(document.width * document.height), 255);
+    document.layers[1].mask[static_cast<std::size_t>(document.pixel_index(0, 0))] = 0;
     document.add_frame(false);
     document.frames[0].duration_ms = 120;
     document.frames[1].duration_ms = 240;
@@ -189,6 +193,11 @@ void test_project_roundtrip(const std::filesystem::path& root) {
     assert_document_shape(loaded.document);
     assert(loaded.document.layers[0].name == "Base");
     assert(loaded.document.layers[1].name == "Highlights");
+    assert(loaded.document.layers[1].mask_enabled);
+    assert(loaded.document.layers[1].clip_to_below);
+    assert(loaded.document.layers[1].mask.size() == static_cast<std::size_t>(loaded.document.width * loaded.document.height));
+    assert(loaded.document.layers[1].mask[0] == 0);
+    assert(loaded.document.layers[1].mask[1] == 255);
     assert(loaded.document.frames[0].duration_ms == 120);
     assert(loaded.document.frames[1].duration_ms == 240);
     assert(loaded.document.tags.size() == 1);

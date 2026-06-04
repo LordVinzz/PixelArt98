@@ -41,6 +41,17 @@ void GLCanvasTexture::bind_nearest() const {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
+void GLCanvasTexture::bind_linear_repeat() const {
+    if (texture_id_ == 0) {
+        return;
+    }
+    glBindTexture(GL_TEXTURE_2D, texture_id_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
 void GLCanvasTexture::destroy() {
     if (texture_id_ != 0) {
         glDeleteTextures(1, &texture_id_);

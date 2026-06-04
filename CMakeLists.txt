@@ -88,6 +88,7 @@ add_library(pixelart_app
     src/render/Renderer3D.cpp
     src/ui/AppSettings.cpp
     src/ui/EmbeddedAssets.cpp
+    src/ui/EmbeddedTransformIcons.c
     src/ui/SplashScreen.cpp
     src/ui/StartupSplash.cpp
     src/ui/EditorApp.cpp)
@@ -141,6 +142,8 @@ if(PIXELART_BACKEND STREQUAL "GLFW" AND TARGET pixelart_glfw)
 elseif(TARGET pixelart_sdl2)
     add_custom_target(pixelart DEPENDS pixelart_sdl2)
 endif()
+
+install(DIRECTORY res/skyboxes DESTINATION res)
 
 if(PIXELART_BUILD_TESTS)
     enable_testing()

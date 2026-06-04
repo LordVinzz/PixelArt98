@@ -626,7 +626,7 @@ bool Renderer3D::render_model_to_texture(const ModelDocument& model,
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     glDisable(GL_CULL_FACE);
-    glClearColor(0.18f, 0.19f, 0.20f, 1.0f);
+    glClearColor(0.18f, 0.19f, 0.20f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     draw_line_vertices(shader_program_,

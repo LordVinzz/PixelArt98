@@ -68,6 +68,9 @@ struct Layer {
     bool visible = true;
     float opacity = 1.0f;
     LayerBlendMode blend_mode = LayerBlendMode::Normal;
+    bool mask_enabled = false;
+    bool clip_to_below = false;
+    std::vector<std::uint8_t> mask;
 };
 
 struct Frame {

@@ -162,9 +162,9 @@ void scale_cuboid(Cuboid& cuboid, int axis, float factor, bool snap_to_double) {
                               (cuboid.from[2] + cuboid.to[2]) * 0.5f};
 }
 
-void rotate_cuboid(Cuboid& cuboid, int axis, float angle_degrees, bool snap_to_45_degrees) {
+void rotate_cuboid(Cuboid& cuboid, int axis, float angle_degrees, bool snap_to_15_degrees) {
     cuboid.rotation_axis = std::clamp(axis, 0, 2);
-    cuboid.rotation_angle = snap_to_45_degrees ? std::round(angle_degrees / 45.0f) * 45.0f
+    cuboid.rotation_angle = snap_to_15_degrees ? std::round(angle_degrees / 15.0f) * 15.0f
                                                : angle_degrees;
     cuboid.rotation_origin = {(cuboid.from[0] + cuboid.to[0]) * 0.5f,
                               (cuboid.from[1] + cuboid.to[1]) * 0.5f,

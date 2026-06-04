@@ -58,6 +58,24 @@ bool decode_png_rgba(const unsigned char* data, std::size_t size, int expected_w
     return ok;
 }
 
+std::vector<Pixel> mask_to_rgba(const std::vector<std::uint8_t>& mask) {
+    std::vector<Pixel> pixels;
+    pixels.reserve(mask.size());
+    for (std::uint8_t value : mask) {
+        pixels.push_back(rgba(value, value, value, 255));
+    }
+    return pixels;
+}
+
+std::vector<std::uint8_t> rgba_to_mask(const std::vector<Pixel>& pixels) {
+    std::vector<std::uint8_t> mask;
+    mask.reserve(pixels.size());
+    for (Pixel pixel : pixels) {
+        mask.push_back(r(pixel));
+    }
+    return mask;
+}
+
 void set_error(std::string* error, const std::string& value) {
     if (error) {
         *error = value;
@@ -78,12 +96,16 @@ nlohmann::json document_to_json(const Document& document) {
         root["palette"].push_back({r(p), g(p), b(p), a(p)});
     }
     root["layers"] = nlohmann::json::array();
-    for (const auto& layer : document.layers) {
+    for (std::size_t layer_index = 0; layer_index < document.layers.size(); ++layer_index) {
+        const auto& layer = document.layers[layer_index];
         root["layers"].push_back({
             {"name", layer.name},
             {"visible", layer.visible},
             {"opacity", layer.opacity},
-            {"blend_mode", layer_blend_mode_name(layer.blend_mode)}
+            {"blend_mode", layer_blend_mode_name(layer.blend_mode)},
+            {"mask_enabled", layer.mask_enabled},
+            {"clip_to_below", layer.clip_to_below},
+            {"mask", layer.mask.empty() ? "" : "masks/layer_" + std::to_string(layer_index) + ".png"}
         });
     }
     root["tags"] = nlohmann::json::array();
@@ -155,6 +177,8 @@ bool json_to_document(const nlohmann::json& root, Document& out, std::string* er
             layer.visible = layer_json.value("visible", true);
             layer.opacity = layer_json.value("opacity", 1.0f);
             layer.blend_mode = layer_blend_mode_from_json(layer_json.value("blend_mode", "Normal"));
+            layer.mask_enabled = layer_json.value("mask_enabled", false);
+            layer.clip_to_below = layer_json.value("clip_to_below", false);
             document.layers.push_back(layer);
         }
         for (const auto& frame_json : root.at("frames")) {
@@ -405,6 +429,18 @@ bool save_project(const std::string& path, const Document& document, const Model
             }
         }
     }
+    for (std::size_t li = 0; li < document.layers.size() && ok; ++li) {
+        const Layer& layer = document.layers[li];
+        if (layer.mask.empty()) {
+            continue;
+        }
+        std::vector<unsigned char> png;
+        ok = encode_png_rgba(document.width, document.height, mask_to_rgba(layer.mask), png);
+        if (ok) {
+            std::string name = "masks/layer_" + std::to_string(li) + ".png";
+            ok = mz_zip_writer_add_mem(&zip, name.c_str(), png.data(), png.size(), MZ_BEST_COMPRESSION);
+        }
+    }
 
     ok = ok && mz_zip_writer_finalize_archive(&zip);
     mz_zip_writer_end(&zip);
@@ -454,6 +490,23 @@ bool load_project(const std::string& path, ProjectBundle& out_bundle, std::strin
                 ok = decode_png_rgba(static_cast<unsigned char*>(png_mem), png_size, document.width, document.height,
                                      document.frames[fi].cels[li].pixels);
                 mz_free(png_mem);
+            }
+        }
+        for (std::size_t li = 0; li < document.layers.size() && ok; ++li) {
+            std::string name = "masks/layer_" + std::to_string(li) + ".png";
+            std::size_t png_size = 0;
+            void* png_mem = mz_zip_reader_extract_file_to_heap(&zip, name.c_str(), &png_size, 0);
+            if (!png_mem) {
+                if (document.layers[li].mask_enabled) {
+                    document.layers[li].mask.assign(static_cast<std::size_t>(document.width * document.height), 255);
+                }
+                continue;
+            }
+            std::vector<Pixel> pixels;
+            ok = decode_png_rgba(static_cast<unsigned char*>(png_mem), png_size, document.width, document.height, pixels);
+            mz_free(png_mem);
+            if (ok) {
+                document.layers[li].mask = rgba_to_mask(pixels);
             }
         }
     }
@@ -511,7 +564,9 @@ bool import_image_as_layer(const std::string& path, Document& document, const st
     auto before_tags = document.tags;
     int before_layer = document.active_layer;
     int before_frame = document.active_frame;
-    document.layers.push_back({layer_name.empty() ? std::filesystem::path(path).stem().string() : layer_name, true, 1.0f, LayerBlendMode::Normal});
+    Layer layer;
+    layer.name = layer_name.empty() ? std::filesystem::path(path).stem().string() : layer_name;
+    document.layers.push_back(std::move(layer));
     for (auto& frame : document.frames) {
         Cel cel;
         cel.pixels.assign(static_cast<std::size_t>(document.width * document.height), 0);
@@ -1013,7 +1068,9 @@ bool import_aseprite(const std::string& path, Document& out_document, std::strin
     }
 
     if (layers.empty()) {
-        layers.push_back({"Layer 1", true, 1.0f, LayerBlendMode::Normal});
+        Layer layer;
+        layer.name = "Layer 1";
+        layers.push_back(std::move(layer));
     }
     Document document = Document::create(width, height);
     document.layers = std::move(layers);

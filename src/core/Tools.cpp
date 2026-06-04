@@ -551,4 +551,131 @@ void stamp_text_blocks(Document& doc, int x, int y, const std::string& text, Pix
     stamp_text(doc, x, y, text, color);
 }
 
+void ensure_active_layer_mask(Document& doc, std::uint8_t value) {
+    if (doc.active_layer < 0 || doc.active_layer >= static_cast<int>(doc.layers.size())) {
+        return;
+    }
+    Layer& layer = doc.layers[static_cast<std::size_t>(doc.active_layer)];
+    const std::size_t size = static_cast<std::size_t>(doc.width * doc.height);
+    if (layer.mask.size() != size) {
+        layer.mask.assign(size, value);
+    }
+    layer.mask_enabled = true;
+}
+
+void put_mask_pixel(Document& doc, int x, int y, std::uint8_t value) {
+    if (!doc.in_bounds(x, y) || !doc.selection.contains(x, y)) {
+        return;
+    }
+    ensure_active_layer_mask(doc, 255);
+    Layer& layer = doc.layers[static_cast<std::size_t>(doc.active_layer)];
+    layer.mask[static_cast<std::size_t>(doc.pixel_index(x, y))] = value;
+}
+
+void plot_mask_brush_raw(Document& doc, int cx, int cy, std::uint8_t value, int size) {
+    int radius = std::max(1, size);
+    int half = radius / 2;
+    if (radius <= 2) {
+        for (int y = cy - half; y <= cy - half + radius - 1; ++y) {
+            for (int x = cx - half; x <= cx - half + radius - 1; ++x) {
+                put_mask_pixel(doc, x, y, value);
+            }
+        }
+        return;
+    }
+
+    const float r2 = (static_cast<float>(radius) * 0.5f) * (static_cast<float>(radius) * 0.5f);
+    const float center = (static_cast<float>(radius) - 1.0f) * 0.5f;
+    for (int yy = 0; yy < radius; ++yy) {
+        for (int xx = 0; xx < radius; ++xx) {
+            const float dx = static_cast<float>(xx) - center;
+            const float dy = static_cast<float>(yy) - center;
+            if (dx * dx + dy * dy <= r2 + 0.1f) {
+                put_mask_pixel(doc, cx + xx - half, cy + yy - half, value);
+            }
+        }
+    }
+}
+
+void draw_mask_line_raw(Document& doc, int x0, int y0, int x1, int y1, std::uint8_t value, int size) {
+    int dx = std::abs(x1 - x0);
+    int sx = x0 < x1 ? 1 : -1;
+    int dy = -std::abs(y1 - y0);
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+
+    for (;;) {
+        plot_mask_brush_raw(doc, x0, y0, value, size);
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+void fill_mask_bucket(Document& doc, int x, int y, std::uint8_t value, int tolerance, bool contiguous) {
+    if (!doc.in_bounds(x, y) || !doc.selection.contains(x, y)) {
+        return;
+    }
+    ensure_active_layer_mask(doc, 255);
+    Layer& layer = doc.layers[static_cast<std::size_t>(doc.active_layer)];
+    const std::size_t start_index = static_cast<std::size_t>(doc.pixel_index(x, y));
+    const int start_value = layer.mask[start_index];
+    const int tol = std::max(0, tolerance);
+    auto matches = [&](int px, int py) {
+        if (!doc.in_bounds(px, py) || !doc.selection.contains(px, py)) {
+            return false;
+        }
+        const int current = layer.mask[static_cast<std::size_t>(doc.pixel_index(px, py))];
+        return std::abs(current - start_value) <= tol;
+    };
+
+    if (!contiguous) {
+        for (int py = 0; py < doc.height; ++py) {
+            for (int px = 0; px < doc.width; ++px) {
+                if (matches(px, py)) {
+                    layer.mask[static_cast<std::size_t>(doc.pixel_index(px, py))] = value;
+                }
+            }
+        }
+        return;
+    }
+
+    std::vector<std::uint8_t> visited(static_cast<std::size_t>(doc.width * doc.height), 0);
+    std::queue<std::array<int, 2>> queue;
+    queue.push({x, y});
+    visited[start_index] = 1;
+    while (!queue.empty()) {
+        const auto point = queue.front();
+        queue.pop();
+        const int px = point[0];
+        const int py = point[1];
+        if (!matches(px, py)) {
+            continue;
+        }
+        layer.mask[static_cast<std::size_t>(doc.pixel_index(px, py))] = value;
+        constexpr std::array<std::array<int, 2>, 4> dirs = {{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
+        for (const auto& dir : dirs) {
+            const int nx = px + dir[0];
+            const int ny = py + dir[1];
+            if (!doc.in_bounds(nx, ny)) {
+                continue;
+            }
+            const std::size_t ni = static_cast<std::size_t>(doc.pixel_index(nx, ny));
+            if (visited[ni] == 0) {
+                visited[ni] = 1;
+                queue.push({nx, ny});
+            }
+        }
+    }
+}
+
 } // namespace px

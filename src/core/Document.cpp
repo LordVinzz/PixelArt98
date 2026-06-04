@@ -211,7 +211,9 @@ Document Document::create(int w, int h) {
     Document doc;
     doc.width = std::max(1, w);
     doc.height = std::max(1, h);
-    doc.layers.push_back({"Background", true, 1.0f, LayerBlendMode::Normal});
+    Layer background;
+    background.name = "Background";
+    doc.layers.push_back(std::move(background));
     Frame frame;
     Cel cel;
     cel.pixels.assign(static_cast<std::size_t>(doc.width * doc.height), 0);
@@ -562,7 +564,9 @@ void Document::add_layer(const std::string& name) {
     auto before_tags = tags;
     int before_active_layer = active_layer;
     int before_active_frame = active_frame;
-    layers.push_back({name.empty() ? "Layer" : name, true, 1.0f, LayerBlendMode::Normal});
+    Layer layer;
+    layer.name = name.empty() ? "Layer" : name;
+    layers.push_back(std::move(layer));
     for (auto& frame : frames) {
         Cel cel;
         cel.pixels.assign(static_cast<std::size_t>(width * height), 0);
@@ -777,8 +781,18 @@ std::vector<Pixel> Document::composite_frame(int frame_index) const {
                 std::size_t dst_i = static_cast<std::size_t>(y * width + x);
                 std::size_t src_i = static_cast<std::size_t>(sy * width + sx);
                 Pixel src = c.pixels[src_i];
+                float effective_opacity = layer.opacity;
+                if (layer.mask_enabled && layer.mask.size() == static_cast<std::size_t>(width * height)) {
+                    effective_opacity *= static_cast<float>(layer.mask[dst_i]) / 255.0f;
+                }
+                if (layer.clip_to_below) {
+                    effective_opacity *= static_cast<float>(a(out[dst_i])) / 255.0f;
+                }
+                if (effective_opacity <= 0.0f) {
+                    continue;
+                }
                 src = apply_layer_blend_mode(out[dst_i], src, layer.blend_mode);
-                out[dst_i] = blend_over(out[dst_i], src, layer.opacity);
+                out[dst_i] = blend_over(out[dst_i], src, effective_opacity);
             }
         }
     }

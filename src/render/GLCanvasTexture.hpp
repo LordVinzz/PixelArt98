@@ -16,6 +16,7 @@ public:
 
     void update(int width, int height, const std::vector<Pixel>& pixels);
     void bind_nearest() const;
+    void bind_linear_repeat() const;
     void destroy();
 
     unsigned int id() const { return texture_id_; }

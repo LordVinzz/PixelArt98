@@ -3,6 +3,7 @@
 #include "core/Document.hpp"
 
 #include <array>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -76,5 +77,11 @@ void clone_stamp(Document& doc, int sx, int sy, int dx, int dy, int brush_size);
 std::vector<std::array<int, 2>> raster_text_points(int x, int y, const std::string& text);
 void stamp_text(Document& doc, int x, int y, const std::string& text, Pixel color);
 void stamp_text_blocks(Document& doc, int x, int y, const std::string& text, Pixel color);
+
+void ensure_active_layer_mask(Document& doc, std::uint8_t value = 255);
+void put_mask_pixel(Document& doc, int x, int y, std::uint8_t value);
+void plot_mask_brush_raw(Document& doc, int cx, int cy, std::uint8_t value, int size);
+void draw_mask_line_raw(Document& doc, int x0, int y0, int x1, int y1, std::uint8_t value, int size);
+void fill_mask_bucket(Document& doc, int x, int y, std::uint8_t value, int tolerance, bool contiguous);
 
 } // namespace px

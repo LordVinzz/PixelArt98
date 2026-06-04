@@ -75,6 +75,6 @@ int model_rotation_axis_from_name(const std::string& name);
 float cuboid_axis_size(const Cuboid& cuboid, int axis);
 void translate_cuboid(Cuboid& cuboid, int axis, float delta, bool snap_to_axis_size);
 void scale_cuboid(Cuboid& cuboid, int axis, float factor, bool snap_to_double);
-void rotate_cuboid(Cuboid& cuboid, int axis, float angle_degrees, bool snap_to_45_degrees);
+void rotate_cuboid(Cuboid& cuboid, int axis, float angle_degrees, bool snap_to_15_degrees);
 
 } // namespace px

@@ -12,6 +12,7 @@
 #include <imgui.h>
 
 #include <array>
+#include <deque>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -29,6 +30,11 @@ enum class EffectPreviewKind {
     ZoomBlur,
     MedianBlur,
     SurfaceBlur,
+    BrightnessContrast,
+    Hsv,
+    Levels,
+    PaletteQuantize,
+    PaletteDither,
     AutoLevel,
     Grayscale,
     Sepia,
@@ -67,6 +73,14 @@ struct ErrorConsoleEntry {
     std::string details;
 };
 
+struct EditorHistoryEntry {
+    std::string name;
+    Document before_document;
+    Document after_document;
+    ModelDocument before_model;
+    ModelDocument after_model;
+};
+
 class EditorApp {
 public:
     explicit EditorApp(FileDialogProvider* dialogs = nullptr, AppSettings settings = {});
@@ -80,6 +94,8 @@ private:
     ToolContext tool_;
     GLCanvasTexture canvas_texture_;
     GLCanvasTexture onion_texture_;
+    std::array<GLCanvasTexture, 4> transform_icon_textures_;
+    std::array<GLCanvasTexture, 6> skybox_face_textures_;
     Renderer3D renderer3d_;
     FileDialogProvider* dialogs_ = nullptr;
     AppSettings settings_;
@@ -90,7 +106,10 @@ private:
     float zoom_ = 12.0f;
     bool show_grid_ = true;
     bool show_checker_ = true;
+    bool show_tile_preview_ = false;
     bool show_all_cuboid_wireframes_ = false;
+    bool edit_layer_mask_ = false;
+    bool show_mask_overlay_ = false;
     bool onion_skin_ = true;
     bool playing_ = false;
     float playback_accum_ = 0.0f;
@@ -112,10 +131,16 @@ private:
     bool error_console_open_ = false;
     bool error_console_scroll_to_bottom_ = false;
     bool model_render_error_reported_ = false;
+    bool transform_icons_loaded_ = false;
+    bool canvas_fit_requested_ = false;
+    bool history_pending_ = false;
+    bool history_suppress_frame_ = false;
     int uv_drag_mode_ = 0;
     int model_transform_mode_ = 0;
     int model_transform_axis_ = 0;
     int model_transform_hover_axis_ = -1;
+    int skybox_index_ = 0;
+    int loaded_skybox_index_ = -1;
     int canvas_drag_button_ = ImGuiMouseButton_Left;
     SelectionCombineMode selection_drag_mode_ = SelectionCombineMode::Replace;
     EffectPreviewKind effect_preview_kind_ = EffectPreviewKind::None;
@@ -127,12 +152,15 @@ private:
     int last_y_ = 0;
     int move_start_x_ = 0;
     int move_start_y_ = 0;
+    ImVec2 canvas_pan_ = ImVec2(0, 0);
     ImVec2 uv_drag_start_mouse_ = ImVec2(0, 0);
     ImVec2 model_transform_start_mouse_ = ImVec2(0, 0);
     ImVec2 model_transform_drag_center_ = ImVec2(0, 0);
     ImVec2 model_view_gizmo_drag_start_mouse_ = ImVec2(0, 0);
     float model_view_gizmo_start_yaw_ = 0.0f;
     float model_view_gizmo_start_pitch_ = 0.0f;
+    float model_transform_start_angle_radians_ = 0.0f;
+    float model_transform_rotation_delta_degrees_ = 0.0f;
     UvRect uv_drag_start_rect_;
     Cuboid model_transform_start_cuboid_;
     std::vector<Pixel> stroke_before_;
@@ -140,8 +168,12 @@ private:
     SelectionMask selection_before_;
     std::vector<std::array<int, 2>> lasso_points_;
     std::vector<ErrorConsoleEntry> error_console_entries_;
+    std::deque<EditorHistoryEntry> undo_stack_;
+    std::deque<EditorHistoryEntry> redo_stack_;
     TextBox text_box_;
     Document effect_preview_document_;
+    Document history_before_document_;
+    ModelDocument history_before_model_;
 
     char project_path_[512] = "untitled.pixart";
     char image_path_[512] = "import.png";
@@ -182,6 +214,18 @@ private:
     void set_status(const std::string& status);
     void report_error(std::string_view context, std::string_view details);
     void save_settings();
+    void begin_history_frame();
+    void end_history_frame();
+    bool editor_state_changed_from_history_baseline() const;
+    bool history_interaction_in_progress() const;
+    void push_history_entry(const std::string& name,
+                            Document before_document,
+                            ModelDocument before_model,
+                            Document after_document,
+                            ModelDocument after_model);
+    bool undo_editor();
+    bool redo_editor();
+    void sync_model_texture_metadata();
 
     void draw_dockspace();
     void draw_main_menu();
@@ -193,6 +237,7 @@ private:
     void draw_adjustments_panel();
     void draw_model_panel();
     void draw_model_preview_window();
+    void draw_tile_preview_window();
     void draw_effect_preview_popup();
     void draw_error_console();
     void draw_status_bar();
@@ -203,7 +248,13 @@ private:
     void clear_selection(const char* undo_name);
     void nudge_canvas_selection(int dx, int dy);
 
-    void handle_canvas_input(const ImVec2& origin, const ImVec2& size, bool image_hovered, bool canvas_active);
+    void clamp_canvas_pan(const ImVec2& viewport_size);
+    void zoom_canvas_at(const ImVec2& viewport_origin, const ImVec2& viewport_size, const ImVec2& focal_point, float next_zoom);
+    void handle_canvas_input(const ImVec2& origin,
+                             const ImVec2& viewport_size,
+                             bool viewport_hovered,
+                             bool viewport_active,
+                             bool canvas_active);
     bool mouse_to_pixel(const ImVec2& origin, int& out_x, int& out_y) const;
     void finish_drag(int x, int y);
     void commit_stroke();
@@ -213,6 +264,7 @@ private:
     bool delete_selection_contents();
     void draw_selection_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_floating_selection_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
+    void draw_mask_overlay(ImDrawList* draw_list, const ImVec2& origin, const ImVec2& size) const;
     void draw_text_preview_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_lasso_preview(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_selected_model_face_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
@@ -222,6 +274,11 @@ private:
     void draw_uv_overlay(ImDrawList* draw_list, const ImVec2& origin, float scale) const;
     void handle_uv_input(const ImVec2& origin, float scale);
     void draw_model_preview();
+    bool ensure_transform_icon_textures();
+    bool handle_model_transform_toolbar_input(const ImVec2& origin, const ImVec2& size);
+    void draw_model_transform_toolbar(ImDrawList* draw_list, const ImVec2& origin);
+    bool ensure_skybox_texture();
+    void draw_skybox_background(ImDrawList* draw_list, const ImVec2& origin, const ImVec2& size);
     void handle_model_transform_drag(const ImVec2& origin, const ImVec2& size, bool hovered);
     void start_effect_preview(EffectPreviewKind kind);
     void rebuild_effect_preview();

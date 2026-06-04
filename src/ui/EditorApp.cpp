@@ -1,6 +1,9 @@
 #include "ui/EditorApp.hpp"
 
 #include "io/ProjectIO.hpp"
+#include "ui/EmbeddedTransformIcons.h"
+
+#include <stb_image.h>
 
 #include <algorithm>
 #include <cmath>
@@ -8,8 +11,10 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <unordered_map>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace px {
 
@@ -110,8 +115,10 @@ const char* selection_undo_name(const char* base, SelectionCombineMode mode) {
     return base;
 }
 
+constexpr float pi = 3.14159265358979323846f;
+
 float radians(float degrees) {
-    return degrees * 3.14159265358979323846f / 180.0f;
+    return degrees * pi / 180.0f;
 }
 
 struct AxisVec3 {
@@ -274,6 +281,35 @@ std::array<ImVec2, 65> rotation_ring_points(const ModelGizmoGeometry& geometry,
     return points;
 }
 
+std::array<ImVec2, 2> rotation_ring_basis(const ModelViewportState& viewport, int axis) {
+    return {
+        normalized_screen_axis(axis_vector((axis + 1) % 3), viewport),
+        normalized_screen_axis(axis_vector((axis + 2) % 3), viewport)
+    };
+}
+
+float rotation_ring_angle_at_mouse(const ModelGizmoGeometry& geometry,
+                                   const ModelViewportState& viewport,
+                                   int axis,
+                                   ImVec2 mouse) {
+    const auto basis = rotation_ring_basis(viewport, axis);
+    const ImVec2 delta(mouse.x - geometry.center.x, mouse.y - geometry.center.y);
+    const float x = delta.x * basis[0].x + delta.y * basis[0].y;
+    const float y = delta.x * basis[1].x + delta.y * basis[1].y;
+    return std::atan2(y, x);
+}
+
+float unwrap_angle_delta(float current, float start) {
+    float delta = current - start;
+    while (delta > pi) {
+        delta -= 2.0f * pi;
+    }
+    while (delta < -pi) {
+        delta += 2.0f * pi;
+    }
+    return delta;
+}
+
 float distance_to_polyline(ImVec2 point, const std::array<ImVec2, 65>& points) {
     float best = 100000.0f;
     for (std::size_t index = 1; index < points.size(); ++index) {
@@ -290,7 +326,7 @@ int hit_model_gizmo(const ModelGizmoGeometry& geometry,
         return -1;
     }
 
-    float best_distance = 14.0f;
+    float best_distance = mode == 2 ? 18.0f : 14.0f;
     int best_axis = -1;
     for (int axis = 0; axis < 3; ++axis) {
         float candidate = 100000.0f;
@@ -347,7 +383,9 @@ void draw_transform_gizmo(ImDrawList* draw_list,
                           const ModelViewportState& viewport,
                           int mode,
                           int active_axis,
-                          int hover_axis) {
+                          int hover_axis,
+                          float active_rotation_start_radians,
+                          float active_rotation_delta_degrees) {
     if (!geometry.visible || mode == 0) {
         return;
     }
@@ -362,6 +400,34 @@ void draw_transform_gizmo(ImDrawList* draw_list,
                 draw_list->AddLine(points[index - 1U], points[index], IM_COL32(0, 0, 0, 150), thickness + 2.0f);
                 draw_list->AddLine(points[index - 1U], points[index], color, thickness);
             }
+        }
+        if (active_axis >= 0) {
+            const auto basis = rotation_ring_basis(viewport, active_axis);
+            const float delta_radians = radians(active_rotation_delta_degrees);
+            const int steps = std::max(2, static_cast<int>(std::ceil(std::abs(delta_radians) / (pi / 32.0f))));
+            auto point_at_angle = [&](float angle) {
+                return ImVec2(geometry.center.x + (basis[0].x * std::cos(angle) + basis[1].x * std::sin(angle)) * geometry.ring_radius,
+                              geometry.center.y + (basis[0].y * std::cos(angle) + basis[1].y * std::sin(angle)) * geometry.ring_radius);
+            };
+            ImVec2 previous = point_at_angle(active_rotation_start_radians);
+            for (int step = 1; step <= steps; ++step) {
+                const float t = active_rotation_start_radians +
+                                delta_radians * (static_cast<float>(step) / static_cast<float>(steps));
+                const ImVec2 current = point_at_angle(t);
+                draw_list->AddLine(previous, current, IM_COL32(255, 255, 255, 235), 4.2f);
+                previous = current;
+            }
+            draw_list->AddCircleFilled(point_at_angle(active_rotation_start_radians), 4.5f, IM_COL32(255, 255, 255, 240), 12);
+            draw_list->AddCircleFilled(previous, 5.5f, axis_color(active_axis, 255), 12);
+            char label[64];
+            std::snprintf(label,
+                          sizeof(label),
+                          "%s %.1f deg",
+                          model_rotation_axis_name(active_axis),
+                          static_cast<double>(active_rotation_delta_degrees));
+            draw_list->AddText(ImVec2(geometry.center.x + 10.0f, geometry.center.y + 10.0f),
+                               IM_COL32(255, 255, 255, 245),
+                               label);
         }
     } else {
         for (int axis = 0; axis < 3; ++axis) {
@@ -474,16 +540,6 @@ void draw_axis_gizmo(ImDrawList* draw_list, const AxisGizmoGeometry& geometry, i
     draw_list->AddCircle(geometry.center, hover_hit == 6 ? 8.0f : 6.0f, IM_COL32(0, 0, 0, 165), 16, 1.0f);
 }
 
-const char* model_transform_mode_name(int mode) {
-    static const char* names[] = {"Select", "Translate", "Rotate", "Scale"};
-    return names[std::clamp(mode, 0, 3)];
-}
-
-const char* model_transform_axis_name(int axis) {
-    static const char* names[] = {"X", "Y", "Z"};
-    return names[std::clamp(axis, 0, 2)];
-}
-
 const char* effect_preview_name(EffectPreviewKind kind) {
     switch (kind) {
         case EffectPreviewKind::InkSketch: return "Ink Sketch";
@@ -495,6 +551,11 @@ const char* effect_preview_name(EffectPreviewKind kind) {
         case EffectPreviewKind::ZoomBlur: return "Zoom Blur";
         case EffectPreviewKind::MedianBlur: return "Median Blur";
         case EffectPreviewKind::SurfaceBlur: return "Surface Blur";
+        case EffectPreviewKind::BrightnessContrast: return "Brightness / Contrast";
+        case EffectPreviewKind::Hsv: return "HSV";
+        case EffectPreviewKind::Levels: return "Levels";
+        case EffectPreviewKind::PaletteQuantize: return "Quantize to Palette";
+        case EffectPreviewKind::PaletteDither: return "Dither to Palette";
         case EffectPreviewKind::AutoLevel: return "Auto-Level";
         case EffectPreviewKind::Grayscale: return "Black and White";
         case EffectPreviewKind::Sepia: return "Sepia";
@@ -530,16 +591,53 @@ const char* effect_preview_name(EffectPreviewKind kind) {
     return "Effect";
 }
 
-float pixel_zoom(float zoom) {
-    return static_cast<float>(std::clamp(static_cast<int>(std::round(zoom)), 1, 64));
-}
-
 ImVec2 floor_screen_pos(ImVec2 value) {
     return ImVec2(std::floor(value.x), std::floor(value.y));
 }
 
 float pixel_scale(int value, float scale) {
     return static_cast<float>(value) * scale;
+}
+
+constexpr float kCanvasZoomStep = 1.18f;
+
+float fit_canvas_zoom(int image_width, int image_height, ImVec2 viewport_size) {
+    if (image_width <= 0 || image_height <= 0 || viewport_size.x <= 1.0f || viewport_size.y <= 1.0f) {
+        return 1.0f;
+    }
+    constexpr float padding = 24.0f;
+    const float available_width = std::max(1.0f, viewport_size.x - padding);
+    const float available_height = std::max(1.0f, viewport_size.y - padding);
+    return std::max(0.01f,
+                    std::min(available_width / static_cast<float>(image_width),
+                             available_height / static_cast<float>(image_height)));
+}
+
+float min_canvas_zoom(int image_width, int image_height, ImVec2 viewport_size) {
+    const float fit_zoom = fit_canvas_zoom(image_width, image_height, viewport_size);
+    return std::max(0.02f, std::min(1.0f, fit_zoom * 0.20f));
+}
+
+float max_canvas_zoom(int image_width, int image_height, ImVec2 viewport_size) {
+    const float fit_zoom = fit_canvas_zoom(image_width, image_height, viewport_size);
+    const int largest_dimension = std::max(1, std::max(image_width, image_height));
+    const float image_bound_zoom = 16384.0f / static_cast<float>(largest_dimension);
+    return std::clamp(std::max(fit_zoom * 32.0f, image_bound_zoom), 32.0f, 256.0f);
+}
+
+float clamped_canvas_zoom(float zoom, int image_width, int image_height, ImVec2 viewport_size) {
+    return std::clamp(zoom,
+                      min_canvas_zoom(image_width, image_height, viewport_size),
+                      max_canvas_zoom(image_width, image_height, viewport_size));
+}
+
+ImVec2 canvas_center_offset(ImVec2 viewport_size, ImVec2 image_size) {
+    return ImVec2((viewport_size.x - image_size.x) * 0.5f,
+                  (viewport_size.y - image_size.y) * 0.5f);
+}
+
+bool point_in_rect(ImVec2 point, ImVec2 min, ImVec2 max) {
+    return point.x >= min.x && point.y >= min.y && point.x <= max.x && point.y <= max.y;
 }
 
 void push_nearest_sampler(ImDrawList* draw_list) {
@@ -556,12 +654,295 @@ void push_linear_sampler(ImDrawList* draw_list) {
     }
 }
 
+bool selection_equal(const SelectionMask& a_value, const SelectionMask& b_value) {
+    return a_value.width == b_value.width &&
+           a_value.height == b_value.height &&
+           a_value.active == b_value.active &&
+           a_value.mask == b_value.mask;
+}
+
+bool floating_selection_equal(const FloatingSelection& a_value, const FloatingSelection& b_value) {
+    return a_value.active == b_value.active &&
+           a_value.source_x == b_value.source_x &&
+           a_value.source_y == b_value.source_y &&
+           a_value.offset_x == b_value.offset_x &&
+           a_value.offset_y == b_value.offset_y &&
+           a_value.width == b_value.width &&
+           a_value.height == b_value.height &&
+           a_value.pixels == b_value.pixels &&
+           a_value.mask == b_value.mask;
+}
+
+bool layers_equal(const std::vector<Layer>& a_value, const std::vector<Layer>& b_value) {
+    if (a_value.size() != b_value.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a_value.size(); ++i) {
+        const Layer& a_layer = a_value[i];
+        const Layer& b_layer = b_value[i];
+        if (a_layer.name != b_layer.name ||
+            a_layer.visible != b_layer.visible ||
+            a_layer.opacity != b_layer.opacity ||
+            a_layer.blend_mode != b_layer.blend_mode ||
+            a_layer.mask_enabled != b_layer.mask_enabled ||
+            a_layer.clip_to_below != b_layer.clip_to_below ||
+            a_layer.mask != b_layer.mask) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool frames_equal(const std::vector<Frame>& a_value, const std::vector<Frame>& b_value) {
+    if (a_value.size() != b_value.size()) {
+        return false;
+    }
+    for (std::size_t frame_index = 0; frame_index < a_value.size(); ++frame_index) {
+        const Frame& a_frame = a_value[frame_index];
+        const Frame& b_frame = b_value[frame_index];
+        if (a_frame.duration_ms != b_frame.duration_ms || a_frame.cels.size() != b_frame.cels.size()) {
+            return false;
+        }
+        for (std::size_t cel_index = 0; cel_index < a_frame.cels.size(); ++cel_index) {
+            const Cel& a_cel = a_frame.cels[cel_index];
+            const Cel& b_cel = b_frame.cels[cel_index];
+            if (a_cel.x != b_cel.x || a_cel.y != b_cel.y || a_cel.pixels != b_cel.pixels) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool tags_equal(const std::vector<AnimationTag>& a_value, const std::vector<AnimationTag>& b_value) {
+    if (a_value.size() != b_value.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a_value.size(); ++i) {
+        if (a_value[i].name != b_value[i].name ||
+            a_value[i].from != b_value[i].from ||
+            a_value[i].to != b_value[i].to) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool document_state_equal(const Document& a_value, const Document& b_value) {
+    return a_value.width == b_value.width &&
+           a_value.height == b_value.height &&
+           a_value.active_layer == b_value.active_layer &&
+           a_value.active_frame == b_value.active_frame &&
+           a_value.palette.colors == b_value.palette.colors &&
+           a_value.palette.active == b_value.palette.active &&
+           selection_equal(a_value.selection, b_value.selection) &&
+           floating_selection_equal(a_value.floating_selection, b_value.floating_selection) &&
+           layers_equal(a_value.layers, b_value.layers) &&
+           frames_equal(a_value.frames, b_value.frames) &&
+           tags_equal(a_value.tags, b_value.tags) &&
+           a_value.playback_mode == b_value.playback_mode;
+}
+
+bool uv_equal(const UvRect& a_value, const UvRect& b_value) {
+    return a_value.x == b_value.x &&
+           a_value.y == b_value.y &&
+           a_value.w == b_value.w &&
+           a_value.h == b_value.h;
+}
+
+bool cuboid_equal(const Cuboid& a_value, const Cuboid& b_value) {
+    if (a_value.name != b_value.name ||
+        a_value.from != b_value.from ||
+        a_value.to != b_value.to ||
+        a_value.rotation_angle != b_value.rotation_angle ||
+        a_value.rotation_axis != b_value.rotation_axis ||
+        a_value.rotation_origin != b_value.rotation_origin ||
+        a_value.rotation_rescale != b_value.rotation_rescale ||
+        a_value.selected != b_value.selected) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a_value.uv.size(); ++i) {
+        if (!uv_equal(a_value.uv[i], b_value.uv[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool model_state_equal(const ModelDocument& a_value, const ModelDocument& b_value) {
+    if (a_value.texture_width != b_value.texture_width ||
+        a_value.texture_height != b_value.texture_height ||
+        a_value.selected_cuboid != b_value.selected_cuboid ||
+        a_value.selected_face != b_value.selected_face ||
+        a_value.cuboids.size() != b_value.cuboids.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a_value.cuboids.size(); ++i) {
+        if (!cuboid_equal(a_value.cuboids[i], b_value.cuboids[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<Pixel> extracted_palette_from_document(const Document& document, int max_colors) {
+    std::unordered_map<Pixel, int> counts;
+    for (const Pixel pixel : document.composite_active()) {
+        if (a(pixel) == 0) {
+            continue;
+        }
+        ++counts[pixel];
+    }
+    std::vector<std::pair<Pixel, int>> ranked;
+    ranked.reserve(counts.size());
+    for (const auto& item : counts) {
+        ranked.push_back(item);
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.second != rhs.second) {
+            return lhs.second > rhs.second;
+        }
+        return lhs.first < rhs.first;
+    });
+    std::vector<Pixel> colors;
+    colors.reserve(static_cast<std::size_t>(std::max(0, max_colors)));
+    for (const auto& item : ranked) {
+        colors.push_back(item.first);
+        if (static_cast<int>(colors.size()) >= max_colors) {
+            break;
+        }
+    }
+    return colors;
+}
+
+float pixel_luma(Pixel pixel) {
+    return 0.2126f * static_cast<float>(r(pixel)) +
+           0.7152f * static_cast<float>(g(pixel)) +
+           0.0722f * static_cast<float>(b(pixel));
+}
+
+float pixel_hue(Pixel pixel) {
+    const float red = static_cast<float>(r(pixel)) / 255.0f;
+    const float green = static_cast<float>(g(pixel)) / 255.0f;
+    const float blue = static_cast<float>(b(pixel)) / 255.0f;
+    const float max_channel = std::max(red, std::max(green, blue));
+    const float min_channel = std::min(red, std::min(green, blue));
+    const float delta = max_channel - min_channel;
+    if (delta <= 0.0f) {
+        return 0.0f;
+    }
+    float hue = 0.0f;
+    if (max_channel == red) {
+        hue = 60.0f * std::fmod(((green - blue) / delta), 6.0f);
+    } else if (max_channel == green) {
+        hue = 60.0f * (((blue - red) / delta) + 2.0f);
+    } else {
+        hue = 60.0f * (((red - green) / delta) + 4.0f);
+    }
+    return hue < 0.0f ? hue + 360.0f : hue;
+}
+
+std::vector<Pixel> palette_ramp(Pixel first, Pixel second, int steps) {
+    std::vector<Pixel> colors;
+    const int count = std::max(2, steps);
+    colors.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(count - 1);
+        const float inv = 1.0f - t;
+        colors.push_back(rgba(static_cast<std::uint8_t>(static_cast<float>(r(first)) * inv + static_cast<float>(r(second)) * t + 0.5f),
+                              static_cast<std::uint8_t>(static_cast<float>(g(first)) * inv + static_cast<float>(g(second)) * t + 0.5f),
+                              static_cast<std::uint8_t>(static_cast<float>(b(first)) * inv + static_cast<float>(b(second)) * t + 0.5f),
+                              static_cast<std::uint8_t>(static_cast<float>(a(first)) * inv + static_cast<float>(a(second)) * t + 0.5f)));
+    }
+    return colors;
+}
+
+void ensure_layer_mask(Layer& layer, int width, int height, std::uint8_t value) {
+    const std::size_t size = static_cast<std::size_t>(std::max(1, width) * std::max(1, height));
+    if (layer.mask.size() != size) {
+        layer.mask.assign(size, value);
+    }
+}
+
+void fill_layer_mask_from_selection(Layer& layer, const SelectionMask& selection, int width, int height) {
+    const std::size_t size = static_cast<std::size_t>(std::max(1, width) * std::max(1, height));
+    layer.mask.assign(size, 0);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (selection.contains(x, y)) {
+                layer.mask[static_cast<std::size_t>(y * width + x)] = 255;
+            }
+        }
+    }
+    layer.mask_enabled = true;
+}
+
+void fill_layer_mask_from_alpha(Layer& layer, const Cel& cel, int width, int height) {
+    const std::size_t size = static_cast<std::size_t>(std::max(1, width) * std::max(1, height));
+    layer.mask.assign(size, 0);
+    for (std::size_t i = 0; i < layer.mask.size() && i < cel.pixels.size(); ++i) {
+        layer.mask[i] = a(cel.pixels[i]);
+    }
+    layer.mask_enabled = true;
+}
+
+void load_selection_from_layer_mask(SelectionMask& selection, const Layer& layer, int width, int height) {
+    if (layer.mask.size() != static_cast<std::size_t>(width * height)) {
+        return;
+    }
+    selection.resize(width, height);
+    for (std::size_t i = 0; i < layer.mask.size(); ++i) {
+        selection.mask[i] = static_cast<std::uint8_t>(layer.mask[i] > 0);
+    }
+    selection.active = selection.selected_count() > 0;
+}
+
+void invert_layer_mask(Layer& layer, int width, int height) {
+    ensure_layer_mask(layer, width, height, 255);
+    for (std::uint8_t& value : layer.mask) {
+        value = static_cast<std::uint8_t>(255 - value);
+    }
+    layer.mask_enabled = true;
+}
+
 constexpr FileFilter kProjectFilters[] = {{"PixelArt project", "pixart"}};
 constexpr FileFilter kImageFilters[] = {{"Image files", "png,jpg,jpeg,bmp,tga"}};
 constexpr FileFilter kPngFilters[] = {{"PNG image", "png"}};
 constexpr FileFilter kGifFilters[] = {{"GIF animation", "gif"}};
 constexpr FileFilter kAsepriteFilters[] = {{"Aseprite sprite", "aseprite,ase"}};
 constexpr FileFilter kJsonFilters[] = {{"JSON", "json"}};
+
+struct SkyboxOption {
+    const char* name;
+    const char* directory;
+};
+
+constexpr SkyboxOption kSkyboxes[] = {
+    {"Solid", ""},
+    {"Kiara Dawn", "res/skyboxes/kiara_1_dawn"},
+    {"Venice Sunset", "res/skyboxes/venice_sunset"},
+    {"Snowy Field", "res/skyboxes/snowy_field"},
+};
+
+constexpr const char* kSkyboxFaceNames[] = {"front", "right", "back", "left", "top", "bottom"};
+
+struct TransformIconAsset {
+    const unsigned char* bytes;
+    unsigned int byte_count;
+    const char* tooltip;
+};
+
+const TransformIconAsset kTransformIconAssets[] = {
+    {px_transform_icon_select_png, px_transform_icon_select_png_len, "Select"},
+    {px_transform_icon_translate_png, px_transform_icon_translate_png_len, "Move"},
+    {px_transform_icon_rotate_png, px_transform_icon_rotate_png_len, "Rotate"},
+    {px_transform_icon_scale_png, px_transform_icon_scale_png_len, "Stretch"},
+};
+
+constexpr float kTransformToolbarPadding = 10.0f;
+constexpr float kTransformToolbarButtonSize = 38.0f;
+constexpr float kTransformToolbarGap = 6.0f;
+constexpr float kTransformToolbarIconInset = 8.0f;
 
 template <std::size_t N>
 FileFilterList filter_list(const FileFilter (&items)[N]) {
@@ -614,6 +995,52 @@ std::string filename_for_reference(const std::string& path) {
     return filename.empty() ? path : path_to_utf8(filename);
 }
 
+bool load_jpeg_pixels(const char* path, int& width, int& height, std::vector<Pixel>& pixels) {
+    int channels = 0;
+    unsigned char* decoded = stbi_load(path, &width, &height, &channels, 4);
+    if (decoded == nullptr || width <= 0 || height <= 0) {
+        if (decoded != nullptr) {
+            stbi_image_free(decoded);
+        }
+        return false;
+    }
+    const std::size_t pixel_count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    pixels.resize(pixel_count);
+    for (std::size_t i = 0; i < pixel_count; ++i) {
+        const std::size_t offset = i * 4;
+        pixels[i] = rgba(decoded[offset], decoded[offset + 1], decoded[offset + 2], decoded[offset + 3]);
+    }
+    stbi_image_free(decoded);
+    return true;
+}
+
+bool load_png_pixels_from_memory(const unsigned char* bytes,
+                                 unsigned int byte_count,
+                                 int& width,
+                                 int& height,
+                                 std::vector<Pixel>& pixels) {
+    if (bytes == nullptr || byte_count == 0U) {
+        return false;
+    }
+    int channels = 0;
+    unsigned char* decoded =
+        stbi_load_from_memory(bytes, static_cast<int>(byte_count), &width, &height, &channels, 4);
+    if (decoded == nullptr || width <= 0 || height <= 0) {
+        if (decoded != nullptr) {
+            stbi_image_free(decoded);
+        }
+        return false;
+    }
+    const std::size_t pixel_count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    pixels.resize(pixel_count);
+    for (std::size_t i = 0; i < pixel_count; ++i) {
+        const std::size_t offset = i * 4;
+        pixels[i] = rgba(decoded[offset], decoded[offset + 1], decoded[offset + 2], decoded[offset + 3]);
+    }
+    stbi_image_free(decoded);
+    return true;
+}
+
 } // namespace
 
 EditorApp::EditorApp(FileDialogProvider* dialogs, AppSettings settings)
@@ -628,6 +1055,7 @@ EditorApp::EditorApp(FileDialogProvider* dialogs, AppSettings settings)
 void EditorApp::render() {
     update_playback();
     refresh_texture();
+    begin_history_frame();
     draw_dockspace();
     draw_main_menu();
     draw_toolbar();
@@ -638,9 +1066,11 @@ void EditorApp::render() {
     draw_adjustments_panel();
     draw_model_panel();
     draw_model_preview_window();
+    draw_tile_preview_window();
     draw_effect_preview_popup();
     draw_error_console();
     draw_status_bar();
+    end_history_frame();
 }
 
 void EditorApp::update_playback() {
@@ -704,6 +1134,125 @@ void EditorApp::save_settings() {
     if (!save_app_settings(settings_, &error)) {
         report_error("Save settings", error);
     }
+}
+
+void EditorApp::sync_model_texture_metadata() {
+    model_.texture_width = document_.width;
+    model_.texture_height = document_.height;
+    clamp_model_uvs(model_);
+}
+
+void EditorApp::begin_history_frame() {
+    if (!history_pending_) {
+        history_before_document_ = document_;
+        history_before_model_ = model_;
+    }
+}
+
+bool EditorApp::editor_state_changed_from_history_baseline() const {
+    return !document_state_equal(history_before_document_, document_) ||
+           !model_state_equal(history_before_model_, model_);
+}
+
+bool EditorApp::history_interaction_in_progress() const {
+    return drag_active_ ||
+           stroke_active_ ||
+           clone_drag_active_ ||
+           move_drag_active_ ||
+           pixel_drag_preview_active_ ||
+           lasso_active_ ||
+           uv_drag_active_ ||
+           model_transform_drag_active_ ||
+           model_view_gizmo_drag_active_ ||
+           ImGui::IsAnyItemActive();
+}
+
+void EditorApp::push_history_entry(const std::string& name,
+                                   Document before_document,
+                                   ModelDocument before_model,
+                                   Document after_document,
+                                   ModelDocument after_model) {
+    if (document_state_equal(before_document, after_document) && model_state_equal(before_model, after_model)) {
+        return;
+    }
+    undo_stack_.push_back({name, std::move(before_document), std::move(after_document), std::move(before_model), std::move(after_model)});
+    if (undo_stack_.size() > 128) {
+        undo_stack_.pop_front();
+    }
+    redo_stack_.clear();
+}
+
+void EditorApp::end_history_frame() {
+    if (history_suppress_frame_) {
+        history_pending_ = false;
+        history_before_document_ = document_;
+        history_before_model_ = model_;
+        history_suppress_frame_ = false;
+        return;
+    }
+
+    if (!editor_state_changed_from_history_baseline()) {
+        history_pending_ = false;
+        return;
+    }
+    if (history_interaction_in_progress()) {
+        history_pending_ = true;
+        return;
+    }
+    push_history_entry("Edit", history_before_document_, history_before_model_, document_, model_);
+    history_pending_ = false;
+    history_before_document_ = document_;
+    history_before_model_ = model_;
+}
+
+bool EditorApp::undo_editor() {
+    if (!undo_stack_.empty()) {
+        EditorHistoryEntry entry = std::move(undo_stack_.back());
+        undo_stack_.pop_back();
+        document_ = entry.before_document;
+        model_ = entry.before_model;
+        redo_stack_.push_back(std::move(entry));
+        sync_model_texture_metadata();
+        texture_dirty_ = true;
+        history_pending_ = false;
+        history_suppress_frame_ = true;
+        set_status("Undo");
+        return true;
+    }
+    const bool changed = document_.undo();
+    if (changed) {
+        sync_model_texture_metadata();
+        texture_dirty_ = true;
+        history_pending_ = false;
+        history_suppress_frame_ = true;
+        set_status("Undo");
+    }
+    return changed;
+}
+
+bool EditorApp::redo_editor() {
+    if (!redo_stack_.empty()) {
+        EditorHistoryEntry entry = std::move(redo_stack_.back());
+        redo_stack_.pop_back();
+        document_ = entry.after_document;
+        model_ = entry.after_model;
+        undo_stack_.push_back(std::move(entry));
+        sync_model_texture_metadata();
+        texture_dirty_ = true;
+        history_pending_ = false;
+        history_suppress_frame_ = true;
+        set_status("Redo");
+        return true;
+    }
+    const bool changed = document_.redo();
+    if (changed) {
+        sync_model_texture_metadata();
+        texture_dirty_ = true;
+        history_pending_ = false;
+        history_suppress_frame_ = true;
+        set_status("Redo");
+    }
+    return changed;
 }
 
 DialogResult EditorApp::open_file_dialog(FileFilterList filters, const char* remembered_path) {
@@ -782,9 +1331,7 @@ void EditorApp::draw_main_menu() {
         if (ImGui::MenuItem("New")) {
             document_ = Document::create(std::clamp(new_width_, 1, 4096), std::clamp(new_height_, 1, 4096));
             model_ = ModelDocument::create_default();
-            model_.texture_width = document_.width;
-            model_.texture_height = document_.height;
-            clamp_model_uvs(model_);
+            sync_model_texture_metadata();
             texture_dirty_ = true;
             set_status("New document created");
         }
@@ -824,9 +1371,7 @@ void EditorApp::draw_main_menu() {
                 Document imported;
                 if (import_image(path, imported, &error)) {
                     document_ = std::move(imported);
-                    model_.texture_width = document_.width;
-                    model_.texture_height = document_.height;
-                    clamp_model_uvs(model_);
+                    sync_model_texture_metadata();
                     texture_dirty_ = true;
                     set_status(std::string("Imported ") + path);
                 } else {
@@ -899,9 +1444,7 @@ void EditorApp::draw_main_menu() {
                 Document imported;
                 if (import_aseprite(path, imported, &error)) {
                     document_ = std::move(imported);
-                    model_.texture_width = document_.width;
-                    model_.texture_height = document_.height;
-                    clamp_model_uvs(model_);
+                    sync_model_texture_metadata();
                     texture_dirty_ = true;
                     set_status(std::string("Imported ") + path);
                 } else {
@@ -972,8 +1515,8 @@ void EditorApp::draw_main_menu() {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit")) {
-        if (ImGui::MenuItem("Undo", "Ctrl+Z")) texture_dirty_ = document_.undo() || texture_dirty_;
-        if (ImGui::MenuItem("Redo", "Ctrl+Y")) texture_dirty_ = document_.redo() || texture_dirty_;
+        if (ImGui::MenuItem("Undo", "Ctrl+Z")) texture_dirty_ = undo_editor() || texture_dirty_;
+        if (ImGui::MenuItem("Redo", "Ctrl+Y")) texture_dirty_ = redo_editor() || texture_dirty_;
         if (ImGui::MenuItem("Select All", "Ctrl+A")) {
             auto before = document_.selection;
             document_.selection.select_all();
@@ -1103,10 +1646,29 @@ void EditorApp::draw_main_menu() {
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Grid", nullptr, &show_grid_);
         ImGui::MenuItem("Checkerboard", nullptr, &show_checker_);
+        ImGui::MenuItem("Tile Preview", nullptr, &show_tile_preview_);
         ImGui::MenuItem("Error Console", nullptr, &error_console_open_);
-        int zoom_value = static_cast<int>(pixel_zoom(zoom_));
-        if (ImGui::SliderInt("Zoom", &zoom_value, 1, 64, "%dx")) {
-            zoom_ = static_cast<float>(zoom_value);
+        if (ImGui::BeginMenu("3D Preview Skybox")) {
+            for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(kSkyboxes)); ++i) {
+                if (ImGui::MenuItem(kSkyboxes[i].name, nullptr, skybox_index_ == i)) {
+                    skybox_index_ = i;
+                    set_status(std::string("3D skybox: ") + kSkyboxes[i].name);
+                }
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Zoom In", "Ctrl++")) {
+            zoom_ *= kCanvasZoomStep;
+        }
+        if (ImGui::MenuItem("Zoom Out", "Ctrl+-")) {
+            zoom_ /= kCanvasZoomStep;
+        }
+        if (ImGui::MenuItem("Actual Size", "Ctrl+1")) {
+            zoom_ = 1.0f;
+        }
+        if (ImGui::MenuItem("Fit to Canvas", "Ctrl+0")) {
+            canvas_fit_requested_ = true;
         }
         ImGui::EndMenu();
     }
@@ -1143,6 +1705,12 @@ void EditorApp::draw_toolbar() {
     ImGui::SliderInt("Stroke", &tool_.brush_size, 1, 32);
     ImGui::SliderInt("Tolerance", &tool_.tolerance, 0, 442);
     ImGui::Checkbox("Contiguous", &tool_.contiguous);
+    ImGui::SeparatorText("Mask");
+    ImGui::Checkbox("Edit Active Mask", &edit_layer_mask_);
+    ImGui::Checkbox("Mask Overlay", &show_mask_overlay_);
+    if (edit_layer_mask_) {
+        ImGui::TextDisabled("Brushes edit grayscale mask values.");
+    }
     ImGui::InputText("Text", text_buffer_, sizeof(text_buffer_));
     if (text_box_.active) {
         ImGui::Text("Text box at %d, %d", text_box_.x, text_box_.y);
@@ -1156,32 +1724,82 @@ void EditorApp::draw_toolbar() {
 
 void EditorApp::draw_canvas() {
     ImGui::Begin("Canvas");
-    int zoom_value = static_cast<int>(pixel_zoom(zoom_));
-    if (ImGui::SliderInt("Zoom", &zoom_value, 1, 64, "%dx")) {
-        zoom_ = static_cast<float>(zoom_value);
-    } else {
-        zoom_ = pixel_zoom(zoom_);
+    bool zoom_out_requested = false;
+    bool zoom_in_requested = false;
+    bool actual_size_requested = false;
+    bool fit_requested = canvas_fit_requested_;
+    canvas_fit_requested_ = false;
+    if (ImGui::Button("-##CanvasZoomOut")) {
+        zoom_out_requested = true;
+    }
+    ImGui::SameLine();
+    ImGui::Text("Zoom %.0f%%", static_cast<double>(zoom_ * 100.0f));
+    ImGui::SameLine();
+    if (ImGui::Button("+##CanvasZoomIn")) {
+        zoom_in_requested = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("1:1##CanvasActualSize")) {
+        actual_size_requested = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Fit##CanvasFit")) {
+        fit_requested = true;
     }
     ImGui::SameLine();
     ImGui::Checkbox("Grid", &show_grid_);
     ImGui::SameLine();
     ImGui::Checkbox("Onion", &onion_skin_);
 
-    float z = pixel_zoom(zoom_);
-    ImVec2 canvas_size(pixel_scale(document_.width, z), pixel_scale(document_.height, z));
-    ImGui::BeginChild("CanvasScroll", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::BeginChild("CanvasView",
+                      ImVec2(0, 0),
+                      true,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const bool canvas_active = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) ||
                                ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-    ImVec2 origin = floor_screen_pos(ImGui::GetCursorScreenPos());
-    ImGui::InvisibleButton("CanvasHitTarget", canvas_size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
-    bool hovered = ImGui::IsItemHovered();
+    ImVec2 viewport_size = ImGui::GetContentRegionAvail();
+    viewport_size.x = std::max(1.0f, viewport_size.x);
+    viewport_size.y = std::max(1.0f, viewport_size.y);
+    ImVec2 viewport_origin = floor_screen_pos(ImGui::GetCursorScreenPos());
+    const ImVec2 viewport_center(viewport_origin.x + viewport_size.x * 0.5f,
+                                 viewport_origin.y + viewport_size.y * 0.5f);
+
+    if (zoom_out_requested) {
+        zoom_canvas_at(viewport_origin, viewport_size, viewport_center, zoom_ / kCanvasZoomStep);
+    }
+    if (zoom_in_requested) {
+        zoom_canvas_at(viewport_origin, viewport_size, viewport_center, zoom_ * kCanvasZoomStep);
+    }
+    if (actual_size_requested) {
+        zoom_canvas_at(viewport_origin, viewport_size, viewport_center, 1.0f);
+    }
+    if (fit_requested) {
+        zoom_canvas_at(viewport_origin,
+                       viewport_size,
+                       viewport_center,
+                       fit_canvas_zoom(document_.width, document_.height, viewport_size));
+    }
+    zoom_ = clamped_canvas_zoom(zoom_, document_.width, document_.height, viewport_size);
+    clamp_canvas_pan(viewport_size);
+
+    ImVec2 canvas_size(pixel_scale(document_.width, zoom_), pixel_scale(document_.height, zoom_));
+    ImVec2 center_offset = canvas_center_offset(viewport_size, canvas_size);
+    ImVec2 origin = floor_screen_pos(ImVec2(viewport_origin.x + center_offset.x + canvas_pan_.x,
+                                            viewport_origin.y + center_offset.y + canvas_pan_.y));
+    ImGui::InvisibleButton("CanvasHitTarget",
+                           viewport_size,
+                           ImGuiButtonFlags_MouseButtonLeft |
+                               ImGuiButtonFlags_MouseButtonRight |
+                               ImGuiButtonFlags_MouseButtonMiddle);
+    bool viewport_hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    bool viewport_active = ImGui::IsItemActive();
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     ImDrawListFlags old_flags = draw_list->Flags;
     draw_list->Flags &= ~(ImDrawListFlags_AntiAliasedLines | ImDrawListFlags_AntiAliasedFill);
     ImVec2 max(origin.x + canvas_size.x, origin.y + canvas_size.y);
 
     if (show_checker_) {
-        float tile = std::max(4.0f, z * 2.0f);
+        float tile = std::max(4.0f, zoom_ * 2.0f);
         for (float y = origin.y; y < max.y; y += tile) {
             for (float x = origin.x; x < max.x; x += tile) {
                 bool dark = (static_cast<int>((x - origin.x) / tile) + static_cast<int>((y - origin.y) / tile)) % 2 == 0;
@@ -1203,6 +1821,7 @@ void EditorApp::draw_canvas() {
     push_nearest_sampler(draw_list);
     draw_list->AddImage(gl_texture_id(canvas_texture_.id()), origin, max);
     push_linear_sampler(draw_list);
+    draw_mask_overlay(draw_list, origin, canvas_size);
     draw_grid_overlay(draw_list, origin, canvas_size);
     draw_floating_selection_overlay(draw_list, origin);
     draw_text_preview_overlay(draw_list, origin);
@@ -1210,26 +1829,105 @@ void EditorApp::draw_canvas() {
     draw_selection_overlay(draw_list, origin);
     draw_lasso_preview(draw_list, origin);
     draw_tool_drag_preview(draw_list, origin);
-    handle_canvas_input(origin, canvas_size, hovered, canvas_active);
+    handle_canvas_input(origin, viewport_size, viewport_hovered, viewport_active, canvas_active);
     draw_list->Flags = old_flags;
     ImGui::EndChild();
     ImGui::End();
 }
 
-void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool image_hovered, bool canvas_active) {
+void EditorApp::clamp_canvas_pan(const ImVec2& viewport_size) {
+    ImVec2 image_size(pixel_scale(document_.width, zoom_), pixel_scale(document_.height, zoom_));
+    const ImVec2 center_offset = canvas_center_offset(viewport_size, image_size);
+    ImVec2 image_origin(center_offset.x + canvas_pan_.x, center_offset.y + canvas_pan_.y);
+
+    auto clamp_axis = [](float origin, float image_extent, float viewport_extent) {
+        if (image_extent <= 0.0f || viewport_extent <= 0.0f) {
+            return origin;
+        }
+        const float visible_margin = std::min(std::min(96.0f, viewport_extent * 0.45f), image_extent * 0.5f);
+        const float min_origin = -image_extent + visible_margin;
+        const float max_origin = viewport_extent - visible_margin;
+        if (min_origin > max_origin) {
+            return (viewport_extent - image_extent) * 0.5f;
+        }
+        return std::clamp(origin, min_origin, max_origin);
+    };
+
+    image_origin.x = clamp_axis(image_origin.x, image_size.x, viewport_size.x);
+    image_origin.y = clamp_axis(image_origin.y, image_size.y, viewport_size.y);
+    canvas_pan_ = ImVec2(image_origin.x - center_offset.x, image_origin.y - center_offset.y);
+}
+
+void EditorApp::zoom_canvas_at(const ImVec2& viewport_origin,
+                               const ImVec2& viewport_size,
+                               const ImVec2& focal_point,
+                               float next_zoom) {
+    const float old_zoom = clamped_canvas_zoom(zoom_, document_.width, document_.height, viewport_size);
+    ImVec2 old_size(pixel_scale(document_.width, old_zoom), pixel_scale(document_.height, old_zoom));
+    ImVec2 old_center = canvas_center_offset(viewport_size, old_size);
+    ImVec2 old_origin(viewport_origin.x + old_center.x + canvas_pan_.x,
+                      viewport_origin.y + old_center.y + canvas_pan_.y);
+    ImVec2 old_max(old_origin.x + old_size.x, old_origin.y + old_size.y);
+    ImVec2 zoom_focus = point_in_rect(focal_point, old_origin, old_max)
+                            ? focal_point
+                            : ImVec2(viewport_origin.x + viewport_size.x * 0.5f,
+                                     viewport_origin.y + viewport_size.y * 0.5f);
+    ImVec2 focal_pixel((zoom_focus.x - old_origin.x) / old_zoom,
+                       (zoom_focus.y - old_origin.y) / old_zoom);
+
+    zoom_ = clamped_canvas_zoom(next_zoom, document_.width, document_.height, viewport_size);
+    ImVec2 new_size(pixel_scale(document_.width, zoom_), pixel_scale(document_.height, zoom_));
+    ImVec2 new_center = canvas_center_offset(viewport_size, new_size);
+    ImVec2 new_origin(zoom_focus.x - focal_pixel.x * zoom_,
+                      zoom_focus.y - focal_pixel.y * zoom_);
+    canvas_pan_ = ImVec2(new_origin.x - viewport_origin.x - new_center.x,
+                         new_origin.y - viewport_origin.y - new_center.y);
+    clamp_canvas_pan(viewport_size);
+}
+
+void EditorApp::handle_canvas_input(const ImVec2& origin,
+                                    const ImVec2& viewport_size,
+                                    bool viewport_hovered,
+                                    bool viewport_active,
+                                    bool canvas_active) {
     ImGuiIO& io = ImGui::GetIO();
     int px_i = 0;
     int py_i = 0;
+    ImVec2 image_max(origin.x + pixel_scale(document_.width, zoom_),
+                     origin.y + pixel_scale(document_.height, zoom_));
+    bool image_hovered = viewport_hovered && point_in_rect(io.MousePos, origin, image_max);
     bool over_pixel = image_hovered && mouse_to_pixel(origin, px_i, py_i);
     const bool can_use_canvas_shortcuts = canvas_active && !text_box_.active && !io.WantTextInput && !ImGui::IsAnyItemActive();
+    const bool mask_editing = edit_layer_mask_ &&
+                              document_.active_layer >= 0 &&
+                              document_.active_layer < static_cast<int>(document_.layers.size());
+    auto mask_value_from_color = [](Pixel pixel) {
+        return static_cast<std::uint8_t>(std::clamp(pixel_luma(pixel), 0.0f, 255.0f) + 0.5f);
+    };
 
-    if (canvas_active && action_modifier_down(io) && io.MouseWheel != 0.0f) {
-        zoom_ = std::clamp(pixel_zoom(zoom_) + io.MouseWheel, 1.0f, 64.0f);
+    ImVec2 image_size(image_max.x - origin.x, image_max.y - origin.y);
+    ImVec2 center_offset = canvas_center_offset(viewport_size, image_size);
+    ImVec2 viewport_origin(origin.x - center_offset.x - canvas_pan_.x,
+                           origin.y - center_offset.y - canvas_pan_.y);
+
+    if (viewport_hovered && io.MouseWheel != 0.0f) {
+        const float factor = std::pow(kCanvasZoomStep, io.MouseWheel);
+        zoom_canvas_at(viewport_origin, viewport_size, io.MousePos, zoom_ * factor);
     }
     const bool space_down = ImGui::IsKeyDown(ImGuiKey_Space);
+    if (viewport_active && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+        canvas_pan_.x += io.MouseDelta.x;
+        canvas_pan_.y += io.MouseDelta.y;
+        clamp_canvas_pan(viewport_size);
+        return;
+    }
+    if (viewport_active && ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+        return;
+    }
     if (canvas_active && space_down && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
-        ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
-        ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+        canvas_pan_.x += io.MouseDelta.x;
+        canvas_pan_.y += io.MouseDelta.y;
+        clamp_canvas_pan(viewport_size);
         return;
     }
     if (canvas_active && space_down && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -1252,12 +1950,12 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool im
         }
     }
     if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_Z)) {
-        texture_dirty_ = document_.undo() || texture_dirty_;
+        texture_dirty_ = undo_editor() || texture_dirty_;
     }
     if (can_use_canvas_shortcuts && (shortcut_ctrl_or_super(ImGuiKey_Y) ||
         ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z) ||
         ImGui::Shortcut(ImGuiMod_Super | ImGuiMod_Shift | ImGuiKey_Z))) {
-        texture_dirty_ = document_.redo() || texture_dirty_;
+        texture_dirty_ = redo_editor() || texture_dirty_;
     }
     if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_A)) {
         auto before = document_.selection;
@@ -1273,13 +1971,27 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool im
         document_.commit_selection_edit("Invert Selection", before);
     }
     if (can_use_canvas_shortcuts && (shortcut_ctrl_or_super(ImGuiKey_Equal) || shortcut_ctrl_or_super(ImGuiKey_KeypadAdd))) {
-        zoom_ = std::min(64.0f, pixel_zoom(zoom_) + 1.0f);
+        ImVec2 viewport_center(viewport_origin.x + viewport_size.x * 0.5f,
+                               viewport_origin.y + viewport_size.y * 0.5f);
+        zoom_canvas_at(viewport_origin, viewport_size, viewport_center, zoom_ * kCanvasZoomStep);
     }
     if (can_use_canvas_shortcuts && (shortcut_ctrl_or_super(ImGuiKey_Minus) || shortcut_ctrl_or_super(ImGuiKey_KeypadSubtract))) {
-        zoom_ = std::max(1.0f, pixel_zoom(zoom_) - 1.0f);
+        ImVec2 viewport_center(viewport_origin.x + viewport_size.x * 0.5f,
+                               viewport_origin.y + viewport_size.y * 0.5f);
+        zoom_canvas_at(viewport_origin, viewport_size, viewport_center, zoom_ / kCanvasZoomStep);
     }
     if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_0)) {
-        zoom_ = 12.0f;
+        ImVec2 viewport_center(viewport_origin.x + viewport_size.x * 0.5f,
+                               viewport_origin.y + viewport_size.y * 0.5f);
+        zoom_canvas_at(viewport_origin,
+                       viewport_size,
+                       viewport_center,
+                       fit_canvas_zoom(document_.width, document_.height, viewport_size));
+    }
+    if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_1)) {
+        ImVec2 viewport_center(viewport_origin.x + viewport_size.x * 0.5f,
+                               viewport_origin.y + viewport_size.y * 0.5f);
+        zoom_canvas_at(viewport_origin, viewport_size, viewport_center, 1.0f);
     }
     if (text_box_.active && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))) {
         commit_text_box();
@@ -1310,8 +2022,9 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool im
         if (nudge_x != 0 || nudge_y != 0) {
             if (space_down) {
                 constexpr float kKeyboardPanStep = 24.0f;
-                ImGui::SetScrollX(ImGui::GetScrollX() + static_cast<float>(nudge_x) * kKeyboardPanStep);
-                ImGui::SetScrollY(ImGui::GetScrollY() + static_cast<float>(nudge_y) * kKeyboardPanStep);
+                canvas_pan_.x -= static_cast<float>(nudge_x) * kKeyboardPanStep;
+                canvas_pan_.y -= static_cast<float>(nudge_y) * kKeyboardPanStep;
+                clamp_canvas_pan(viewport_size);
             } else {
                 const int step = action_modifier_down(io) ? 10 : 1;
                 nudge_canvas_selection(nudge_x * step, nudge_y * step);
@@ -1334,7 +2047,12 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool im
     }
 
     if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && tool_.tool == ToolType::Bucket) {
-        fill_bucket(document_, px_i, py_i, tool_.secondary, tool_.tolerance, tool_.contiguous != io.KeyShift);
+        if (mask_editing) {
+            fill_mask_bucket(document_, px_i, py_i, mask_value_from_color(tool_.secondary), tool_.tolerance, tool_.contiguous != io.KeyShift);
+            set_status("Filled mask");
+        } else {
+            fill_bucket(document_, px_i, py_i, tool_.secondary, tool_.tolerance, tool_.contiguous != io.KeyShift);
+        }
         texture_dirty_ = true;
         drag_active_ = false;
     }
@@ -1382,11 +2100,21 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool im
             case ToolType::Eraser:
                 stroke_active_ = true;
                 stroke_before_ = document_.snapshot_active_cel();
-                plot_brush_raw(document_, px_i, py_i, tool_.primary, tool_.tool == ToolType::Pencil ? 1 : tool_.brush_size, tool_.tool == ToolType::Eraser);
+                if (mask_editing) {
+                    const std::uint8_t mask_value = tool_.tool == ToolType::Eraser ? 0 : mask_value_from_color(tool_.primary);
+                    plot_mask_brush_raw(document_, px_i, py_i, mask_value, tool_.tool == ToolType::Pencil ? 1 : tool_.brush_size);
+                } else {
+                    plot_brush_raw(document_, px_i, py_i, tool_.primary, tool_.tool == ToolType::Pencil ? 1 : tool_.brush_size, tool_.tool == ToolType::Eraser);
+                }
                 texture_dirty_ = true;
                 break;
             case ToolType::Bucket:
-                fill_bucket(document_, px_i, py_i, tool_.primary, tool_.tolerance, tool_.contiguous != io.KeyShift);
+                if (mask_editing) {
+                    fill_mask_bucket(document_, px_i, py_i, mask_value_from_color(tool_.primary), tool_.tolerance, tool_.contiguous != io.KeyShift);
+                    set_status("Filled mask");
+                } else {
+                    fill_bucket(document_, px_i, py_i, tool_.primary, tool_.tolerance, tool_.contiguous != io.KeyShift);
+                }
                 texture_dirty_ = true;
                 drag_active_ = false;
                 break;
@@ -1473,7 +2201,12 @@ void EditorApp::handle_canvas_input(const ImVec2& origin, const ImVec2&, bool im
 
     if (stroke_active_ && over_pixel && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         int size = tool_.tool == ToolType::Pencil ? 1 : tool_.brush_size;
-        draw_line_raw(document_, last_x_, last_y_, px_i, py_i, tool_.primary, size, tool_.tool == ToolType::Eraser);
+        if (mask_editing) {
+            const std::uint8_t mask_value = tool_.tool == ToolType::Eraser ? 0 : mask_value_from_color(tool_.primary);
+            draw_mask_line_raw(document_, last_x_, last_y_, px_i, py_i, mask_value, size);
+        } else {
+            draw_line_raw(document_, last_x_, last_y_, px_i, py_i, tool_.primary, size, tool_.tool == ToolType::Eraser);
+        }
         last_x_ = px_i;
         last_y_ = py_i;
         texture_dirty_ = true;
@@ -1742,6 +2475,35 @@ void EditorApp::draw_floating_selection_overlay(ImDrawList* draw_list, const ImV
     draw_list->AddRect(a_pos, b_pos, edge, 0.0f, 0, 2.0f);
 }
 
+void EditorApp::draw_mask_overlay(ImDrawList* draw_list, const ImVec2& origin, const ImVec2&) const {
+    if (!edit_layer_mask_ && !show_mask_overlay_) {
+        return;
+    }
+    if (document_.active_layer < 0 || document_.active_layer >= static_cast<int>(document_.layers.size())) {
+        return;
+    }
+    const Layer& layer = document_.layers[static_cast<std::size_t>(document_.active_layer)];
+    if (!layer.mask_enabled || layer.mask.size() != static_cast<std::size_t>(document_.width * document_.height)) {
+        return;
+    }
+    constexpr std::size_t kMaxOverlayPixels = 1048576;
+    if (layer.mask.size() > kMaxOverlayPixels) {
+        return;
+    }
+    for (int y = 0; y < document_.height; ++y) {
+        for (int x = 0; x < document_.width; ++x) {
+            const std::uint8_t value = layer.mask[static_cast<std::size_t>(document_.pixel_index(x, y))];
+            if (value == 255) {
+                continue;
+            }
+            const int alpha = std::clamp((255 - static_cast<int>(value)) / 2, 32, 128);
+            const ImVec2 min_pos(origin.x + pixel_scale(x, zoom_), origin.y + pixel_scale(y, zoom_));
+            const ImVec2 max_pos(origin.x + pixel_scale(x + 1, zoom_), origin.y + pixel_scale(y + 1, zoom_));
+            draw_list->AddRectFilled(min_pos, max_pos, IM_COL32(255, 40, 80, alpha));
+        }
+    }
+}
+
 void EditorApp::draw_text_preview_overlay(ImDrawList* draw_list, const ImVec2& origin) const {
     if (!text_box_.active) {
         return;
@@ -1780,7 +2542,7 @@ void EditorApp::draw_selected_model_face_overlay(ImDrawList* draw_list, const Im
     int cuboid_index = std::clamp(model_.selected_cuboid, 0, static_cast<int>(model_.cuboids.size()) - 1);
     int face_index = std::clamp(model_.selected_face, 0, 5);
     const Cuboid& cuboid = model_.cuboids[static_cast<std::size_t>(cuboid_index)];
-    float z = pixel_zoom(zoom_);
+    float z = zoom_;
     auto draw_face = [&](int face, bool selected) {
         UvRect uv = clamped_uv_rect(cuboid.uv[static_cast<std::size_t>(face)], document_.width, document_.height);
         ImVec2 a_pos(origin.x + pixel_scale(uv.x, z), origin.y + pixel_scale(uv.y, z));
@@ -1827,7 +2589,7 @@ void EditorApp::draw_tool_drag_preview(ImDrawList* draw_list, const ImVec2& orig
             return;
     }
 
-    float z = pixel_zoom(zoom_);
+    float z = zoom_;
     auto pixel_rect = [&](int x0, int y0, int x1, int y1, ImVec2& min_pos, ImVec2& max_pos) {
         int min_x = std::min(x0, x1);
         int max_x = std::max(x0, x1);
@@ -1911,6 +2673,44 @@ void EditorApp::draw_color_panel() {
         document_.palette.active = std::clamp(document_.palette.active, 0, std::max(0, static_cast<int>(document_.palette.colors.size()) - 1));
         document_.commit_palette_edit("Remove Swatch", before);
     }
+    if (ImGui::Button("Extract")) {
+        std::vector<Pixel> colors = extracted_palette_from_document(document_, 32);
+        if (!colors.empty()) {
+            auto before = document_.palette;
+            document_.palette.colors = std::move(colors);
+            document_.palette.active = 0;
+            document_.commit_palette_edit("Extract Palette", before);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Sort")) {
+        auto before = document_.palette;
+        std::sort(document_.palette.colors.begin(), document_.palette.colors.end(), [](Pixel lhs, Pixel rhs) {
+            const float lhs_hue = pixel_hue(lhs);
+            const float rhs_hue = pixel_hue(rhs);
+            if (lhs_hue != rhs_hue) {
+                return lhs_hue < rhs_hue;
+            }
+            return pixel_luma(lhs) < pixel_luma(rhs);
+        });
+        document_.commit_palette_edit("Sort Palette", before);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Ramp")) {
+        auto before = document_.palette;
+        document_.palette.colors = palette_ramp(tool_.primary, tool_.secondary, 8);
+        document_.palette.active = 0;
+        document_.commit_palette_edit("Generate Palette Ramp", before);
+    }
+    if (ImGui::Button("Remap")) {
+        apply_palette_quantize(document_, document_.palette, false);
+        texture_dirty_ = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Dither Remap")) {
+        apply_palette_quantize(document_, document_.palette, true);
+        texture_dirty_ = true;
+    }
     ImGui::End();
 }
 
@@ -1968,6 +2768,51 @@ void EditorApp::draw_layers_panel() {
         if (ImGui::Combo("Blend", &blend, modes, IM_ARRAYSIZE(modes))) {
             layer.blend_mode = static_cast<LayerBlendMode>(blend);
             texture_dirty_ = true;
+        }
+        if (ImGui::Checkbox("Mask", &layer.mask_enabled)) {
+            ensure_layer_mask(layer, document_.width, document_.height, 255);
+            texture_dirty_ = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Clip", &layer.clip_to_below)) {
+            texture_dirty_ = true;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", layer.mask.empty() ? "No mask" : "Mask ready");
+        if (ImGui::Button("Reveal")) {
+            layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 255);
+            layer.mask_enabled = true;
+            texture_dirty_ = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Hide")) {
+            layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 0);
+            layer.mask_enabled = true;
+            texture_dirty_ = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("From Selection")) {
+            fill_layer_mask_from_selection(layer, document_.selection, document_.width, document_.height);
+            texture_dirty_ = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("From Alpha")) {
+            fill_layer_mask_from_alpha(layer, document_.cel(document_.active_frame, i), document_.width, document_.height);
+            texture_dirty_ = true;
+        }
+        if (ImGui::Button("Invert Mask")) {
+            invert_layer_mask(layer, document_.width, document_.height);
+            texture_dirty_ = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear Mask")) {
+            layer.mask.clear();
+            layer.mask_enabled = false;
+            texture_dirty_ = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Select Mask")) {
+            load_selection_from_layer_mask(document_.selection, layer, document_.width, document_.height);
         }
         ImGui::PopID();
     }
@@ -2066,6 +2911,10 @@ void EditorApp::draw_adjustments_panel() {
         contrast_ = 0;
         texture_dirty_ = true;
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Preview##BrightnessContrast")) {
+        start_effect_preview(EffectPreviewKind::BrightnessContrast);
+    }
     ImGui::SliderFloat("Hue", &hue_, -180.0f, 180.0f, "%.1f");
     ImGui::SliderFloat("Saturation", &saturation_, -1.0f, 1.0f, "%.2f");
     ImGui::SliderFloat("Value", &value_, -1.0f, 1.0f, "%.2f");
@@ -2073,6 +2922,10 @@ void EditorApp::draw_adjustments_panel() {
         apply_hsv(document_, hue_, saturation_, value_);
         hue_ = saturation_ = value_ = 0.0f;
         texture_dirty_ = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Preview##HSV")) {
+        start_effect_preview(EffectPreviewKind::Hsv);
     }
     ImGui::SeparatorText("Levels");
     ImGui::SliderInt("Input Black", &levels_.in_black, 0, 254);
@@ -2083,6 +2936,10 @@ void EditorApp::draw_adjustments_panel() {
     if (ImGui::Button("Apply Levels")) {
         apply_levels(document_, levels_);
         texture_dirty_ = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Preview##Levels")) {
+        start_effect_preview(EffectPreviewKind::Levels);
     }
     ImGui::SeparatorText("Pixel Art");
     ImGui::SliderInt("Posterize Levels", &posterize_levels_, 2, 32);
@@ -2105,9 +2962,17 @@ void EditorApp::draw_adjustments_panel() {
         texture_dirty_ = true;
     }
     ImGui::SameLine();
+    if (ImGui::Button("Preview Quantize")) {
+        start_effect_preview(EffectPreviewKind::PaletteQuantize);
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Dither")) {
         apply_palette_quantize(document_, document_.palette, true);
         texture_dirty_ = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Preview Dither")) {
+        start_effect_preview(EffectPreviewKind::PaletteDither);
     }
     ImGui::SeparatorText("Paint.NET-style Effects");
     ImGui::SliderInt("Effect Radius", &effect_radius_, 1, 32);
@@ -2194,6 +3059,21 @@ void EditorApp::apply_effect_to(Document& target) const {
             break;
         case EffectPreviewKind::SurfaceBlur:
             apply_surface_blur(target, effect_radius_, effect_amount_);
+            break;
+        case EffectPreviewKind::BrightnessContrast:
+            apply_brightness_contrast(target, brightness_, contrast_);
+            break;
+        case EffectPreviewKind::Hsv:
+            apply_hsv(target, hue_, saturation_, value_);
+            break;
+        case EffectPreviewKind::Levels:
+            apply_levels(target, levels_);
+            break;
+        case EffectPreviewKind::PaletteQuantize:
+            apply_palette_quantize(target, target.palette, false);
+            break;
+        case EffectPreviewKind::PaletteDither:
+            apply_palette_quantize(target, target.palette, true);
             break;
         case EffectPreviewKind::AutoLevel:
             apply_auto_level(target);
@@ -2378,6 +3258,22 @@ void EditorApp::draw_effect_preview_parameters() {
             radius_slider();
             angle_slider();
             break;
+        case EffectPreviewKind::BrightnessContrast:
+            changed |= ImGui::SliderInt("Brightness", &brightness_, -255, 255);
+            changed |= ImGui::SliderInt("Contrast", &contrast_, -255, 255);
+            break;
+        case EffectPreviewKind::Hsv:
+            changed |= ImGui::SliderFloat("Hue", &hue_, -180.0f, 180.0f, "%.1f");
+            changed |= ImGui::SliderFloat("Saturation", &saturation_, -1.0f, 1.0f, "%.2f");
+            changed |= ImGui::SliderFloat("Value", &value_, -1.0f, 1.0f, "%.2f");
+            break;
+        case EffectPreviewKind::Levels:
+            changed |= ImGui::SliderInt("Input Black", &levels_.in_black, 0, 254);
+            changed |= ImGui::SliderInt("Input White", &levels_.in_white, 1, 255);
+            changed |= ImGui::SliderFloat("Gamma", &levels_.gamma, 0.1f, 4.0f);
+            changed |= ImGui::SliderInt("Output Black", &levels_.out_black, 0, 255);
+            changed |= ImGui::SliderInt("Output White", &levels_.out_white, 0, 255);
+            break;
         case EffectPreviewKind::RadialBlur:
         case EffectPreviewKind::ZoomBlur:
         case EffectPreviewKind::RedEyeRemoval:
@@ -2427,6 +3323,8 @@ void EditorApp::draw_effect_preview_parameters() {
         case EffectPreviewKind::Sepia:
         case EffectPreviewKind::InvertColors:
         case EffectPreviewKind::InvertAlpha:
+        case EffectPreviewKind::PaletteQuantize:
+        case EffectPreviewKind::PaletteDither:
         case EffectPreviewKind::None:
             ImGui::TextDisabled("This effect has no adjustable parameters.");
             break;
@@ -2485,9 +3383,7 @@ void EditorApp::draw_histogram_plot() {
 
 void EditorApp::draw_model_panel() {
     ImGui::Begin("Model / UV");
-    model_.texture_width = document_.width;
-    model_.texture_height = document_.height;
-    clamp_model_uvs(model_);
+    sync_model_texture_metadata();
     if (ImGui::Button("+ Cuboid")) model_.add_cuboid();
     ImGui::SameLine();
     if (ImGui::Button("- Cuboid")) model_.remove_selected();
@@ -2539,6 +3435,52 @@ void EditorApp::draw_model_preview_window() {
     ImGui::SetNextWindowSize(ImVec2(460, 340), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("3D Preview")) {
         draw_model_preview();
+    }
+    ImGui::End();
+}
+
+void EditorApp::draw_tile_preview_window() {
+    if (!show_tile_preview_) {
+        return;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(420, 420), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Tile Preview", &show_tile_preview_)) {
+        ImVec2 available = ImGui::GetContentRegionAvail();
+        available.x = std::max(96.0f, available.x);
+        available.y = std::max(96.0f, available.y);
+        const float cell = std::floor(std::max(1.0f, std::min(available.x / 3.0f, available.y / 3.0f)));
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const ImVec2 preview_size(cell * 3.0f, cell * 3.0f);
+        ImGui::InvisibleButton("TilePreviewSurface", preview_size);
+
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        draw_list->AddRectFilled(origin,
+                                 ImVec2(origin.x + preview_size.x, origin.y + preview_size.y),
+                                 IM_COL32(92, 92, 92, 255));
+        canvas_texture_.bind_nearest();
+        push_nearest_sampler(draw_list);
+        for (int y = 0; y < 3; ++y) {
+            for (int x = 0; x < 3; ++x) {
+                const ImVec2 min_pos(origin.x + static_cast<float>(x) * cell,
+                                     origin.y + static_cast<float>(y) * cell);
+                const ImVec2 max_pos(min_pos.x + cell, min_pos.y + cell);
+                draw_list->AddImage(gl_texture_id(canvas_texture_.id()), min_pos, max_pos);
+            }
+        }
+        push_linear_sampler(draw_list);
+        draw_list->AddRect(origin,
+                           ImVec2(origin.x + preview_size.x, origin.y + preview_size.y),
+                           IM_COL32(20, 20, 20, 160));
+        for (int i = 1; i < 3; ++i) {
+            const float offset = static_cast<float>(i) * cell;
+            draw_list->AddLine(ImVec2(origin.x + offset, origin.y),
+                               ImVec2(origin.x + offset, origin.y + preview_size.y),
+                               IM_COL32(255, 230, 40, 160));
+            draw_list->AddLine(ImVec2(origin.x, origin.y + offset),
+                               ImVec2(origin.x + preview_size.x, origin.y + offset),
+                               IM_COL32(255, 230, 40, 160));
+        }
     }
     ImGui::End();
 }
@@ -2637,22 +3579,163 @@ void EditorApp::handle_uv_input(const ImVec2& origin, float scale) {
     }
 }
 
-void EditorApp::draw_model_preview() {
-    const char* modes[] = {"Select", "Move", "Rotate", "Scale"};
-    for (int mode = 0; mode < static_cast<int>(IM_ARRAYSIZE(modes)); ++mode) {
-        if (mode > 0) {
-            ImGui::SameLine();
+bool EditorApp::ensure_skybox_texture() {
+    if (skybox_index_ <= 0) {
+        return false;
+    }
+    if (loaded_skybox_index_ == skybox_index_ && skybox_face_textures_[0].id() != 0) {
+        return true;
+    }
+    loaded_skybox_index_ = -1;
+    for (GLCanvasTexture& texture : skybox_face_textures_) {
+        texture.destroy();
+    }
+
+    const int index = std::clamp(skybox_index_, 0, static_cast<int>(IM_ARRAYSIZE(kSkyboxes)) - 1);
+    for (int face = 0; face < static_cast<int>(IM_ARRAYSIZE(kSkyboxFaceNames)); ++face) {
+        int width = 0;
+        int height = 0;
+        std::vector<Pixel> pixels;
+        const std::string path = std::string(kSkyboxes[index].directory) + "/" + kSkyboxFaceNames[face] + ".jpg";
+        if (!load_jpeg_pixels(path.c_str(), width, height, pixels)) {
+            report_error("Load skybox", "Could not load " + path);
+            return false;
         }
-        ImGui::PushID(mode);
-        if (ImGui::Selectable(modes[mode], model_transform_mode_ == mode, 0, ImVec2(64.0f, 0.0f))) {
+        skybox_face_textures_[static_cast<std::size_t>(face)].update(width, height, pixels);
+    }
+    loaded_skybox_index_ = index;
+    return skybox_face_textures_[0].id() != 0;
+}
+
+void EditorApp::draw_skybox_background(ImDrawList* draw_list, const ImVec2& origin, const ImVec2& size) {
+    if (skybox_index_ <= 0 || !ensure_skybox_texture()) {
+        return;
+    }
+    const float pitch = model_viewport_.pitch_degrees;
+    int face = 0;
+    if (pitch > 58.0f) {
+        face = 4;
+    } else if (pitch < -58.0f) {
+        face = 5;
+    } else {
+        const float yaw = std::fmod(model_viewport_.yaw_degrees + 360.0f + 45.0f, 360.0f);
+        face = static_cast<int>(yaw / 90.0f) % 4;
+    }
+
+    GLCanvasTexture& texture = skybox_face_textures_[static_cast<std::size_t>(face)];
+    texture.bind_linear_repeat();
+    push_linear_sampler(draw_list);
+
+    const float aspect = size.x / std::max(1.0f, size.y);
+    ImVec2 uv_min(0.0f, 0.0f);
+    ImVec2 uv_max(1.0f, 1.0f);
+    if (aspect > 1.0f) {
+        const float vertical_span = 1.0f / aspect;
+        uv_min.y = (1.0f - vertical_span) * 0.5f;
+        uv_max.y = uv_min.y + vertical_span;
+    } else {
+        const float horizontal_span = aspect;
+        uv_min.x = (1.0f - horizontal_span) * 0.5f;
+        uv_max.x = uv_min.x + horizontal_span;
+    }
+
+    draw_list->AddImage(gl_texture_id(texture.id()),
+                        origin,
+                        ImVec2(origin.x + size.x, origin.y + size.y),
+                        uv_min,
+                        uv_max);
+    push_linear_sampler(draw_list);
+}
+
+bool EditorApp::ensure_transform_icon_textures() {
+    if (transform_icons_loaded_) {
+        return true;
+    }
+    for (int mode = 0; mode < static_cast<int>(IM_ARRAYSIZE(kTransformIconAssets)); ++mode) {
+        int width = 0;
+        int height = 0;
+        std::vector<Pixel> pixels;
+        const TransformIconAsset& asset = kTransformIconAssets[mode];
+        if (!load_png_pixels_from_memory(asset.bytes, asset.byte_count, width, height, pixels)) {
+            report_error("Load transform icon", asset.tooltip);
+            return false;
+        }
+        transform_icon_textures_[static_cast<std::size_t>(mode)].update(width, height, pixels);
+    }
+    transform_icons_loaded_ = true;
+    return true;
+}
+
+ImVec2 transform_toolbar_button_min(const ImVec2& origin, int mode) {
+    return ImVec2(origin.x + kTransformToolbarPadding,
+                  origin.y + kTransformToolbarPadding +
+                      static_cast<float>(mode) * (kTransformToolbarButtonSize + kTransformToolbarGap));
+}
+
+bool EditorApp::handle_model_transform_toolbar_input(const ImVec2& origin, const ImVec2& size) {
+    ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 toolbar_min(origin.x + kTransformToolbarPadding, origin.y + kTransformToolbarPadding);
+    const ImVec2 toolbar_max(toolbar_min.x + kTransformToolbarButtonSize,
+                             toolbar_min.y +
+                                 static_cast<float>(IM_ARRAYSIZE(kTransformIconAssets)) * kTransformToolbarButtonSize +
+                                 static_cast<float>(IM_ARRAYSIZE(kTransformIconAssets) - 1) * kTransformToolbarGap);
+    if (!point_in_rect(io.MousePos, toolbar_min, toolbar_max) ||
+        !point_in_rect(io.MousePos, origin, ImVec2(origin.x + size.x, origin.y + size.y))) {
+        return false;
+    }
+
+    for (int mode = 0; mode < static_cast<int>(IM_ARRAYSIZE(kTransformIconAssets)); ++mode) {
+        const ImVec2 button_min = transform_toolbar_button_min(origin, mode);
+        const ImVec2 button_max(button_min.x + kTransformToolbarButtonSize,
+                                button_min.y + kTransformToolbarButtonSize);
+        if (!point_in_rect(io.MousePos, button_min, button_max)) {
+            continue;
+        }
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             model_transform_mode_ = mode;
             model_transform_drag_active_ = false;
+            model_view_gizmo_drag_active_ = false;
+            set_status(std::string("3D transform: ") + kTransformIconAssets[mode].tooltip);
         }
-        ImGui::PopID();
+        ImGui::SetTooltip("%s", kTransformIconAssets[mode].tooltip);
+        return true;
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s %s", model_transform_mode_name(model_transform_mode_), model_transform_axis_name(model_transform_axis_));
+    return true;
+}
 
+void EditorApp::draw_model_transform_toolbar(ImDrawList* draw_list, const ImVec2& origin) {
+    const bool icons_ready = ensure_transform_icon_textures();
+    for (int mode = 0; mode < static_cast<int>(IM_ARRAYSIZE(kTransformIconAssets)); ++mode) {
+        const ImVec2 button_min = transform_toolbar_button_min(origin, mode);
+        const ImVec2 button_max(button_min.x + kTransformToolbarButtonSize,
+                                button_min.y + kTransformToolbarButtonSize);
+        const bool selected = model_transform_mode_ == mode;
+        const bool hovered = point_in_rect(ImGui::GetIO().MousePos, button_min, button_max);
+        const ImU32 fill = selected ? IM_COL32(52, 128, 230, 238)
+                                    : (hovered ? IM_COL32(228, 232, 238, 236) : IM_COL32(198, 204, 212, 218));
+        const ImU32 border = selected ? IM_COL32(134, 198, 255, 255) : IM_COL32(20, 24, 30, 210);
+        draw_list->AddRectFilled(button_min, button_max, fill, 4.0f);
+        draw_list->AddRect(button_min, button_max, border, 4.0f, 0, selected ? 2.4f : 1.2f);
+
+        const ImVec2 icon_min(button_min.x + kTransformToolbarIconInset,
+                              button_min.y + kTransformToolbarIconInset);
+        const ImVec2 icon_max(button_max.x - kTransformToolbarIconInset,
+                              button_max.y - kTransformToolbarIconInset);
+        if (icons_ready && transform_icon_textures_[static_cast<std::size_t>(mode)].id() != 0) {
+            transform_icon_textures_[static_cast<std::size_t>(mode)].bind_nearest();
+            draw_list->AddImage(gl_texture_id(transform_icon_textures_[static_cast<std::size_t>(mode)].id()),
+                                icon_min,
+                                icon_max);
+        } else {
+            const char* label = kTransformIconAssets[mode].tooltip;
+            draw_list->AddText(ImVec2(button_min.x + 9.0f, button_min.y + 10.0f),
+                               IM_COL32(10, 12, 16, 255),
+                               label);
+        }
+    }
+}
+
+void EditorApp::draw_model_preview() {
     ImVec2 available = ImGui::GetContentRegionAvail();
     ImVec2 size(std::max(300.0f, available.x), std::max(220.0f, available.y));
     ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -2662,19 +3745,20 @@ void EditorApp::draw_model_preview() {
                            ImGuiButtonFlags_MouseButtonMiddle);
     bool hovered = ImGui::IsItemHovered();
     ImGuiIO& io = ImGui::GetIO();
-    if (hovered && io.MouseWheel != 0.0f) {
+    const bool transform_toolbar_consumed_input = hovered && handle_model_transform_toolbar_input(origin, size);
+    if (hovered && !transform_toolbar_consumed_input && io.MouseWheel != 0.0f) {
         model_viewport_.distance = std::clamp(model_viewport_.distance - io.MouseWheel * 2.0f, 6.0f, 160.0f);
     }
-    if (hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle) && !io.KeyShift) {
+    if (hovered && !transform_toolbar_consumed_input && ImGui::IsMouseDragging(ImGuiMouseButton_Middle) && !io.KeyShift) {
         model_viewport_.yaw_degrees -= io.MouseDelta.x * 0.35f;
         model_viewport_.pitch_degrees = std::clamp(model_viewport_.pitch_degrees + io.MouseDelta.y * 0.35f, -85.0f, 85.0f);
     }
-    if (hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle) && io.KeyShift) {
+    if (hovered && !transform_toolbar_consumed_input && ImGui::IsMouseDragging(ImGuiMouseButton_Middle) && io.KeyShift) {
         model_viewport_.pan_x += io.MouseDelta.x * 0.04f;
         model_viewport_.pan_y -= io.MouseDelta.y * 0.04f;
     }
     AxisGizmoGeometry view_gizmo = build_axis_gizmo_geometry(model_viewport_, origin, size);
-    int view_gizmo_hit = hovered ? hit_axis_gizmo(view_gizmo, io.MousePos) : -1;
+    int view_gizmo_hit = hovered && !transform_toolbar_consumed_input ? hit_axis_gizmo(view_gizmo, io.MousePos) : -1;
     bool view_gizmo_consumed_input = false;
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && view_gizmo_hit >= 0) {
         view_gizmo_consumed_input = true;
@@ -2700,16 +3784,16 @@ void EditorApp::draw_model_preview() {
         model_view_gizmo_drag_active_ = false;
     }
     view_gizmo = build_axis_gizmo_geometry(model_viewport_, origin, size);
-    view_gizmo_hit = model_view_gizmo_drag_active_ ? 6 : (hovered ? hit_axis_gizmo(view_gizmo, io.MousePos) : -1);
+    view_gizmo_hit = model_view_gizmo_drag_active_ ? 6 : (hovered && !transform_toolbar_consumed_input ? hit_axis_gizmo(view_gizmo, io.MousePos) : -1);
     const ModelGizmoGeometry transform_gizmo =
         build_model_gizmo_geometry(renderer3d_, model_, model_viewport_, origin, size);
-    model_transform_hover_axis_ = hovered && !view_gizmo_consumed_input
+    model_transform_hover_axis_ = hovered && !transform_toolbar_consumed_input && !view_gizmo_consumed_input
                                       ? hit_model_gizmo(transform_gizmo, model_viewport_, model_transform_mode_, io.MousePos)
                                       : -1;
-    if (!view_gizmo_consumed_input) {
+    if (!transform_toolbar_consumed_input && !view_gizmo_consumed_input) {
         handle_model_transform_drag(origin, size, hovered);
     }
-    if (hovered && !view_gizmo_consumed_input && model_transform_mode_ == 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (hovered && !transform_toolbar_consumed_input && !view_gizmo_consumed_input && model_transform_mode_ == 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         ImVec2 local(io.MousePos.x - origin.x, io.MousePos.y - origin.y);
         FaceHit hit = renderer3d_.pick_face(model_, model_viewport_, static_cast<int>(size.x), static_cast<int>(size.y), local.x, local.y);
         if (hit.hit) {
@@ -2720,6 +3804,7 @@ void EditorApp::draw_model_preview() {
 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(38, 42, 46, 255));
+    draw_skybox_background(draw_list, origin, size);
     const bool rendered_model = renderer3d_.render_model_to_texture(model_,
                                                                     canvas_texture_.id(),
                                                                     document_.width,
@@ -2740,7 +3825,9 @@ void EditorApp::draw_model_preview() {
                              model_viewport_,
                              model_transform_mode_,
                              model_transform_drag_active_ ? model_transform_axis_ : -1,
-                             model_transform_hover_axis_);
+                             model_transform_hover_axis_,
+                             model_transform_start_angle_radians_,
+                             model_transform_rotation_delta_degrees_);
 
         float world_center_x = 0.0f;
         float world_center_y = 0.0f;
@@ -2773,6 +3860,7 @@ void EditorApp::draw_model_preview() {
     }
     draw_list->AddRect(origin, ImVec2(origin.x + size.x, origin.y + size.y),
                        hovered ? IM_COL32(255, 230, 40, 220) : IM_COL32(20, 20, 20, 120));
+    draw_model_transform_toolbar(draw_list, origin);
 }
 
 void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& size, bool hovered) {
@@ -2793,29 +3881,44 @@ void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& 
         model_transform_start_mouse_ = io.MousePos;
         model_transform_drag_center_ = transform_gizmo.center;
         model_transform_start_cuboid_ = model_.selected();
+        model_transform_start_angle_radians_ =
+            rotation_ring_angle_at_mouse(transform_gizmo, model_viewport_, hit_axis, io.MousePos);
+        model_transform_rotation_delta_degrees_ = 0.0f;
     }
     if (model_transform_drag_active_ && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const ImVec2 delta(io.MousePos.x - model_transform_start_mouse_.x,
+                           io.MousePos.y - model_transform_start_mouse_.y);
+        constexpr float transform_drag_threshold_pixels = 4.0f;
+        if ((delta.x * delta.x + delta.y * delta.y) <
+            transform_drag_threshold_pixels * transform_drag_threshold_pixels) {
+            model_transform_rotation_delta_degrees_ = 0.0f;
+            return;
+        }
+
         Cuboid next = model_transform_start_cuboid_;
         const ImVec2 axis = normalized_screen_axis({model_transform_axis_ == 0 ? 1.0f : 0.0f,
                                                     model_transform_axis_ == 1 ? 1.0f : 0.0f,
                                                     model_transform_axis_ == 2 ? 1.0f : 0.0f},
                                                    model_viewport_);
-        const ImVec2 delta(io.MousePos.x - model_transform_start_mouse_.x,
-                           io.MousePos.y - model_transform_start_mouse_.y);
         const float signed_pixels = delta.x * axis.x + delta.y * axis.y;
         const bool constrained = io.KeyCtrl || io.KeySuper;
         if (model_transform_mode_ == 1) {
             translate_cuboid(next, model_transform_axis_, signed_pixels * 0.06f, constrained);
         } else if (model_transform_mode_ == 2) {
-            const float start_angle = std::atan2(model_transform_start_mouse_.y - model_transform_drag_center_.y,
-                                                model_transform_start_mouse_.x - model_transform_drag_center_.x);
-            const float current_angle = std::atan2(io.MousePos.y - model_transform_drag_center_.y,
-                                                  io.MousePos.x - model_transform_drag_center_.x);
-            const float angle_delta = (current_angle - start_angle) * 180.0f / 3.14159265358979323846f;
+            const float current_angle =
+                rotation_ring_angle_at_mouse(transform_gizmo, model_viewport_, model_transform_axis_, io.MousePos);
+            float angle_delta = unwrap_angle_delta(current_angle, model_transform_start_angle_radians_) * 180.0f / pi;
+            if (io.KeyShift) {
+                angle_delta *= 0.20f;
+            }
+            if (constrained) {
+                angle_delta = std::round(angle_delta / 15.0f) * 15.0f;
+            }
+            model_transform_rotation_delta_degrees_ = angle_delta;
             rotate_cuboid(next,
                           model_transform_axis_,
                           model_transform_start_cuboid_.rotation_angle + angle_delta,
-                          constrained);
+                          false);
         } else if (model_transform_mode_ == 3) {
             scale_cuboid(next, model_transform_axis_, 1.0f + signed_pixels * 0.012f, constrained);
         }
@@ -2823,6 +3926,7 @@ void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& 
     }
     if (model_transform_drag_active_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         model_transform_drag_active_ = false;
+        model_transform_rotation_delta_degrees_ = 0.0f;
     }
 }
 

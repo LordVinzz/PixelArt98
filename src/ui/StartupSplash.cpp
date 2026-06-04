@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -51,11 +52,16 @@ void* load_glfw_gl_proc(const char* name) {
         }
     }
 
-    const int target_width = std::max(1, screen_width / kScreenShareDivisor);
-    const int target_height = std::max(1, screen_height / kScreenShareDivisor);
-    const int scale = std::max(1, std::min(target_width / image_width, target_height / image_height));
-    const int width = image_width * scale;
-    const int height = image_height * scale;
+    if (screen_width <= 0 || screen_height <= 0 || image_width <= 0 || image_height <= 0) {
+        return {image_width, image_height, screen_x, screen_y};
+    }
+
+    const float target_width = static_cast<float>(screen_width) / static_cast<float>(kScreenShareDivisor);
+    const float target_height = static_cast<float>(screen_height) / static_cast<float>(kScreenShareDivisor);
+    const float scale = std::min(target_width / static_cast<float>(image_width),
+                                 target_height / static_cast<float>(image_height));
+    const int width = std::max(1, static_cast<int>(std::floor(static_cast<float>(image_width) * scale)));
+    const int height = std::max(1, static_cast<int>(std::floor(static_cast<float>(image_height) * scale)));
     return {width, height, screen_x + (screen_width - width) / 2, screen_y + (screen_height - height) / 2};
 }
 
