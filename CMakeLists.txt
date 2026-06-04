@@ -24,7 +24,20 @@ include(cmake/Dependencies.cmake)
 
 function(pixelart_enable_project_warnings target)
     target_compile_options(${target} PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:
+        $<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Werror
+            -pedantic-errors
+            -Wconversion
+            -Wsign-conversion
+            -Wshadow
+            -Wnull-dereference
+            -Wdouble-promotion
+            -Wformat=2
+        >
+        $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:
             -Wall
             -Wextra
             -Wpedantic
@@ -40,7 +53,11 @@ function(pixelart_enable_project_warnings target)
             -Wdouble-promotion
             -Wformat=2
         >
-        $<$<CXX_COMPILER_ID:MSVC>:
+        $<$<COMPILE_LANG_AND_ID:C,MSVC>:
+            /W4
+            /WX
+        >
+        $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:
             /W4
             /WX
             /permissive-
