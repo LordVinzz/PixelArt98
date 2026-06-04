@@ -83,3 +83,13 @@ git push origin v0.1.0
 The project uses CMake `FetchContent` for pinned third-party dependencies: SDL2, GLFW, Dear ImGui docking, stb, miniz, gifenc, nlohmann/json, GLAD, and nativefiledialog-extended.
 
 The codebase targets C++23 with warnings treated as errors for Clang, GCC, and MSVC. Debug builds on Clang/GCC enable address and undefined-behavior sanitizers.
+
+## License
+
+This project is source-available for non-commercial use only.
+
+You may read, use, copy, modify, and redistribute this software for free non-commercial purposes only. Commercial use, paid redistribution, paid bundling, SaaS use, marketplace distribution, paid integration, paid support, paid consulting, or inclusion in a paid pack or paid product requires prior written permission from DOMINGUEZ Vincent.
+
+Commercial licensing requests: vincent.dominguez@master-developpement-logiciel.fr
+
+See [`LICENSE`](./LICENSE) and [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md).

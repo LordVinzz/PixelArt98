@@ -1,0 +1,336 @@
+DOMINGUEZ NON-COMMERCIAL SOFTWARE LICENSE
+Version 1.0
+
+Copyright (c) 2026 DOMINGUEZ Vincent
+
+Contact for commercial licensing, permissions, and legal notices:
+vincent.dominguez@master-developpement-logiciel.fr
+
+1. Definitions
+
+1.1. “Licensor” means DOMINGUEZ Vincent.
+
+1.2. “Software” means the original software, source code, object code,
+executables, assets, documentation, build scripts, configuration files,
+and other materials distributed by the Licensor under this License.
+
+1.3. “Licensed Rights” means the copyright rights that the Licensor may
+grant under the copyright laws of the United States, including the rights
+identified in 17 U.S.C. § 106, to reproduce, prepare derivative works of,
+distribute copies of, publicly display, and publicly perform the Software,
+but only to the extent expressly granted by this License.
+
+1.4. “Non-Commercial Purpose” means use, copying, modification,
+compilation, execution, study, private testing, archival, educational,
+research, or free redistribution of the Software where no person or entity
+receives, seeks, or is reasonably expected to receive any direct or
+indirect pecuniary benefit, monetary compensation, commercial advantage,
+revenue, profit, fee, subscription payment, advertising revenue,
+sponsorship revenue, marketplace revenue, paid support revenue, or other
+financial consideration arising from the Software.
+
+1.5. “Commercial Exploitation” means any use, copying, modification,
+distribution, sublicensing, packaging, bundling, hosting, deployment,
+performance, sale, lease, rental, offering, or making available of the
+Software, in whole or in part, that is connected to direct or indirect
+pecuniary benefit or commercial advantage.
+
+Commercial Exploitation includes, without limitation:
+
+(a) selling, licensing, renting, leasing, or charging for the Software;
+
+(b) placing the Software, modified or unmodified, inside a paid product,
+paid pack, paid bundle, paid installer, paid launcher, paid archive,
+paid asset pack, paid SDK, paid marketplace item, paid subscription,
+paid service, or paid download;
+
+(c) distributing the Software through a platform, website, store,
+repository, launcher, package manager, or service where access to the
+Software requires payment, subscription, account monetization, paid
+membership, advertising revenue, sponsorship revenue, or other financial
+consideration;
+
+(d) using the Software to provide paid services, paid hosting, paid
+software-as-a-service, paid consulting, paid development, paid support,
+paid maintenance, paid training, paid integration, or paid client work;
+
+(e) incorporating the Software into, linking it with, embedding it in,
+or deriving from it any software, product, tool, service, game, platform,
+or system that is sold, monetized, licensed for payment, or otherwise
+used for commercial advantage;
+
+(f) using the Software in the ordinary operations of a for-profit entity
+or in a manner intended to reduce costs, increase revenue, support a
+commercial offering, or otherwise provide commercial advantage;
+
+(g) repackaging, wrapping, obfuscating, compiling, containerizing,
+renaming, rebranding, or otherwise preparing the Software for distribution
+as part of any paid or monetized offering.
+
+1.6. “Third-Party Components” means software, libraries, APIs, headers,
+assets, documentation, or other materials not owned by the Licensor,
+including but not limited to Dear ImGui, SDL2, GLFW, OpenGL-related
+headers, OpenGL specifications, drivers, loaders, and platform libraries.
+
+2. License Grant
+
+Subject to full compliance with this License, the Licensor grants you a
+personal, worldwide, royalty-free, non-exclusive, non-transferable,
+revocable copyright license to exercise the Licensed Rights in the
+Software solely for Non-Commercial Purposes.
+
+Under this License, you may, solely for Non-Commercial Purposes:
+
+(a) read, inspect, and study the source code;
+
+(b) run and use the Software;
+
+(c) copy the Software;
+
+(d) modify the Software and prepare derivative works;
+
+(e) compile the Software;
+
+(f) distribute exact or modified copies of the Software, provided that
+such distribution is entirely free of charge and does not constitute
+Commercial Exploitation;
+
+(g) share the Software with other persons, provided that each recipient
+receives a copy of this License and is bound by its terms.
+
+3. No Commercial Rights Granted
+
+No rights are granted for Commercial Exploitation.
+
+Any Commercial Exploitation of the Software requires a separate prior
+written license signed by the Licensor.
+
+For clarity, you may not sell the Software, sell access to the Software,
+sell a modified version of the Software, sell a compiled version of the
+Software, include the Software in a paid pack or paid bundle, include the
+Software in a paid product, use the Software to provide a paid service,
+or otherwise obtain pecuniary benefit from the Software without the
+Licensor’s prior written permission.
+
+4. Free Redistribution Conditions
+
+You may redistribute the Software only if all of the following conditions
+are satisfied:
+
+(a) the redistribution is entirely free of charge;
+
+(b) the redistribution is not part of any paid, monetized, commercial,
+or revenue-generating product, service, bundle, package, platform, or
+offering;
+
+(c) you include a complete and unmodified copy of this License;
+
+(d) you preserve all copyright notices, license notices, attribution
+notices, and disclaimers contained in the Software;
+
+(e) you clearly identify any modifications you made;
+
+(f) you do not state or imply that the Licensor endorses your modified
+version, distribution, product, service, organization, or project;
+
+(g) you do not use the Licensor’s name, trademarks, logos, project names,
+or branding except as necessary to provide accurate copyright and
+attribution notices.
+
+5. Modified Versions
+
+You may create and distribute modified versions of the Software solely
+for Non-Commercial Purposes.
+
+Any modified version must:
+
+(a) retain this License;
+
+(b) retain the original copyright notice;
+
+(c) clearly state that changes were made;
+
+(d) identify the person or entity that made the changes;
+
+(e) not misrepresent the modified version as the original Software.
+
+6. Third-Party Components
+
+This License applies only to the Software owned by the Licensor.
+
+This License does not apply to Third-Party Components, except to the
+extent the Licensor owns copyrightable material in modifications to those
+components.
+
+Third-Party Components remain licensed under their own respective licenses.
+
+Nothing in this License limits, restricts, sublicenses, relicenses, or
+modifies any rights granted directly by the authors or rightsholders of
+Third-Party Components.
+
+When distributing the Software, you must preserve and include all
+applicable third-party copyright notices, license texts, attribution
+notices, and disclaimers required by the licenses of Third-Party
+Components.
+
+7. Dependency and Attribution Notice
+
+The Software may use or interact with third-party technologies including,
+without limitation:
+
+- Dear ImGui, licensed under the MIT License;
+- SDL2, licensed under the zlib License;
+- GLFW, licensed under the zlib/libpng License;
+- OpenGL, OpenGL-related APIs, headers, specifications, drivers, loaders,
+  or platform components, which may be subject to separate copyright,
+  trademark, patent, platform, vendor, or specification terms.
+
+Those components are not relicensed by this License.
+
+You are responsible for complying with all applicable third-party license
+terms when copying, modifying, compiling, linking, distributing, or
+otherwise using the Software with Third-Party Components.
+
+8. No Trademark License
+
+This License does not grant any trademark rights.
+
+You may not use the Licensor’s name, project name, logos, domain names,
+product names, or other marks to imply sponsorship, endorsement,
+affiliation, or approval without prior written permission.
+
+All third-party trademarks remain the property of their respective owners.
+
+9. No Patent License
+
+No patent license is granted by this License.
+
+Any patent rights, if any, are expressly reserved unless granted in a
+separate written agreement signed by the Licensor.
+
+10. Ownership and Reservation of Rights
+
+The Software is licensed, not sold.
+
+The Licensor retains all right, title, and interest in and to the
+Software, including all copyrights and other intellectual property rights.
+
+All rights not expressly granted by this License are reserved.
+
+11. License Conditions
+
+The restrictions and obligations in this License are express conditions
+of the copyright license granted herein.
+
+Any exercise of the Licensed Rights outside the scope of this License,
+including any Commercial Exploitation, is unauthorized.
+
+Unauthorized reproduction, preparation of derivative works, distribution,
+public display, public performance, or other exercise of rights reserved
+to the Licensor may constitute copyright infringement under United States
+copyright law, including 17 U.S.C. §§ 106 and 501.
+
+12. Termination
+
+This License terminates automatically and immediately if you violate any
+term or condition of this License.
+
+Upon termination, you must immediately:
+
+(a) cease all use, copying, modification, distribution, hosting,
+publication, and exploitation of the Software;
+
+(b) remove the Software from any product, service, repository, website,
+package, archive, marketplace, launcher, server, platform, or distribution
+channel under your control;
+
+(c) destroy all unauthorized copies of the Software in your possession
+or control;
+
+(d) cease representing that you have any license to the Software.
+
+Termination does not limit any remedies available to the Licensor under
+copyright law, contract law, equity, or any other applicable law.
+
+13. Commercial Licensing
+
+Commercial licenses may be available from the Licensor.
+
+Requests for commercial licensing, paid distribution, paid bundling,
+commercial integration, SaaS use, marketplace distribution, client work,
+or other commercial permissions must be sent to:
+
+DOMINGUEZ Vincent
+vincent.dominguez@master-developpement-logiciel.fr
+
+No commercial license is granted unless expressly stated in a separate
+written agreement signed by the Licensor.
+
+14. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED “AS IS” AND “AS AVAILABLE,” WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION ANY WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE,
+NON-INFRINGEMENT, SECURITY, RELIABILITY, AVAILABILITY, OR ERROR-FREE
+OPERATION.
+
+THE LICENSOR DOES NOT WARRANT THAT THE SOFTWARE WILL MEET YOUR
+REQUIREMENTS, OPERATE WITHOUT INTERRUPTION, BE FREE OF DEFECTS, OR BE
+COMPATIBLE WITH ANY HARDWARE, SOFTWARE, PLATFORM, DRIVER, OPERATING
+SYSTEM, LIBRARY, OR THIRD-PARTY COMPONENT.
+
+15. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGE, LOSS, LIABILITY, COST, EXPENSE,
+OR OTHER HARM, WHETHER DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+CONSEQUENTIAL, EXEMPLARY, PUNITIVE, OR OTHERWISE, INCLUDING WITHOUT
+LIMITATION LOST PROFITS, LOST REVENUE, LOST DATA, BUSINESS INTERRUPTION,
+COMPUTER FAILURE, SECURITY INCIDENTS, OR PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES, ARISING FROM OR RELATED TO THE SOFTWARE OR THIS LICENSE,
+WHETHER BASED ON CONTRACT, TORT, NEGLIGENCE, STRICT LIABILITY, COPYRIGHT,
+STATUTE, OR ANY OTHER LEGAL THEORY, EVEN IF ADVISED OF THE POSSIBILITY
+OF SUCH DAMAGES.
+
+16. Indemnification for Commercial Exploitation
+
+If you engage in unauthorized Commercial Exploitation of the Software,
+you agree to indemnify, defend, and hold harmless the Licensor from and
+against any claims, damages, liabilities, losses, settlements, penalties,
+costs, and expenses, including reasonable attorneys’ fees, arising from
+or related to such unauthorized Commercial Exploitation.
+
+17. Severability
+
+If any provision of this License is held to be invalid, illegal, or
+unenforceable, the remaining provisions remain in full force and effect.
+
+The invalid, illegal, or unenforceable provision shall be interpreted or
+modified to the minimum extent necessary to make it valid, legal, and
+enforceable while preserving its original intent as closely as possible.
+
+18. No Waiver
+
+No failure or delay by the Licensor in exercising any right or remedy
+under this License shall constitute a waiver of that right or remedy.
+
+Any waiver must be in writing and signed by the Licensor.
+
+19. Governing Law
+
+This License is governed by the copyright laws of the United States of
+America for copyright matters.
+
+For contract matters, this License shall be governed by and interpreted
+under the laws of the State of Delaware, without regard to conflict of
+law principles, unless another governing law is required by applicable
+mandatory law.
+
+20. Entire License
+
+This License constitutes the complete terms under which the Licensor
+licenses the Software for Non-Commercial Purposes.
+
+No additional permissions are granted unless provided in a separate
+written agreement signed by the Licensor.
+

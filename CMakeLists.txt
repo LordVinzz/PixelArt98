@@ -1,3 +1,7 @@
+# Copyright (c) 2026 DOMINGUEZ Vincent
+# Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
+# See LICENSE for details.
+
 cmake_minimum_required(VERSION 3.24)
 
 project(PixelArt98
@@ -161,6 +165,11 @@ elseif(TARGET pixelart_sdl2)
 endif()
 
 install(DIRECTORY res/skyboxes DESTINATION res)
+install(FILES
+    ${CMAKE_SOURCE_DIR}/README.md
+    ${CMAKE_SOURCE_DIR}/LICENSE
+    ${CMAKE_SOURCE_DIR}/THIRD-PARTY-NOTICES.md
+    DESTINATION .)
 
 if(PIXELART_BUILD_TESTS)
     enable_testing()
