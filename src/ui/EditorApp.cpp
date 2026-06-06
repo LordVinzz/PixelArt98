@@ -24,6 +24,9 @@ namespace px {
 
 namespace {
 
+constexpr int kMaxDocumentSize = 4096;
+constexpr float kCentimetersPerInch = 2.54f;
+
 ImVec4 to_imvec4(Pixel p) {
     return ImVec4(r(p) / 255.0f, g(p) / 255.0f, b(p) / 255.0f, a(p) / 255.0f);
 }
@@ -63,6 +66,36 @@ std::filesystem::path path_from_utf8(std::string_view text) {
 
 std::string path_to_utf8(const std::filesystem::path& path) {
     return u8string_to_utf8(path.u8string());
+}
+
+int clamped_document_size(int value) {
+    return std::clamp(value, 1, kMaxDocumentSize);
+}
+
+float resolution_pixels_per_inch(float resolution, int resolution_unit) {
+    const float safe_resolution = std::max(0.01f, resolution);
+    return resolution_unit == 0 ? safe_resolution : safe_resolution * kCentimetersPerInch;
+}
+
+float pixels_per_document_unit(float resolution, int resolution_unit, int size_unit) {
+    const float pixels_per_inch = resolution_pixels_per_inch(resolution, resolution_unit);
+    if (size_unit == 1) {
+        return pixels_per_inch;
+    }
+    if (size_unit == 2) {
+        return pixels_per_inch / kCentimetersPerInch;
+    }
+    return 1.0f;
+}
+
+int document_size_value_to_pixels(float value, int size_unit, float resolution, int resolution_unit) {
+    const float pixels = std::max(1.0f, value) * pixels_per_document_unit(resolution, resolution_unit, size_unit);
+    return clamped_document_size(static_cast<int>(std::round(pixels)));
+}
+
+float document_pixels_to_size_value(int pixels, int size_unit, float resolution, int resolution_unit) {
+    const float safe_pixels = static_cast<float>(clamped_document_size(pixels));
+    return safe_pixels / pixels_per_document_unit(resolution, resolution_unit, size_unit);
 }
 
 const char* face_name(int face) {
@@ -1062,6 +1095,7 @@ void EditorApp::render() {
     begin_history_frame();
     draw_dockspace();
     draw_main_menu();
+    draw_new_document_dialog();
     draw_toolbar();
     draw_canvas();
     draw_color_panel();
@@ -1330,14 +1364,19 @@ void EditorApp::draw_main_menu() {
         return;
     }
     if (ImGui::BeginMenu("File")) {
-        ImGui::InputInt("Width", &new_width_);
-        ImGui::InputInt("Height", &new_height_);
-        if (ImGui::MenuItem("New")) {
-            document_ = Document::create(std::clamp(new_width_, 1, 4096), std::clamp(new_height_, 1, 4096));
-            model_ = ModelDocument::create_default();
-            sync_model_texture_metadata();
-            texture_dirty_ = true;
-            set_status("New document created");
+        if (ImGui::MenuItem("New Document...")) {
+            const int current_width = document_size_value_to_pixels(new_document_width_,
+                                                                    new_document_size_unit_,
+                                                                    new_document_resolution_,
+                                                                    new_document_resolution_unit_);
+            const int current_height = document_size_value_to_pixels(new_document_height_,
+                                                                     new_document_size_unit_,
+                                                                     new_document_resolution_,
+                                                                     new_document_resolution_unit_);
+            new_document_size_unit_ = 0;
+            new_document_width_ = static_cast<float>(current_width);
+            new_document_height_ = static_cast<float>(current_height);
+            new_document_popup_requested_ = true;
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Save Project...")) {
@@ -1687,6 +1726,223 @@ void EditorApp::draw_main_menu() {
     }
     ImGui::TextDisabled("PixelArt98");
     ImGui::EndMainMenuBar();
+}
+
+void EditorApp::draw_new_document_dialog() {
+    if (new_document_popup_requested_) {
+        ImGui::OpenPopup("New Document");
+        new_document_popup_requested_ = false;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_Appearing);
+    bool open = true;
+    if (!ImGui::BeginPopupModal("New Document", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    const char* aspect_presets[] = {
+        "Custom", "1:1 Square", "4:3 Standard", "3:2 Photo", "16:9 Widescreen", "9:16 Portrait", "Current Canvas"
+    };
+    const char* size_units[] = {"Pixels", "Inches", "Centimeters"};
+    const char* resolution_units[] = {"px/inch", "px/cm"};
+
+    auto final_width = [&]() {
+        return document_size_value_to_pixels(new_document_width_,
+                                             new_document_size_unit_,
+                                             new_document_resolution_,
+                                             new_document_resolution_unit_);
+    };
+    auto final_height = [&]() {
+        return document_size_value_to_pixels(new_document_height_,
+                                             new_document_size_unit_,
+                                             new_document_resolution_,
+                                             new_document_resolution_unit_);
+    };
+    auto set_size_unit_from_pixels = [&](int width, int height, int size_unit) {
+        new_document_size_unit_ = size_unit;
+        new_document_width_ = document_pixels_to_size_value(width,
+                                                            new_document_size_unit_,
+                                                            new_document_resolution_,
+                                                            new_document_resolution_unit_);
+        new_document_height_ = document_pixels_to_size_value(height,
+                                                             new_document_size_unit_,
+                                                             new_document_resolution_,
+                                                             new_document_resolution_unit_);
+    };
+    auto clamp_size_values = [&]() {
+        if (new_document_size_unit_ == 0) {
+            new_document_width_ = static_cast<float>(clamped_document_size(static_cast<int>(std::round(new_document_width_))));
+            new_document_height_ = static_cast<float>(clamped_document_size(static_cast<int>(std::round(new_document_height_))));
+            return;
+        }
+        const float max_value = document_pixels_to_size_value(kMaxDocumentSize,
+                                                              new_document_size_unit_,
+                                                              new_document_resolution_,
+                                                              new_document_resolution_unit_);
+        new_document_width_ = std::clamp(new_document_width_, 0.01f, max_value);
+        new_document_height_ = std::clamp(new_document_height_, 0.01f, max_value);
+    };
+    auto apply_aspect_from_width = [&]() {
+        const float ratio_width = static_cast<float>(std::max(1, new_document_aspect_width_));
+        const float ratio_height = static_cast<float>(std::max(1, new_document_aspect_height_));
+        new_document_height_ = new_document_width_ * ratio_height / ratio_width;
+        clamp_size_values();
+    };
+    auto apply_aspect_from_height = [&]() {
+        const float ratio_width = static_cast<float>(std::max(1, new_document_aspect_width_));
+        const float ratio_height = static_cast<float>(std::max(1, new_document_aspect_height_));
+        new_document_width_ = new_document_height_ * ratio_width / ratio_height;
+        clamp_size_values();
+    };
+    auto set_aspect = [&](int width, int height) {
+        new_document_aspect_width_ = std::max(1, width);
+        new_document_aspect_height_ = std::max(1, height);
+        if (new_document_lock_aspect_) {
+            apply_aspect_from_width();
+        }
+    };
+
+    if (!open) {
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::TextUnformatted("Canvas");
+    ImGui::Separator();
+
+    bool lock_aspect = new_document_lock_aspect_;
+    if (ImGui::Checkbox("Lock aspect ratio", &lock_aspect)) {
+        new_document_lock_aspect_ = lock_aspect;
+        if (new_document_lock_aspect_) {
+            new_document_aspect_preset_ = 0;
+            new_document_aspect_width_ = final_width();
+            new_document_aspect_height_ = final_height();
+        }
+    }
+
+    int aspect_preset = new_document_aspect_preset_;
+    if (ImGui::Combo("Aspect", &aspect_preset, aspect_presets, IM_ARRAYSIZE(aspect_presets))) {
+        new_document_aspect_preset_ = aspect_preset;
+        switch (new_document_aspect_preset_) {
+        case 1: set_aspect(1, 1); break;
+        case 2: set_aspect(4, 3); break;
+        case 3: set_aspect(3, 2); break;
+        case 4: set_aspect(16, 9); break;
+        case 5: set_aspect(9, 16); break;
+        case 6: set_aspect(document_.width, document_.height); break;
+        default: break;
+        }
+    }
+
+    if (new_document_aspect_preset_ == 0) {
+        int aspect_width = new_document_aspect_width_;
+        int aspect_height = new_document_aspect_height_;
+        if (ImGui::InputInt("Aspect W", &aspect_width)) {
+            new_document_aspect_width_ = std::clamp(aspect_width, 1, kMaxDocumentSize);
+            if (new_document_lock_aspect_) {
+                apply_aspect_from_width();
+            }
+        }
+        if (ImGui::InputInt("Aspect H", &aspect_height)) {
+            new_document_aspect_height_ = std::clamp(aspect_height, 1, kMaxDocumentSize);
+            if (new_document_lock_aspect_) {
+                apply_aspect_from_width();
+            }
+        }
+    } else {
+        ImGui::Text("Aspect ratio: %d:%d", new_document_aspect_width_, new_document_aspect_height_);
+    }
+
+    ImGui::Spacing();
+
+    int size_unit = new_document_size_unit_;
+    if (ImGui::Combo("Size units", &size_unit, size_units, IM_ARRAYSIZE(size_units))) {
+        set_size_unit_from_pixels(final_width(), final_height(), size_unit);
+    }
+
+    bool width_changed = false;
+    bool height_changed = false;
+    if (new_document_size_unit_ == 0) {
+        int width = clamped_document_size(static_cast<int>(std::round(new_document_width_)));
+        int height = clamped_document_size(static_cast<int>(std::round(new_document_height_)));
+        width_changed = ImGui::InputInt("Width", &width);
+        height_changed = ImGui::InputInt("Height", &height);
+        if (width_changed) {
+            new_document_width_ = static_cast<float>(clamped_document_size(width));
+        }
+        if (height_changed) {
+            new_document_height_ = static_cast<float>(clamped_document_size(height));
+        }
+    } else {
+        width_changed = ImGui::InputFloat("Width", &new_document_width_, 0.1f, 1.0f, "%.3f");
+        height_changed = ImGui::InputFloat("Height", &new_document_height_, 0.1f, 1.0f, "%.3f");
+        clamp_size_values();
+    }
+
+    if (new_document_lock_aspect_) {
+        if (width_changed) {
+            apply_aspect_from_width();
+        } else if (height_changed) {
+            apply_aspect_from_height();
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Resolution");
+    ImGui::Separator();
+
+    if (ImGui::InputFloat("Resolution", &new_document_resolution_, 1.0f, 10.0f, "%.2f")) {
+        new_document_resolution_ = std::clamp(new_document_resolution_, 0.01f, 10000.0f);
+        clamp_size_values();
+    }
+
+    int resolution_unit = new_document_resolution_unit_;
+    if (ImGui::Combo("Resolution units", &resolution_unit, resolution_units, IM_ARRAYSIZE(resolution_units)) &&
+        resolution_unit != new_document_resolution_unit_) {
+        if (new_document_resolution_unit_ == 0 && resolution_unit == 1) {
+            new_document_resolution_ /= kCentimetersPerInch;
+        } else if (new_document_resolution_unit_ == 1 && resolution_unit == 0) {
+            new_document_resolution_ *= kCentimetersPerInch;
+        }
+        new_document_resolution_unit_ = resolution_unit;
+        new_document_resolution_ = std::clamp(new_document_resolution_, 0.01f, 10000.0f);
+        clamp_size_values();
+    }
+
+    const int width = final_width();
+    const int height = final_height();
+    const float print_width_inches = static_cast<float>(width) / resolution_pixels_per_inch(new_document_resolution_,
+                                                                                            new_document_resolution_unit_);
+    const float print_height_inches = static_cast<float>(height) / resolution_pixels_per_inch(new_document_resolution_,
+                                                                                              new_document_resolution_unit_);
+    ImGui::Spacing();
+    ImGui::Text("Pixel size: %d x %d px", width, height);
+    ImGui::Text("Print size: %.2f x %.2f in / %.2f x %.2f cm",
+                static_cast<double>(print_width_inches),
+                static_cast<double>(print_height_inches),
+                static_cast<double>(print_width_inches * kCentimetersPerInch),
+                static_cast<double>(print_height_inches * kCentimetersPerInch));
+
+    ImGui::Spacing();
+    if (ImGui::Button("Create", ImVec2(96.0f, 0.0f))) {
+        document_ = Document::create(width, height);
+        model_ = ModelDocument::create_default();
+        sync_model_texture_metadata();
+        undo_stack_.clear();
+        redo_stack_.clear();
+        canvas_pan_ = ImVec2(0.0f, 0.0f);
+        canvas_fit_requested_ = true;
+        texture_dirty_ = true;
+        history_pending_ = false;
+        history_suppress_frame_ = true;
+        set_status("New document created: " + std::to_string(width) + " x " + std::to_string(height) + " px");
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(96.0f, 0.0f))) {
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
 }
 
 void EditorApp::draw_toolbar() {

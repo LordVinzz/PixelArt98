@@ -137,6 +137,7 @@ private:
     bool model_render_error_reported_ = false;
     bool transform_icons_loaded_ = false;
     bool canvas_fit_requested_ = false;
+    bool new_document_popup_requested_ = false;
     bool history_pending_ = false;
     bool history_suppress_frame_ = false;
     int uv_drag_mode_ = 0;
@@ -195,8 +196,15 @@ private:
     char status_[512] = "Ready";
     int error_console_sequence_ = 0;
 
-    int new_width_ = 64;
-    int new_height_ = 64;
+    float new_document_width_ = 64.0f;
+    float new_document_height_ = 64.0f;
+    float new_document_resolution_ = 96.0f;
+    int new_document_size_unit_ = 0;
+    int new_document_resolution_unit_ = 0;
+    int new_document_aspect_preset_ = 0;
+    int new_document_aspect_width_ = 1;
+    int new_document_aspect_height_ = 1;
+    bool new_document_lock_aspect_ = false;
     int brightness_ = 0;
     int contrast_ = 0;
     float hue_ = 0.0f;
@@ -233,6 +241,7 @@ private:
 
     void draw_dockspace();
     void draw_main_menu();
+    void draw_new_document_dialog();
     void draw_toolbar();
     void draw_canvas();
     void draw_color_panel();
