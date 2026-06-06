@@ -1803,10 +1803,14 @@ void EditorApp::draw_canvas() {
     ImVec2 max(origin.x + canvas_size.x, origin.y + canvas_size.y);
 
     if (show_checker_) {
-        float tile = std::max(4.0f, zoom_ * 2.0f);
-        for (float y = origin.y; y < max.y; y += tile) {
-            for (float x = origin.x; x < max.x; x += tile) {
-                bool dark = (static_cast<int>((x - origin.x) / tile) + static_cast<int>((y - origin.y) / tile)) % 2 == 0;
+        const float tile = std::max(4.0f, zoom_ * 2.0f);
+        const int rows = std::max(0, static_cast<int>(std::ceil(canvas_size.y / tile)));
+        const int columns = std::max(0, static_cast<int>(std::ceil(canvas_size.x / tile)));
+        for (int row = 0; row < rows; ++row) {
+            const float y = origin.y + static_cast<float>(row) * tile;
+            for (int column = 0; column < columns; ++column) {
+                const float x = origin.x + static_cast<float>(column) * tile;
+                const bool dark = ((column + row) % 2) == 0;
                 draw_list->AddRectFilled(ImVec2(x, y), ImVec2(std::min(x + tile, max.x), std::min(y + tile, max.y)),
                                          dark ? IM_COL32(150, 150, 150, 255) : IM_COL32(205, 205, 205, 255));
             }
