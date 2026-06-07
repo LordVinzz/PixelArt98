@@ -489,14 +489,8 @@ void GpuEffectRenderer::set_error(std::string value) {
 GpuBackendCapabilities GpuEffectRenderer::capabilities() const {
     GpuBackendCapabilities result;
     int max_texture_size = 0;
-    int max_renderbuffer_size = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_renderbuffer_size);
-    if (max_texture_size > 0 && max_renderbuffer_size > 0) {
-        result.max_texture_size = std::min(max_texture_size, max_renderbuffer_size);
-    } else {
-        result.max_texture_size = std::max(max_texture_size, max_renderbuffer_size);
-    }
+    result.max_texture_size = max_texture_size;
     result.working_texture_budget = conservative_gl_budget_for_texture_limit(result.max_texture_size);
     result.supports_chunking = result.max_texture_size > 0;
     return result;

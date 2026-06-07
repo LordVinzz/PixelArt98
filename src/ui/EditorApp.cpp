@@ -3760,6 +3760,7 @@ bool EditorApp::try_mps_effect(EffectPreviewKind kind, std::vector<Pixel>& out_p
     }
     return out_pixels.size() == document_.active_cel().pixels.size();
 #else
+    (void)out_pixels;
     return false;
 #endif
 }
