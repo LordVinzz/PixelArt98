@@ -8,7 +8,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
+#include <cstdint>
+#include <limits>
 #include <string>
 
 namespace px {
@@ -25,6 +28,94 @@ float channel_to_float(std::uint8_t value) {
 
 std::array<float, 4> pixel_to_float4(Pixel pixel) {
     return {channel_to_float(r(pixel)), channel_to_float(g(pixel)), channel_to_float(b(pixel)), channel_to_float(a(pixel))};
+}
+
+std::uint64_t texture_footprint(int width, int height, std::uint64_t texture_count) {
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * sizeof(Pixel) * texture_count;
+}
+
+bool needs_full_image_coordinates(GpuEffectMode mode) {
+    switch (mode) {
+        case GpuEffectMode::RadialBlur:
+        case GpuEffectMode::ZoomBlur:
+        case GpuEffectMode::Pixelate:
+        case GpuEffectMode::Crystalize:
+        case GpuEffectMode::FrostedGlass:
+        case GpuEffectMode::Bulge:
+        case GpuEffectMode::Twist:
+        case GpuEffectMode::TileReflection:
+        case GpuEffectMode::Dents:
+        case GpuEffectMode::PolarInversion:
+        case GpuEffectMode::Clouds:
+        case GpuEffectMode::JuliaFractal:
+        case GpuEffectMode::MandelbrotFractal:
+        case GpuEffectMode::Turbulence:
+            return true;
+        default:
+            return false;
+    }
+}
+
+int clamped_radius(float value, int fallback, int max_value) {
+    if (!std::isfinite(value)) {
+        return fallback;
+    }
+    return std::clamp(static_cast<int>(std::ceil(std::abs(value))), fallback, max_value);
+}
+
+std::uint64_t conservative_gl_budget_for_texture_limit(int max_texture_size) {
+    constexpr std::uint64_t mib = 1024ULL * 1024ULL;
+    if (max_texture_size <= 0) return 0;
+    if (max_texture_size <= 4096) return 64ULL * mib;
+    if (max_texture_size <= 8192) return 128ULL * mib;
+    if (max_texture_size <= 16384) return 256ULL * mib;
+    return 512ULL * mib;
+}
+
+Document extract_tile_document(const Document& document,
+                               int core_x,
+                               int core_y,
+                               int core_w,
+                               int core_h,
+                               int halo) {
+    const int left = std::min(halo, core_x);
+    const int top = std::min(halo, core_y);
+    const int right = std::min(halo, document.width - (core_x + core_w));
+    const int bottom = std::min(halo, document.height - (core_y + core_h));
+    const int tile_x = core_x - left;
+    const int tile_y = core_y - top;
+    const int tile_w = core_w + left + right;
+    const int tile_h = core_h + top + bottom;
+
+    Document tile = Document::create(tile_w, tile_h);
+    const auto& source = document.active_cel().pixels;
+    auto& dest = tile.active_cel().pixels;
+    for (int y = 0; y < tile_h; ++y) {
+        const int source_y = tile_y + y;
+        for (int x = 0; x < tile_w; ++x) {
+            const int source_x = tile_x + x;
+            dest[static_cast<std::size_t>(y * tile_w + x)] =
+                source[static_cast<std::size_t>(source_y * document.width + source_x)];
+        }
+    }
+
+    const std::size_t expected_mask_size = static_cast<std::size_t>(document.width * document.height);
+    if (document.selection.active && document.selection.mask.size() == expected_mask_size) {
+        tile.selection.resize(tile_w, tile_h);
+        tile.selection.active = true;
+        for (int y = 0; y < tile_h; ++y) {
+            const int source_y = tile_y + y;
+            for (int x = 0; x < tile_w; ++x) {
+                const int source_x = tile_x + x;
+                tile.selection.mask[static_cast<std::size_t>(y * tile_w + x)] =
+                    document.selection.mask[static_cast<std::size_t>(source_y * document.width + source_x)];
+            }
+        }
+    }
+    return tile;
 }
 
 const char* shader_type_name(unsigned int type) {
@@ -393,6 +484,77 @@ void GpuEffectRenderer::set_error(std::string value) {
     last_error_ = std::move(value);
 }
 
+GpuBackendCapabilities GpuEffectRenderer::capabilities() const {
+    GpuBackendCapabilities result;
+    int max_texture_size = 0;
+    int max_renderbuffer_size = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
+    glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_renderbuffer_size);
+    if (max_texture_size > 0 && max_renderbuffer_size > 0) {
+        result.max_texture_size = std::min(max_texture_size, max_renderbuffer_size);
+    } else {
+        result.max_texture_size = std::max(max_texture_size, max_renderbuffer_size);
+    }
+    result.working_texture_budget = conservative_gl_budget_for_texture_limit(result.max_texture_size);
+    result.supports_chunking = result.max_texture_size > 0;
+    return result;
+}
+
+bool GpuEffectRenderer::effect_supports_chunking(const GpuEffectRequest& request) {
+    return !needs_full_image_coordinates(request.mode);
+}
+
+int GpuEffectRenderer::effect_chunk_halo(const GpuEffectRequest& request) {
+    switch (request.mode) {
+        case GpuEffectMode::OilPainting:
+        case GpuEffectMode::GaussianBlur:
+        case GpuEffectMode::MedianBlur:
+        case GpuEffectMode::SurfaceBlur:
+        case GpuEffectMode::ReduceNoise:
+        case GpuEffectMode::Glow:
+        case GpuEffectMode::SoftenPortrait:
+            return clamped_radius(request.params[0], 1, 16);
+        case GpuEffectMode::MotionBlur:
+            return clamped_radius(request.params[0], 1, 24);
+        case GpuEffectMode::InkSketch:
+        case GpuEffectMode::PencilSketch:
+            return std::max(1, clamped_radius(request.params[0] * 0.5f, 1, 16));
+        case GpuEffectMode::Sharpen:
+        case GpuEffectMode::EdgeDetect:
+        case GpuEffectMode::Emboss:
+        case GpuEffectMode::Outline:
+        case GpuEffectMode::Relief:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+int GpuEffectRenderer::choose_chunk_extent(int width,
+                                           int height,
+                                           int halo,
+                                           const GpuBackendCapabilities& caps) {
+    if (width <= 0 || height <= 0 || !caps.supports_chunking) {
+        return 0;
+    }
+
+    const int max_texture_size = caps.max_texture_size > 0 ? caps.max_texture_size : std::max(width, height);
+    const int max_core_by_texture = std::max(1, max_texture_size - halo * 2);
+    if (max_core_by_texture < 128) {
+        return max_core_by_texture;
+    }
+    if (caps.working_texture_budget == 0) {
+        return std::min({max_core_by_texture, width, height});
+    }
+
+    constexpr std::uint64_t textures_per_pass = 3;
+    const double max_pixels = static_cast<double>(caps.working_texture_budget) /
+                              static_cast<double>(sizeof(Pixel) * textures_per_pass);
+    int extent = static_cast<int>(std::floor(std::sqrt(std::max(1.0, max_pixels)))) - halo * 2;
+    extent = std::clamp(extent, 128, max_core_by_texture);
+    return std::min({extent, std::max(width, height), max_core_by_texture});
+}
+
 bool GpuEffectRenderer::ensure_program() {
     if (shader_program_ != 0) {
         return true;
@@ -510,12 +672,32 @@ void GpuEffectRenderer::upload_selection_mask(const Document& document) {
     ensure_texture(mask_texture_, document.width, document.height, mask_pixels_.data());
 }
 
-bool GpuEffectRenderer::render_active_cel(const Document& document, const GpuEffectRequest& request) {
+bool GpuEffectRenderer::render_active_cel(const Document& document,
+                                          const GpuEffectRequest& request,
+                                          const GpuBackendCapabilities* capability_override) {
     last_error_.clear();
     if (!document.valid()) {
         set_error("GPU effect skipped: document is invalid");
         return false;
     }
+    const GpuBackendCapabilities caps = capability_override != nullptr ? *capability_override : capabilities();
+    const std::uint64_t full_footprint = texture_footprint(document.width, document.height, 3);
+    const bool exceeds_texture_size = caps.max_texture_size > 0 &&
+                                      (document.width > caps.max_texture_size || document.height > caps.max_texture_size);
+    const bool exceeds_budget = caps.working_texture_budget > 0 && full_footprint > caps.working_texture_budget;
+    if (exceeds_texture_size || exceeds_budget) {
+        if (!effect_supports_chunking(request)) {
+            set_error("GPU effect skipped: this effect requires full-image coordinates and the image exceeds the current GPU budget");
+            return false;
+        }
+        return render_chunked_active_cel(document, request, caps);
+    }
+    chunked_output_.clear();
+    used_chunking_ = false;
+    return render_full_active_cel(document, request);
+}
+
+bool GpuEffectRenderer::render_full_active_cel(const Document& document, const GpuEffectRequest& request) {
     if (!ensure_program() || !ensure_geometry() || !ensure_target(document.width, document.height)) {
         return false;
     }
@@ -572,7 +754,66 @@ bool GpuEffectRenderer::render_active_cel(const Document& document, const GpuEff
     return true;
 }
 
+bool GpuEffectRenderer::render_chunked_active_cel(const Document& document,
+                                                  const GpuEffectRequest& request,
+                                                  const GpuBackendCapabilities& caps) {
+    if (!ensure_program() || !ensure_geometry()) {
+        return false;
+    }
+    const auto& source = document.active_cel().pixels;
+    const std::size_t pixel_count = static_cast<std::size_t>(document.width * document.height);
+    if (source.size() != pixel_count) {
+        set_error("GPU effect skipped: active cel pixel buffer has the wrong size");
+        return false;
+    }
+
+    const int halo = effect_chunk_halo(request);
+    const int chunk_extent = choose_chunk_extent(document.width, document.height, halo, caps);
+    if (chunk_extent <= 0) {
+        set_error("GPU effect skipped: could not choose a valid GPU chunk size");
+        return false;
+    }
+
+    used_chunking_ = false;
+    chunked_output_.assign(pixel_count, rgba(0, 0, 0, 0));
+    std::vector<Pixel> tile_output;
+    for (int y = 0; y < document.height; y += chunk_extent) {
+        const int core_h = std::min(chunk_extent, document.height - y);
+        for (int x = 0; x < document.width; x += chunk_extent) {
+            const int core_w = std::min(chunk_extent, document.width - x);
+            const int left = std::min(halo, x);
+            const int top = std::min(halo, y);
+            Document tile = extract_tile_document(document, x, y, core_w, core_h, halo);
+            if (!render_full_active_cel(tile, request) || !read_output_pixels(tile_output)) {
+                if (last_error_.empty()) {
+                    set_error("GPU effect skipped: chunk render failed");
+                }
+                chunked_output_.clear();
+                used_chunking_ = false;
+                return false;
+            }
+            for (int row = 0; row < core_h; ++row) {
+                const std::size_t src_offset = static_cast<std::size_t>((row + top) * tile.width + left);
+                const std::size_t dst_offset = static_cast<std::size_t>((y + row) * document.width + x);
+                std::copy_n(tile_output.begin() + static_cast<std::ptrdiff_t>(src_offset),
+                            static_cast<std::size_t>(core_w),
+                            chunked_output_.begin() + static_cast<std::ptrdiff_t>(dst_offset));
+            }
+        }
+    }
+
+    width_ = document.width;
+    height_ = document.height;
+    used_chunking_ = true;
+    return true;
+}
+
 bool GpuEffectRenderer::read_output_pixels(std::vector<Pixel>& pixels) const {
+    if (used_chunking_ && !chunked_output_.empty() && width_ > 0 && height_ > 0 &&
+        chunked_output_.size() == static_cast<std::size_t>(width_ * height_)) {
+        pixels = chunked_output_;
+        return true;
+    }
     if (output_texture_ == 0 || width_ <= 0 || height_ <= 0) {
         return false;
     }
@@ -599,6 +840,8 @@ void GpuEffectRenderer::destroy() {
     shader_program_ = 0;
     width_ = 0;
     height_ = 0;
+    chunked_output_.clear();
+    used_chunking_ = false;
 }
 
 } // namespace px

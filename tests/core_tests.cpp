@@ -7,6 +7,7 @@
 #include "core/Model.hpp"
 #include "core/Tools.hpp"
 #include "io/ProjectIO.hpp"
+#include "render/GpuEffectRenderer.hpp"
 #include "render/Renderer3D.hpp"
 #include "ui/AppSettings.hpp"
 
@@ -315,6 +316,41 @@ static void test_v2_layers_frames_tags() {
     assert(doc.tags.empty());
 }
 
+static void test_gpu_chunking_policy() {
+    GpuEffectRequest blur;
+    blur.mode = GpuEffectMode::GaussianBlur;
+    blur.params = {12.0f, 0.0f, 0.0f, 0.0f};
+    assert(GpuEffectRenderer::effect_supports_chunking(blur));
+    assert(GpuEffectRenderer::effect_chunk_halo(blur) == 12);
+
+    GpuEffectRequest motion;
+    motion.mode = GpuEffectMode::MotionBlur;
+    motion.params = {64.0f, 0.0f, 0.0f, 0.0f};
+    assert(GpuEffectRenderer::effect_supports_chunking(motion));
+    assert(GpuEffectRenderer::effect_chunk_halo(motion) == 24);
+
+    GpuEffectRequest twist;
+    twist.mode = GpuEffectMode::Twist;
+    assert(!GpuEffectRenderer::effect_supports_chunking(twist));
+    assert(GpuEffectRenderer::effect_chunk_halo(twist) == 0);
+
+    GpuBackendCapabilities older_gpu;
+    older_gpu.max_texture_size = 4096;
+    older_gpu.working_texture_budget = 64ULL * 1024ULL * 1024ULL;
+    older_gpu.supports_chunking = true;
+    const int older_extent = GpuEffectRenderer::choose_chunk_extent(9921, 14031, 12, older_gpu);
+    assert(older_extent > 0);
+    assert(older_extent <= older_gpu.max_texture_size - 24);
+
+    GpuBackendCapabilities modern_gpu;
+    modern_gpu.max_texture_size = 16384;
+    modern_gpu.working_texture_budget = 512ULL * 1024ULL * 1024ULL;
+    modern_gpu.supports_chunking = true;
+    const int modern_extent = GpuEffectRenderer::choose_chunk_extent(9921, 14031, 12, modern_gpu);
+    assert(modern_extent >= older_extent);
+    assert(modern_extent <= modern_gpu.max_texture_size - 24);
+}
+
 static Pixel composite_blend_sample(LayerBlendMode mode) {
     auto doc = Document::create(1, 1);
     doc.active_cel().pixels[0] = rgba(80, 120, 160, 255);
@@ -567,6 +603,7 @@ int main() {
     test_mask_editing_tools();
     test_v2_tools_and_undo();
     test_v2_layers_frames_tags();
+    test_gpu_chunking_policy();
     test_layer_blend_modes();
     test_model_json();
     test_model_transform_helpers();

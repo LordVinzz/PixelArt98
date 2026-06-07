@@ -8,6 +8,7 @@
 #include "core/Pixel.hpp"
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,12 @@ struct GpuEffectRequest {
     Pixel secondary = rgba(255, 255, 255, 255);
 };
 
+struct GpuBackendCapabilities {
+    int max_texture_size = 0;
+    std::uint64_t working_texture_budget = 0;
+    bool supports_chunking = false;
+};
+
 class GpuEffectRenderer {
 public:
     GpuEffectRenderer() = default;
@@ -75,9 +82,20 @@ public:
     GpuEffectRenderer(const GpuEffectRenderer&) = delete;
     GpuEffectRenderer& operator=(const GpuEffectRenderer&) = delete;
 
-    bool render_active_cel(const Document& document, const GpuEffectRequest& request);
+    bool render_active_cel(const Document& document,
+                           const GpuEffectRequest& request,
+                           const GpuBackendCapabilities* capability_override = nullptr);
     bool read_output_pixels(std::vector<Pixel>& pixels) const;
     void destroy();
+
+    [[nodiscard]] GpuBackendCapabilities capabilities() const;
+    [[nodiscard]] bool used_chunking() const noexcept { return used_chunking_; }
+    [[nodiscard]] static bool effect_supports_chunking(const GpuEffectRequest& request);
+    [[nodiscard]] static int effect_chunk_halo(const GpuEffectRequest& request);
+    [[nodiscard]] static int choose_chunk_extent(int width,
+                                                 int height,
+                                                 int halo,
+                                                 const GpuBackendCapabilities& capabilities);
 
     unsigned int texture_id() const { return output_texture_; }
     int width() const { return width_; }
@@ -85,6 +103,10 @@ public:
     [[nodiscard]] const std::string& last_error() const noexcept { return last_error_; }
 
 private:
+    bool render_full_active_cel(const Document& document, const GpuEffectRequest& request);
+    bool render_chunked_active_cel(const Document& document,
+                                   const GpuEffectRequest& request,
+                                   const GpuBackendCapabilities& capabilities);
     bool ensure_program();
     bool ensure_geometry();
     bool ensure_texture(unsigned int& texture, int width, int height, const Pixel* pixels);
@@ -102,6 +124,8 @@ private:
     int width_ = 0;
     int height_ = 0;
     std::vector<Pixel> mask_pixels_;
+    std::vector<Pixel> chunked_output_;
+    bool used_chunking_ = false;
     std::string last_error_;
 };
 

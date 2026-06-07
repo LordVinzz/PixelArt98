@@ -25,6 +25,14 @@ bool MpsEffectRenderer::read_output_pixels(std::vector<Pixel>&) const {
     return false;
 }
 
+GpuBackendCapabilities MpsEffectRenderer::capabilities() const {
+    return {};
+}
+
+bool MpsEffectRenderer::used_chunking() const {
+    return false;
+}
+
 void MpsEffectRenderer::destroy() {}
 
 } // namespace px

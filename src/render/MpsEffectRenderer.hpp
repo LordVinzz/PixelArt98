@@ -25,10 +25,14 @@ public:
     bool read_output_pixels(std::vector<Pixel>& pixels) const;
     void destroy();
 
+    [[nodiscard]] GpuBackendCapabilities capabilities() const;
+    [[nodiscard]] bool used_chunking() const;
     [[nodiscard]] const std::string& last_error() const noexcept { return last_error_; }
 
 private:
     struct Impl;
+
+    bool render_full_active_cel(const Document& document, const GpuEffectRequest& request);
 
     std::unique_ptr<Impl> impl_;
     std::string last_error_;

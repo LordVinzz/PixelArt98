@@ -17,12 +17,69 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <vector>
 
 using namespace px;
 
 static void* load_glfw_gl_proc(const char* name) {
     return reinterpret_cast<void*>(glfwGetProcAddress(name));
+}
+
+static bool report_step(const char* name, bool passed) {
+    std::cout << (passed ? "[PASS] " : "[FAIL] ") << name << "\n";
+    return passed;
+}
+
+static void report_skip(const char* name, const std::string& reason) {
+    std::cout << "[SKIP] " << name << ": " << reason << "\n";
+}
+
+static bool pixels_close(Pixel lhs, Pixel rhs) {
+    const auto close = [](std::uint8_t a, std::uint8_t b) {
+        return std::abs(static_cast<int>(a) - static_cast<int>(b)) <= 1;
+    };
+    return close(r(lhs), r(rhs)) && close(g(lhs), g(rhs)) && close(b(lhs), b(rhs)) && close(a(lhs), a(rhs));
+}
+
+static bool outputs_match(const std::vector<Pixel>& lhs, const std::vector<Pixel>& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        if (!pixels_close(lhs[i], rhs[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool seam_pixels_match(const std::vector<Pixel>& lhs,
+                              const std::vector<Pixel>& rhs,
+                              int width,
+                              int height,
+                              int chunk_extent) {
+    for (int y = 0; y < height; ++y) {
+        for (int seam = chunk_extent; seam < width; seam += chunk_extent) {
+            for (int x : {seam - 1, seam}) {
+                const std::size_t index = static_cast<std::size_t>(y * width + x);
+                if (!pixels_close(lhs[index], rhs[index])) {
+                    return false;
+                }
+            }
+        }
+    }
+    for (int x = 0; x < width; ++x) {
+        for (int seam = chunk_extent; seam < height; seam += chunk_extent) {
+            for (int y : {seam - 1, seam}) {
+                const std::size_t index = static_cast<std::size_t>(y * width + x);
+                if (!pixels_close(lhs[index], rhs[index])) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 int main() {
@@ -32,10 +89,12 @@ int main() {
         return 0;
     }
 #endif
+    std::cout << "OpenGL smoke starting\n";
     if (!glfwInit()) {
         std::cout << "OpenGL smoke skipped: GLFW init failed\n";
         return 0;
     }
+    std::cout << "[PASS] GLFW init\n";
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -49,6 +108,7 @@ int main() {
         std::cout << "OpenGL smoke skipped: hidden context unavailable\n";
         return 0;
     }
+    std::cout << "[PASS] Hidden OpenGL window/context created\n";
     glfwMakeContextCurrent(window);
     if (!gladLoadGL(load_glfw_gl_proc)) {
         glfwDestroyWindow(window);
@@ -56,39 +116,104 @@ int main() {
         std::cout << "OpenGL smoke skipped: GLAD load failed\n";
         return 0;
     }
+    std::cout << "[PASS] GLAD loaded\n";
+    std::cout << "OpenGL vendor: " << reinterpret_cast<const char*>(glGetString(GL_VENDOR)) << "\n";
+    std::cout << "OpenGL renderer: " << reinterpret_cast<const char*>(glGetString(GL_RENDERER)) << "\n";
+    std::cout << "OpenGL version: " << reinterpret_cast<const char*>(glGetString(GL_VERSION)) << "\n";
+    int gl_max_texture_size = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl_max_texture_size);
+    std::cout << "OpenGL max texture size: " << gl_max_texture_size << "\n";
 
-    bool ok = false;
+    bool ok = true;
     {
         Document doc = Document::create(16, 16);
         std::fill(doc.active_cel().pixels.begin(), doc.active_cel().pixels.end(), rgba(255, 0, 0, 255));
         GpuEffectRenderer effect_renderer;
         GpuEffectRequest effect_request;
         effect_request.mode = GpuEffectMode::Grayscale;
-        ok = effect_renderer.render_active_cel(doc, effect_request);
-        if (ok) {
-            std::vector<Pixel> effect_pixels;
-            ok = effect_renderer.read_output_pixels(effect_pixels) &&
-                 std::any_of(effect_pixels.begin(), effect_pixels.end(), [](Pixel p) {
-                     return a(p) == 255 && r(p) > 0 && r(p) == g(p) && g(p) == b(p);
-                 });
+        bool grayscale_ok = effect_renderer.render_active_cel(doc, effect_request);
+        if (!grayscale_ok && !effect_renderer.last_error().empty()) {
+            std::cout << "       " << effect_renderer.last_error() << "\n";
         }
+        if (grayscale_ok) {
+            std::vector<Pixel> effect_pixels;
+            grayscale_ok = effect_renderer.read_output_pixels(effect_pixels) &&
+                           std::any_of(effect_pixels.begin(), effect_pixels.end(), [](Pixel p) {
+                               return a(p) == 255 && r(p) > 0 && r(p) == g(p) && g(p) == b(p);
+                           });
+        }
+        ok = report_step("OpenGL grayscale effect and readback", grayscale_ok) && ok;
 #if defined(__APPLE__)
         {
             MpsEffectRenderer mps_renderer;
+            const GpuBackendCapabilities mps_caps = mps_renderer.capabilities();
+            std::cout << "MPS capabilities: max_texture_size=" << mps_caps.max_texture_size
+                      << ", working_texture_budget=" << mps_caps.working_texture_budget
+                      << ", supports_chunking=" << (mps_caps.supports_chunking ? "true" : "false") << "\n";
             GpuEffectRequest mps_request;
             mps_request.mode = GpuEffectMode::GaussianBlur;
             mps_request.params = {2.0f, 0.0f, 0.0f, 0.0f};
             if (mps_renderer.render_active_cel(doc, mps_request)) {
                 std::vector<Pixel> mps_pixels;
-                ok = ok && mps_renderer.read_output_pixels(mps_pixels) &&
-                     std::any_of(mps_pixels.begin(), mps_pixels.end(), [](Pixel p) {
-                         return a(p) == 255 && r(p) > 0;
-                     });
+                const bool mps_ok = mps_renderer.read_output_pixels(mps_pixels) &&
+                                    std::any_of(mps_pixels.begin(), mps_pixels.end(), [](Pixel p) {
+                                        return a(p) == 255 && r(p) > 0;
+                                    });
+                ok = report_step("Optional MPS blur effect and readback", mps_ok) && ok;
             } else {
-                std::cout << "MPS smoke skipped: " << mps_renderer.last_error() << "\n";
+                report_skip("Optional MPS blur effect", mps_renderer.last_error());
             }
         }
 #endif
+        {
+            Document seam_doc = Document::create(32, 24);
+            for (int y = 0; y < seam_doc.height; ++y) {
+                for (int x = 0; x < seam_doc.width; ++x) {
+                    seam_doc.active_cel().pixels[static_cast<std::size_t>(y * seam_doc.width + x)] =
+                        rgba(static_cast<std::uint8_t>((x * 13 + y * 7) & 0xff),
+                             static_cast<std::uint8_t>((x * 5 + y * 17) & 0xff),
+                             static_cast<std::uint8_t>((x * 23 + y * 3) & 0xff),
+                             255);
+                }
+            }
+            GpuEffectRequest blur_request;
+            blur_request.mode = GpuEffectMode::GaussianBlur;
+            blur_request.params = {2.0f, 0.0f, 0.0f, 0.0f};
+
+            GpuEffectRenderer full_renderer;
+            std::vector<Pixel> full_pixels;
+            bool full_render_ok = full_renderer.render_active_cel(seam_doc, blur_request) &&
+                                  full_renderer.read_output_pixels(full_pixels);
+            if (!full_render_ok && !full_renderer.last_error().empty()) {
+                std::cout << "       " << full_renderer.last_error() << "\n";
+            }
+            ok = report_step("OpenGL seam baseline full-image blur", full_render_ok) && ok;
+
+            GpuBackendCapabilities forced_caps;
+            forced_caps.max_texture_size = 12;
+            forced_caps.working_texture_budget = 12ULL * 12ULL * sizeof(Pixel) * 3ULL;
+            forced_caps.supports_chunking = true;
+            const int forced_extent = GpuEffectRenderer::choose_chunk_extent(
+                seam_doc.width, seam_doc.height, GpuEffectRenderer::effect_chunk_halo(blur_request), forced_caps);
+
+            GpuEffectRenderer chunked_renderer;
+            std::vector<Pixel> chunked_pixels;
+            bool chunk_render_ok = chunked_renderer.render_active_cel(seam_doc, blur_request, &forced_caps);
+            if (!chunk_render_ok && !chunked_renderer.last_error().empty()) {
+                std::cout << "       " << chunked_renderer.last_error() << "\n";
+            }
+            const bool chunk_read_ok = chunk_render_ok && chunked_renderer.read_output_pixels(chunked_pixels);
+            const bool chunking_used = chunk_render_ok && chunked_renderer.used_chunking();
+            const bool all_pixels_match = full_render_ok && chunk_read_ok && outputs_match(full_pixels, chunked_pixels);
+            const bool seam_match = full_render_ok && chunk_read_ok &&
+                                    seam_pixels_match(full_pixels, chunked_pixels, seam_doc.width, seam_doc.height, forced_extent);
+            std::cout << "Forced chunk extent: " << forced_extent << "\n";
+            ok = report_step("OpenGL forced chunk render", chunk_render_ok) && ok;
+            ok = report_step("OpenGL forced chunk readback", chunk_read_ok) && ok;
+            ok = report_step("OpenGL forced chunk path was used", chunking_used) && ok;
+            ok = report_step("OpenGL chunked output matches full output", all_pixels_match) && ok;
+            ok = report_step("OpenGL pixels on chunk borders match full output", seam_match) && ok;
+        }
 
         GLCanvasTexture canvas;
         canvas.update(doc.width, doc.height, doc.composite_active());
@@ -100,27 +225,29 @@ int main() {
         Renderer3D renderer;
         ModelViewportState viewport;
         auto composite = doc.composite_active();
-        ok = renderer.render_model_to_texture(model, canvas.id(), doc.width, doc.height, viewport, 96, 96, composite);
-        if (ok) {
+        bool model_render_ok = renderer.render_model_to_texture(model, canvas.id(), doc.width, doc.height, viewport, 96, 96, composite);
+        if (model_render_ok) {
             std::vector<Pixel> pixels(96 * 96, 0);
             glBindTexture(GL_TEXTURE_2D, renderer.texture_id());
             glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-            ok = std::any_of(pixels.begin(), pixels.end(), [](Pixel p) {
+            model_render_ok = std::any_of(pixels.begin(), pixels.end(), [](Pixel p) {
                 return a(p) != 0 && (r(p) != 0 || g(p) != 0 || b(p) != 0);
             });
         }
+        ok = report_step("OpenGL 3D model render with populated texture", model_render_ok) && ok;
         std::fill(doc.active_cel().pixels.begin(), doc.active_cel().pixels.end(), 0);
         canvas.update(doc.width, doc.height, doc.composite_active());
         composite = doc.composite_active();
-        ok = ok && renderer.render_model_to_texture(model, canvas.id(), doc.width, doc.height, viewport, 96, 96, composite);
-        if (ok) {
+        bool transparent_model_ok = renderer.render_model_to_texture(model, canvas.id(), doc.width, doc.height, viewport, 96, 96, composite);
+        if (transparent_model_ok) {
             std::vector<Pixel> pixels(96 * 96, 0);
             glBindTexture(GL_TEXTURE_2D, renderer.texture_id());
             glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-            ok = std::any_of(pixels.begin(), pixels.end(), [](Pixel p) {
+            transparent_model_ok = std::any_of(pixels.begin(), pixels.end(), [](Pixel p) {
                 return a(p) != 0 && (r(p) != 0 || g(p) != 0 || b(p) != 0);
             });
         }
+        ok = report_step("OpenGL 3D model render with transparent texture", transparent_model_ok) && ok;
     }
 
     gladLoaderUnloadGL();
@@ -128,7 +255,7 @@ int main() {
     glfwTerminate();
 
     if (!ok) {
-        std::cerr << "OpenGL smoke failed: renderer output was blank\n";
+        std::cerr << "OpenGL smoke failed: one or more required OpenGL checks failed\n";
         return 1;
     }
     std::cout << "OpenGL smoke passed\n";
