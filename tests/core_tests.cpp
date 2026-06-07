@@ -317,21 +317,83 @@ static void test_v2_layers_frames_tags() {
 }
 
 static void test_gpu_chunking_policy() {
+    const GpuEffectMode chunk_safe[] = {
+        GpuEffectMode::BrightnessContrast,
+        GpuEffectMode::Hsv,
+        GpuEffectMode::Levels,
+        GpuEffectMode::PaletteQuantize,
+        GpuEffectMode::PaletteDither,
+        GpuEffectMode::AutoLevel,
+        GpuEffectMode::Grayscale,
+        GpuEffectMode::Sepia,
+        GpuEffectMode::InvertColors,
+        GpuEffectMode::InvertAlpha,
+        GpuEffectMode::Posterize,
+        GpuEffectMode::OilPainting,
+        GpuEffectMode::InkSketch,
+        GpuEffectMode::PencilSketch,
+        GpuEffectMode::GaussianBlur,
+        GpuEffectMode::MotionBlur,
+        GpuEffectMode::MedianBlur,
+        GpuEffectMode::SurfaceBlur,
+        GpuEffectMode::ReduceNoise,
+        GpuEffectMode::Glow,
+        GpuEffectMode::RedEyeRemoval,
+        GpuEffectMode::Sharpen,
+        GpuEffectMode::SoftenPortrait,
+        GpuEffectMode::EdgeDetect,
+        GpuEffectMode::Emboss,
+        GpuEffectMode::Outline,
+        GpuEffectMode::Relief
+    };
+    const GpuEffectMode full_image_only[] = {
+        GpuEffectMode::RadialBlur,
+        GpuEffectMode::ZoomBlur,
+        GpuEffectMode::Pixelate,
+        GpuEffectMode::Crystalize,
+        GpuEffectMode::FrostedGlass,
+        GpuEffectMode::Bulge,
+        GpuEffectMode::Twist,
+        GpuEffectMode::TileReflection,
+        GpuEffectMode::Dents,
+        GpuEffectMode::PolarInversion,
+        GpuEffectMode::AddNoise,
+        GpuEffectMode::Vignette,
+        GpuEffectMode::Clouds,
+        GpuEffectMode::JuliaFractal,
+        GpuEffectMode::MandelbrotFractal,
+        GpuEffectMode::Turbulence
+    };
+
+    bool covered[43] = {};
+    for (GpuEffectMode mode : chunk_safe) {
+        GpuEffectRequest request;
+        request.mode = mode;
+        assert(GpuEffectRenderer::effect_supports_chunking(request));
+        covered[static_cast<int>(mode)] = true;
+    }
+    for (GpuEffectMode mode : full_image_only) {
+        GpuEffectRequest request;
+        request.mode = mode;
+        assert(!GpuEffectRenderer::effect_supports_chunking(request));
+        covered[static_cast<int>(mode)] = true;
+    }
+    for (bool mode_covered : covered) {
+        assert(mode_covered);
+    }
+
     GpuEffectRequest blur;
     blur.mode = GpuEffectMode::GaussianBlur;
     blur.params = {12.0f, 0.0f, 0.0f, 0.0f};
-    assert(GpuEffectRenderer::effect_supports_chunking(blur));
     assert(GpuEffectRenderer::effect_chunk_halo(blur) == 12);
 
     GpuEffectRequest motion;
     motion.mode = GpuEffectMode::MotionBlur;
     motion.params = {64.0f, 0.0f, 0.0f, 0.0f};
-    assert(GpuEffectRenderer::effect_supports_chunking(motion));
     assert(GpuEffectRenderer::effect_chunk_halo(motion) == 24);
 
     GpuEffectRequest twist;
     twist.mode = GpuEffectMode::Twist;
-    assert(!GpuEffectRenderer::effect_supports_chunking(twist));
     assert(GpuEffectRenderer::effect_chunk_halo(twist) == 0);
 
     GpuBackendCapabilities older_gpu;

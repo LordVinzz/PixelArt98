@@ -49,6 +49,8 @@ bool needs_full_image_coordinates(GpuEffectMode mode) {
         case GpuEffectMode::TileReflection:
         case GpuEffectMode::Dents:
         case GpuEffectMode::PolarInversion:
+        case GpuEffectMode::AddNoise:
+        case GpuEffectMode::Vignette:
         case GpuEffectMode::Clouds:
         case GpuEffectMode::JuliaFractal:
         case GpuEffectMode::MandelbrotFractal:

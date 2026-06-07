@@ -279,13 +279,13 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
 } // namespace
 
 struct MpsEffectRenderer::Impl {
-    id<MTLDevice> device = nil;
-    id<MTLCommandQueue> queue = nil;
-    id<MTLLibrary> library = nil;
-    id<MTLComputePipelineState> pipeline = nil;
-    id<MTLTexture> source_texture = nil;
-    id<MTLTexture> mask_texture = nil;
-    id<MTLTexture> output_texture = nil;
+    __strong id<MTLDevice> device = nil;
+    __strong id<MTLCommandQueue> queue = nil;
+    __strong id<MTLLibrary> library = nil;
+    __strong id<MTLComputePipelineState> pipeline = nil;
+    __strong id<MTLTexture> source_texture = nil;
+    __strong id<MTLTexture> mask_texture = nil;
+    __strong id<MTLTexture> output_texture = nil;
     int width = 0;
     int height = 0;
     std::vector<Pixel> mask_pixels;
@@ -315,6 +315,37 @@ static id<MTLTexture> make_texture(id<MTLDevice> device, int width, int height) 
     descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     descriptor.storageMode = MTLStorageModeShared;
     return [device newTextureWithDescriptor:descriptor];
+}
+
+static std::string metal_device_summary(id<MTLDevice> device) {
+    if (device == nil) {
+        return "device=nil";
+    }
+    std::string summary = "device=" + nsstring_to_string([device name]);
+    if ([device respondsToSelector:@selector(isLowPower)]) {
+        summary += std::string(", low_power=") + ([device isLowPower] ? "true" : "false");
+    }
+    if ([device respondsToSelector:@selector(hasUnifiedMemory)]) {
+        summary += std::string(", unified_memory=") + ([device hasUnifiedMemory] ? "true" : "false");
+    }
+    if ([device respondsToSelector:@selector(recommendedMaxWorkingSetSize)]) {
+        summary += ", recommended_working_set=" + std::to_string(static_cast<std::uint64_t>([device recommendedMaxWorkingSetSize]));
+    }
+    if ([device respondsToSelector:@selector(currentAllocatedSize)]) {
+        summary += ", current_allocated=" + std::to_string(static_cast<std::uint64_t>([device currentAllocatedSize]));
+    }
+    return summary;
+}
+
+static id<MTLCommandBuffer> make_command_buffer(id<MTLCommandQueue> queue) {
+    if (queue == nil) {
+        return nil;
+    }
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    if (command_buffer == nil && [queue respondsToSelector:@selector(commandBufferWithUnretainedReferences)]) {
+        command_buffer = [queue commandBufferWithUnretainedReferences];
+    }
+    return command_buffer;
 }
 
 static std::uint64_t mps_texture_footprint(int width, int height, std::uint64_t texture_count) {
@@ -398,7 +429,7 @@ bool MpsEffectRenderer::render_full_active_cel(const Document& document, const G
             return false;
         }
 
-        if (impl.device == nil) {
+        if (impl.device == nil || impl.queue == nil || impl.library == nil || impl.pipeline == nil) {
             impl.device = MTLCreateSystemDefaultDevice();
             if (impl.device == nil) {
                 last_error_ = "MPS backend unavailable: no Metal device";
@@ -406,7 +437,10 @@ bool MpsEffectRenderer::render_full_active_cel(const Document& document, const G
             }
             impl.queue = [impl.device newCommandQueue];
             if (impl.queue == nil) {
-                last_error_ = "MPS backend unavailable: could not create command queue";
+                impl.queue = [impl.device newCommandQueueWithMaxCommandBufferCount:8];
+            }
+            if (impl.queue == nil) {
+                last_error_ = "MPS backend unavailable: could not create command queue (" + metal_device_summary(impl.device) + ")";
                 return false;
             }
 
@@ -470,9 +504,11 @@ bool MpsEffectRenderer::render_full_active_cel(const Document& document, const G
                                 withBytes:impl.mask_pixels.data()
                               bytesPerRow:static_cast<NSUInteger>(document.width * static_cast<int>(sizeof(Pixel)))];
 
-        id<MTLCommandBuffer> command_buffer = [impl.queue commandBuffer];
+        id<MTLCommandBuffer> command_buffer = make_command_buffer(impl.queue);
         if (command_buffer == nil) {
-            last_error_ = "MPS backend unavailable: could not create command buffer";
+            last_error_ = "MPS backend unavailable: could not create command buffer (" +
+                          metal_device_summary(impl.device) +
+                          ", queue=" + (impl.queue == nil ? std::string("nil") : std::string("created")) + ")";
             return false;
         }
 
