@@ -31,9 +31,11 @@ static bool report_step(const char* name, bool passed) {
     return passed;
 }
 
+#if defined(__APPLE__)
 static void report_skip(const char* name, const std::string& reason) {
     std::cout << "[SKIP] " << name << ": " << reason << "\n";
 }
+#endif
 
 static bool pixels_close(Pixel lhs, Pixel rhs) {
     const auto close = [](std::uint8_t a, std::uint8_t b) {
