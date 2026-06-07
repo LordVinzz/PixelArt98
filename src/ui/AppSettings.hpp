@@ -12,6 +12,8 @@ namespace px {
 struct AppSettings {
     bool show_splash_screen = true;
     bool auto_open_error_console = true;
+    bool heavy_gpu_optimization = true;
+    bool mps_backend = false;
 };
 
 [[nodiscard]] std::filesystem::path default_app_settings_path();

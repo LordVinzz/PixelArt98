@@ -8,7 +8,9 @@
 #include "core/Filters.hpp"
 #include "core/Model.hpp"
 #include "core/Tools.hpp"
+#include "render/GpuEffectRenderer.hpp"
 #include "render/GLCanvasTexture.hpp"
+#include "render/MpsEffectRenderer.hpp"
 #include "render/Renderer3D.hpp"
 #include "ui/AppSettings.hpp"
 #include "ui/FileDialogs.hpp"
@@ -98,6 +100,8 @@ private:
     ToolContext tool_;
     GLCanvasTexture canvas_texture_;
     GLCanvasTexture onion_texture_;
+    GpuEffectRenderer gpu_effect_renderer_;
+    MpsEffectRenderer mps_effect_renderer_;
     std::array<GLCanvasTexture, 4> transform_icon_textures_;
     std::array<GLCanvasTexture, 6> skybox_face_textures_;
     Renderer3D renderer3d_;
@@ -199,6 +203,7 @@ private:
     float new_document_width_ = 64.0f;
     float new_document_height_ = 64.0f;
     float new_document_resolution_ = 96.0f;
+    int new_document_size_preset_ = 0;
     int new_document_size_unit_ = 0;
     int new_document_resolution_unit_ = 0;
     int new_document_aspect_preset_ = 0;
@@ -294,6 +299,10 @@ private:
     void draw_skybox_background(ImDrawList* draw_list, const ImVec2& origin, const ImVec2& size);
     void handle_model_transform_drag(const ImVec2& origin, const ImVec2& size, bool hovered);
     void start_effect_preview(EffectPreviewKind kind);
+    GpuEffectRequest gpu_effect_request(EffectPreviewKind kind) const;
+    bool try_mps_effect(EffectPreviewKind kind, std::vector<Pixel>& out_pixels);
+    bool try_gpu_effect(EffectPreviewKind kind, std::vector<Pixel>& out_pixels);
+    bool apply_effect_to_document(EffectPreviewKind kind);
     void rebuild_effect_preview();
     void apply_effect_to(Document& target) const;
     void apply_effect_preview_to_document();

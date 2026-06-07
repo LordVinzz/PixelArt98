@@ -6,7 +6,9 @@
 
 #include "core/Document.hpp"
 #include "core/Model.hpp"
+#include "render/GpuEffectRenderer.hpp"
 #include "render/GLCanvasTexture.hpp"
+#include "render/MpsEffectRenderer.hpp"
 #include "render/Renderer3D.hpp"
 
 #include <GLFW/glfw3.h>
@@ -59,6 +61,35 @@ int main() {
     {
         Document doc = Document::create(16, 16);
         std::fill(doc.active_cel().pixels.begin(), doc.active_cel().pixels.end(), rgba(255, 0, 0, 255));
+        GpuEffectRenderer effect_renderer;
+        GpuEffectRequest effect_request;
+        effect_request.mode = GpuEffectMode::Grayscale;
+        ok = effect_renderer.render_active_cel(doc, effect_request);
+        if (ok) {
+            std::vector<Pixel> effect_pixels;
+            ok = effect_renderer.read_output_pixels(effect_pixels) &&
+                 std::any_of(effect_pixels.begin(), effect_pixels.end(), [](Pixel p) {
+                     return a(p) == 255 && r(p) > 0 && r(p) == g(p) && g(p) == b(p);
+                 });
+        }
+#if defined(__APPLE__)
+        {
+            MpsEffectRenderer mps_renderer;
+            GpuEffectRequest mps_request;
+            mps_request.mode = GpuEffectMode::GaussianBlur;
+            mps_request.params = {2.0f, 0.0f, 0.0f, 0.0f};
+            if (mps_renderer.render_active_cel(doc, mps_request)) {
+                std::vector<Pixel> mps_pixels;
+                ok = ok && mps_renderer.read_output_pixels(mps_pixels) &&
+                     std::any_of(mps_pixels.begin(), mps_pixels.end(), [](Pixel p) {
+                         return a(p) == 255 && r(p) > 0;
+                     });
+            } else {
+                std::cout << "MPS smoke skipped: " << mps_renderer.last_error() << "\n";
+            }
+        }
+#endif
+
         GLCanvasTexture canvas;
         canvas.update(doc.width, doc.height, doc.composite_active());
 

@@ -34,6 +34,15 @@ void GLCanvasTexture::update(int width, int height, const std::vector<Pixel>& pi
     }
 }
 
+void GLCanvasTexture::update_region(int x, int y, int width, int height, const Pixel* pixels) {
+    if (texture_id_ == 0 || pixels == nullptr || width <= 0 || height <= 0 || x < 0 || y < 0 ||
+        x + width > width_ || y + height > height_) {
+        return;
+    }
+    glBindTexture(GL_TEXTURE_2D, texture_id_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+}
+
 void GLCanvasTexture::bind_nearest() const {
     if (texture_id_ == 0) {
         return;

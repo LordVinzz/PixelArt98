@@ -50,6 +50,15 @@ AppSettings load_app_settings(const std::filesystem::path& path, std::string* er
         } else if (root.contains("show_error_console")) {
             settings.auto_open_error_console = root.at("show_error_console").get<bool>();
         }
+        if (root.contains("heavy_gpu_optimization")) {
+            settings.heavy_gpu_optimization = root.at("heavy_gpu_optimization").get<bool>();
+        }
+        if (root.contains("mps_backend")) {
+            settings.mps_backend = root.at("mps_backend").get<bool>();
+        }
+        if (!settings.heavy_gpu_optimization) {
+            settings.mps_backend = false;
+        }
     } catch (const std::exception& exception) {
         set_error(error, std::string("Could not load settings: ") + exception.what());
     }
@@ -65,6 +74,8 @@ bool save_app_settings(const AppSettings& settings, const std::filesystem::path&
         nlohmann::json root;
         root["show_splash_screen"] = settings.show_splash_screen;
         root["auto_open_error_console"] = settings.auto_open_error_console;
+        root["heavy_gpu_optimization"] = settings.heavy_gpu_optimization;
+        root["mps_backend"] = settings.heavy_gpu_optimization && settings.mps_backend;
 
         std::ofstream file(path, std::ios::trunc);
         if (!file.is_open()) {

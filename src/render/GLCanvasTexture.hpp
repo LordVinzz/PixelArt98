@@ -19,6 +19,7 @@ public:
     GLCanvasTexture& operator=(const GLCanvasTexture&) = delete;
 
     void update(int width, int height, const std::vector<Pixel>& pixels);
+    void update_region(int x, int y, int width, int height, const Pixel* pixels);
     void bind_nearest() const;
     void bind_linear_repeat() const;
     void destroy();

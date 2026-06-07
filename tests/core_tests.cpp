@@ -444,11 +444,24 @@ static void test_app_settings_roundtrip() {
     AppSettings settings;
     settings.show_splash_screen = false;
     settings.auto_open_error_console = false;
+    settings.heavy_gpu_optimization = false;
+    settings.mps_backend = true;
     assert(save_app_settings(settings, settings_path, &error));
 
     const AppSettings loaded = load_app_settings(settings_path, &error);
     assert(!loaded.show_splash_screen);
     assert(!loaded.auto_open_error_console);
+    assert(!loaded.heavy_gpu_optimization);
+    assert(!loaded.mps_backend);
+    const AppSettings defaults = load_app_settings(settings_path.parent_path() / "pixelart98_missing_settings_test.json", &error);
+    assert(defaults.heavy_gpu_optimization);
+    assert(!defaults.mps_backend);
+    settings.heavy_gpu_optimization = true;
+    settings.mps_backend = true;
+    assert(save_app_settings(settings, settings_path, &error));
+    const AppSettings loaded_mps = load_app_settings(settings_path, &error);
+    assert(loaded_mps.heavy_gpu_optimization);
+    assert(loaded_mps.mps_backend);
     std::filesystem::remove(settings_path);
 }
 

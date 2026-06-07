@@ -1,0 +1,461 @@
+// Copyright (c) 2026 DOMINGUEZ Vincent
+// Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
+// See LICENSE for details.
+
+#include "render/MpsEffectRenderer.hpp"
+
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <simd/simd.h>
+
+namespace px {
+
+namespace {
+
+struct MpsUniforms {
+    std::int32_t mode = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t pad = 0;
+    simd_float4 params = {};
+    simd_float4 params2 = {};
+    simd_float4 primary = {};
+    simd_float4 secondary = {};
+};
+
+int mode_value(GpuEffectMode mode) {
+    return static_cast<int>(mode);
+}
+
+simd_float4 pixel_to_float4(Pixel pixel) {
+    return simd_make_float4(static_cast<float>(r(pixel)) / 255.0f,
+                            static_cast<float>(g(pixel)) / 255.0f,
+                            static_cast<float>(b(pixel)) / 255.0f,
+                            static_cast<float>(a(pixel)) / 255.0f);
+}
+
+std::string nsstring_to_string(NSString* value) {
+    if (value == nil) {
+        return {};
+    }
+    const char* text = [value UTF8String];
+    return text != nullptr ? std::string(text) : std::string();
+}
+
+constexpr const char* kMetalSource = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct Uniforms {
+    int mode;
+    uint width;
+    uint height;
+    uint pad;
+    float4 params;
+    float4 params2;
+    float4 primary;
+    float4 secondary;
+};
+
+float luma(float3 color) {
+    return dot(color, float3(0.299, 0.587, 0.114));
+}
+
+float3 rgb_to_hsv(float3 c) {
+    float4 k = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    float4 p = mix(float4(c.bg, k.wz), float4(c.gb, k.xy), step(c.b, c.g));
+    float4 q = mix(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 0.00001;
+    return float3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+float3 hsv_to_rgb(float3 c) {
+    float3 p = abs(fract(c.xxx + float3(0.0, 1.0 / 3.0, 2.0 / 3.0)) * 6.0 - 3.0);
+    return c.z * mix(float3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+}
+
+float hash12(float2 p) {
+    float3 p3 = fract(float3(p.x, p.y, p.x) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float value_noise(float2 p) {
+    float2 i = floor(p);
+    float2 f = fract(p);
+    float2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash12(i);
+    float b = hash12(i + float2(1.0, 0.0));
+    float c = hash12(i + float2(0.0, 1.0));
+    float d = hash12(i + float2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float fbm(float2 p) {
+    float value = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 5; ++i) {
+        value += amp * value_noise(p);
+        p *= 2.02;
+        amp *= 0.5;
+    }
+    return value;
+}
+
+float4 read_px(texture2d<float, access::read> source, int2 p, constant Uniforms& u) {
+    int2 clamped = clamp(p, int2(0), int2(int(u.width) - 1, int(u.height) - 1));
+    return source.read(uint2(clamped));
+}
+
+float4 blur_box(texture2d<float, access::read> source, int2 p, constant Uniforms& u, int radius) {
+    float4 sum = float4(0.0);
+    float count = 0.0;
+    int r = clamp(radius, 1, 16);
+    for (int y = -16; y <= 16; ++y) {
+        for (int x = -16; x <= 16; ++x) {
+            if (abs(x) <= r && abs(y) <= r) {
+                sum += read_px(source, p + int2(x, y), u);
+                count += 1.0;
+            }
+        }
+    }
+    return sum / max(1.0, count);
+}
+
+float4 edge_color(texture2d<float, access::read> source, int2 p, constant Uniforms& u) {
+    float left = luma(read_px(source, p + int2(-1, 0), u).rgb);
+    float right = luma(read_px(source, p + int2(1, 0), u).rgb);
+    float up = luma(read_px(source, p + int2(0, -1), u).rgb);
+    float down = luma(read_px(source, p + int2(0, 1), u).rgb);
+    float edge = clamp(abs(right - left) + abs(down - up), 0.0, 1.0);
+    return float4(float3(edge), read_px(source, p, u).a);
+}
+
+kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[texture(0)]],
+                                   texture2d<float, access::read> mask_tex [[texture(1)]],
+                                   texture2d<float, access::write> dest [[texture(2)]],
+                                   constant Uniforms& u [[buffer(0)]],
+                                   uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    int2 p = int2(gid);
+    float4 src = source.read(gid);
+    if (mask_tex.read(gid).r < 0.5) {
+        dest.write(src, gid);
+        return;
+    }
+
+    float4 out = src;
+    if (u.mode == 0) {
+        float contrast = 1.0 + u.params.y * 2.0;
+        out = float4(clamp((src.rgb - 0.5) * contrast + 0.5 + u.params.x, 0.0, 1.0), src.a);
+    } else if (u.mode == 1) {
+        float3 hsv = rgb_to_hsv(src.rgb);
+        hsv.x = fract(hsv.x + u.params.x);
+        hsv.y = clamp(hsv.y + u.params.y, 0.0, 1.0);
+        hsv.z = clamp(hsv.z + u.params.z, 0.0, 1.0);
+        out = float4(hsv_to_rgb(hsv), src.a);
+    } else if (u.mode == 2) {
+        float in_black = clamp(u.params.x, 0.0, 0.99);
+        float in_white = max(in_black + 0.01, u.params.y);
+        float3 normalized = clamp((src.rgb - in_black) / (in_white - in_black), 0.0, 1.0);
+        normalized = pow(normalized, float3(1.0 / max(0.05, u.params.z)));
+        out = float4(mix(float3(u.params.w), float3(u.params2.x), normalized), src.a);
+    } else if (u.mode == 3 || u.mode == 4 || u.mode == 10) {
+        float steps = max(2.0, u.params.x);
+        float3 color = src.rgb;
+        if (u.mode == 4) {
+            color = clamp(color + (hash12(float2(gid)) - 0.5) / steps, 0.0, 1.0);
+        }
+        out = float4(floor(color * (steps - 1.0) + 0.5) / (steps - 1.0), src.a);
+    } else if (u.mode == 5) {
+        float lo = min(min(src.r, src.g), src.b);
+        float hi = max(max(src.r, src.g), src.b);
+        out = float4(clamp((src.rgb - lo) / max(0.01, hi - lo), 0.0, 1.0), src.a);
+    } else if (u.mode == 6) {
+        out = float4(float3(luma(src.rgb)), src.a);
+    } else if (u.mode == 7) {
+        out = float4(float3(dot(src.rgb, float3(0.393, 0.769, 0.189)),
+                            dot(src.rgb, float3(0.349, 0.686, 0.168)),
+                            dot(src.rgb, float3(0.272, 0.534, 0.131))), src.a);
+    } else if (u.mode == 8) {
+        out = float4(1.0 - src.rgb, src.a);
+    } else if (u.mode == 9) {
+        out = float4(src.rgb, 1.0 - src.a);
+    } else if (u.mode == 11 || u.mode == 14) {
+        out = blur_box(source, p, u, int(u.params.x));
+    } else if (u.mode == 12 || u.mode == 13 || u.mode == 39 || u.mode == 41) {
+        float4 edge = edge_color(source, p, u);
+        out = u.mode == 39 ? edge : float4(mix(src.rgb, edge.rgb, clamp(u.params.y / 100.0, 0.0, 1.0)), src.a);
+    } else if (u.mode == 18 || u.mode == 29) {
+        out = mix(src, blur_box(source, p, u, int(u.params.x)), 0.45);
+    } else if (u.mode == 19) {
+        float4 b = blur_box(source, p, u, int(u.params.x));
+        out = length(src.rgb - b.rgb) < u.params.y / 255.0 ? b : src;
+    } else if (u.mode == 20 || u.mode == 21) {
+        int cell = max(1, int(u.params.x));
+        int2 snapped = (p / cell) * cell + int2(cell / 2);
+        out = read_px(source, snapped, u);
+    } else if (u.mode == 22) {
+        float radius = max(1.0, u.params.x);
+        float2 jitter = float2(hash12(float2(gid)), hash12(float2(gid) + 19.7)) * 2.0 - 1.0;
+        out = read_px(source, p + int2(jitter * radius), u);
+    } else if (u.mode == 28) {
+        float n = hash12(float2(gid) + u.params.x);
+        if (n <= clamp(u.params.y / 100.0, 0.0, 1.0)) {
+            float3 noise = mix(float3(n), float3(hash12(float2(gid) + 2.0), hash12(float2(gid) + 7.0), hash12(float2(gid) + 13.0)), clamp(u.params.z / 100.0, 0.0, 1.0));
+            out = float4(mix(src.rgb, noise, clamp(u.params.x / 255.0, 0.0, 1.0)), src.a);
+        }
+    } else if (u.mode == 30) {
+        float4 b = blur_box(source, p, u, int(u.params.x));
+        out = float4(clamp(src.rgb + b.rgb * clamp(u.params.y / 100.0, 0.0, 1.0), 0.0, 1.0), src.a);
+    } else if (u.mode == 31) {
+        float3 hsv = rgb_to_hsv(src.rgb);
+        if (hsv.x < 0.06 || hsv.x > 0.94) {
+            hsv.y *= 1.0 - clamp(u.params.y / 100.0, 0.0, 1.0);
+        }
+        out = float4(hsv_to_rgb(hsv), src.a);
+    } else if (u.mode == 32) {
+        float4 sharp = src * 5.0 - read_px(source, p + int2(1, 0), u) - read_px(source, p - int2(1, 0), u) - read_px(source, p + int2(0, 1), u) - read_px(source, p - int2(0, 1), u);
+        out = float4(mix(src.rgb, clamp(sharp.rgb, 0.0, 1.0), clamp(u.params.y / 100.0, 0.0, 1.0)), src.a);
+    } else if (u.mode == 33) {
+        float4 b = blur_box(source, p, u, int(u.params.x));
+        out = float4(mix(src.rgb, b.rgb * float3(1.05, 1.0, 0.94), clamp(u.params.y / 100.0, 0.0, 1.0)), src.a);
+    } else if (u.mode == 34) {
+        float2 uv = float2(gid) / float2(max(1u, u.width), max(1u, u.height));
+        float v = smoothstep(0.9, 0.2, distance(uv, float2(0.5)) + u.params.y / 400.0);
+        out = float4(src.rgb * v, src.a);
+    } else if (u.mode == 35) {
+        float n = fbm(float2(gid) / max(1.0, u.params.x));
+        out = float4(mix(u.primary.rgb, u.secondary.rgb, n), src.a);
+    } else if (u.mode == 38) {
+        float n = fbm(float2(gid) / max(1.0, u.params.x));
+        out = float4(mix(src.rgb, float3(n), 0.65), src.a);
+    } else if (u.mode == 40 || u.mode == 42) {
+        float l0 = luma(read_px(source, p - int2(1, 1), u).rgb);
+        float l1 = luma(read_px(source, p + int2(1, 1), u).rgb);
+        out = float4(float3(clamp((l0 - l1) + 0.5, 0.0, 1.0)), src.a);
+    } else {
+        float2 uv = float2(gid) / float2(max(1u, u.width), max(1u, u.height));
+        float2 center = float2(0.5);
+        float2 delta = uv - center;
+        if (u.mode == 23) {
+            float dist = length(delta);
+            float2 sample_uv = center + delta * (1.0 - u.params.x * 0.35 * (1.0 - dist));
+            out = read_px(source, int2(sample_uv * float2(u.width, u.height)), u);
+        } else if (u.mode == 24) {
+            float angle = u.params.x * 6.28318 * (1.0 - length(delta));
+            float2 sample_uv = center + float2(cos(angle) * delta.x - sin(angle) * delta.y, sin(angle) * delta.x + cos(angle) * delta.y);
+            out = read_px(source, int2(sample_uv * float2(u.width, u.height)), u);
+        } else if (u.mode == 27) {
+            float radius = length(delta);
+            float angle = atan2(delta.y, delta.x);
+            float2 sample_uv = center + float2(cos(angle), sin(angle)) * (1.0 - radius) * u.params.x;
+            out = read_px(source, int2(sample_uv * float2(u.width, u.height)), u);
+        } else if (u.mode == 36 || u.mode == 37) {
+            float2 z = (uv - 0.5) * max(0.1, 3.0 / max(0.1, u.params.x));
+            float2 c = u.mode == 36 ? float2(-0.8, 0.156) : z;
+            float iter = 0.0;
+            for (int i = 0; i < 64; ++i) {
+                z = float2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
+                if (dot(z, z) > 4.0) break;
+                iter += 1.0;
+            }
+            out = float4(0.5 + 0.5 * cos(float3(0.0, 2.0, 4.0) + iter * 0.18), src.a);
+        } else if (u.mode == 15 || u.mode == 16 || u.mode == 17 || u.mode == 25 || u.mode == 26) {
+            out = blur_box(source, p, u, max(1, int(u.params.x)));
+        }
+    }
+    dest.write(clamp(out, 0.0, 1.0), gid);
+}
+)MSL";
+
+} // namespace
+
+struct MpsEffectRenderer::Impl {
+    id<MTLDevice> device = nil;
+    id<MTLCommandQueue> queue = nil;
+    id<MTLLibrary> library = nil;
+    id<MTLComputePipelineState> pipeline = nil;
+    id<MTLTexture> source_texture = nil;
+    id<MTLTexture> mask_texture = nil;
+    id<MTLTexture> output_texture = nil;
+    int width = 0;
+    int height = 0;
+    std::vector<Pixel> mask_pixels;
+};
+
+MpsEffectRenderer::MpsEffectRenderer()
+    : impl_(std::make_unique<Impl>()) {}
+
+MpsEffectRenderer::~MpsEffectRenderer() = default;
+
+bool MpsEffectRenderer::available() const {
+    return impl_ != nullptr && impl_->device != nil;
+}
+
+void MpsEffectRenderer::destroy() {
+    impl_ = std::make_unique<Impl>();
+}
+
+static id<MTLTexture> make_texture(id<MTLDevice> device, int width, int height) {
+    MTLTextureDescriptor* descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                           width:static_cast<NSUInteger>(width)
+                                                          height:static_cast<NSUInteger>(height)
+                                                       mipmapped:NO];
+    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    descriptor.storageMode = MTLStorageModeShared;
+    return [device newTextureWithDescriptor:descriptor];
+}
+
+bool MpsEffectRenderer::render_active_cel(const Document& document, const GpuEffectRequest& request) {
+    @autoreleasepool {
+        last_error_.clear();
+        if (!document.valid()) {
+            last_error_ = "MPS backend skipped: document is invalid";
+            return false;
+        }
+
+        if (impl_->device == nil) {
+            impl_->device = MTLCreateSystemDefaultDevice();
+            if (impl_->device == nil) {
+                last_error_ = "MPS backend unavailable: no Metal device";
+                return false;
+            }
+            impl_->queue = [impl_->device newCommandQueue];
+            if (impl_->queue == nil) {
+                last_error_ = "MPS backend unavailable: could not create command queue";
+                return false;
+            }
+
+            NSError* error = nil;
+            NSString* source = [NSString stringWithUTF8String:kMetalSource];
+            impl_->library = [impl_->device newLibraryWithSource:source options:nil error:&error];
+            if (impl_->library == nil) {
+                last_error_ = "MPS backend shader compile failed: " + nsstring_to_string([error localizedDescription]);
+                return false;
+            }
+            id<MTLFunction> function = [impl_->library newFunctionWithName:@"pixelart_effect_kernel"];
+            impl_->pipeline = [impl_->device newComputePipelineStateWithFunction:function error:&error];
+            if (impl_->pipeline == nil) {
+                last_error_ = "MPS backend pipeline creation failed: " + nsstring_to_string([error localizedDescription]);
+                return false;
+            }
+        }
+
+        constexpr int kConservativeMaxTextureSize = 16384;
+        if (document.width > kConservativeMaxTextureSize || document.height > kConservativeMaxTextureSize) {
+            last_error_ = "MPS backend skipped: image exceeds Metal max texture size";
+            return false;
+        }
+
+        const std::size_t pixel_count = static_cast<std::size_t>(document.width * document.height);
+        const auto& pixels = document.active_cel().pixels;
+        if (pixels.size() != pixel_count) {
+            last_error_ = "MPS backend skipped: active cel pixel buffer has the wrong size";
+            return false;
+        }
+
+        if (impl_->width != document.width || impl_->height != document.height ||
+            impl_->source_texture == nil || impl_->mask_texture == nil || impl_->output_texture == nil) {
+            impl_->source_texture = make_texture(impl_->device, document.width, document.height);
+            impl_->mask_texture = make_texture(impl_->device, document.width, document.height);
+            impl_->output_texture = make_texture(impl_->device, document.width, document.height);
+            impl_->width = document.width;
+            impl_->height = document.height;
+            if (impl_->source_texture == nil || impl_->mask_texture == nil || impl_->output_texture == nil) {
+                last_error_ = "MPS backend unavailable: could not allocate textures";
+                return false;
+            }
+        }
+
+        const MTLRegion region = MTLRegionMake2D(0, 0, static_cast<NSUInteger>(document.width), static_cast<NSUInteger>(document.height));
+        [impl_->source_texture replaceRegion:region
+                                 mipmapLevel:0
+                                   withBytes:pixels.data()
+                                 bytesPerRow:static_cast<NSUInteger>(document.width * static_cast<int>(sizeof(Pixel)))];
+
+        impl_->mask_pixels.assign(pixel_count, rgba(255, 255, 255, 255));
+        if (document.selection.active && document.selection.mask.size() == pixel_count) {
+            for (std::size_t i = 0; i < pixel_count; ++i) {
+                const std::uint8_t value = document.selection.mask[i] != 0 ? 255 : 0;
+                impl_->mask_pixels[i] = rgba(value, value, value, 255);
+            }
+        }
+        [impl_->mask_texture replaceRegion:region
+                               mipmapLevel:0
+                                 withBytes:impl_->mask_pixels.data()
+                               bytesPerRow:static_cast<NSUInteger>(document.width * static_cast<int>(sizeof(Pixel)))];
+
+        id<MTLCommandBuffer> command_buffer = [impl_->queue commandBuffer];
+        if (command_buffer == nil) {
+            last_error_ = "MPS backend unavailable: could not create command buffer";
+            return false;
+        }
+
+        if (request.mode == GpuEffectMode::GaussianBlur) {
+            const float sigma = std::max(0.01f, request.params[0]);
+            MPSImageGaussianBlur* blur = [[MPSImageGaussianBlur alloc] initWithDevice:impl_->device sigma:sigma];
+            [blur encodeToCommandBuffer:command_buffer
+                          sourceTexture:impl_->source_texture
+                     destinationTexture:impl_->output_texture];
+        } else {
+            MpsUniforms uniforms;
+            uniforms.mode = mode_value(request.mode);
+            uniforms.width = static_cast<std::uint32_t>(document.width);
+            uniforms.height = static_cast<std::uint32_t>(document.height);
+            uniforms.params = simd_make_float4(request.params[0], request.params[1], request.params[2], request.params[3]);
+            uniforms.params2 = simd_make_float4(request.params2[0], request.params2[1], request.params2[2], request.params2[3]);
+            uniforms.primary = pixel_to_float4(request.primary);
+            uniforms.secondary = pixel_to_float4(request.secondary);
+
+            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+            if (encoder == nil) {
+                last_error_ = "MPS backend unavailable: could not create compute encoder";
+                return false;
+            }
+            [encoder setComputePipelineState:impl_->pipeline];
+            [encoder setTexture:impl_->source_texture atIndex:0];
+            [encoder setTexture:impl_->mask_texture atIndex:1];
+            [encoder setTexture:impl_->output_texture atIndex:2];
+            [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+
+            const NSUInteger thread_width = std::min<NSUInteger>(16, impl_->pipeline.threadExecutionWidth);
+            const NSUInteger thread_height = std::max<NSUInteger>(1, std::min<NSUInteger>(16, impl_->pipeline.maxTotalThreadsPerThreadgroup / thread_width));
+            const MTLSize threads_per_group = MTLSizeMake(thread_width, thread_height, 1);
+            const MTLSize threads = MTLSizeMake(static_cast<NSUInteger>(document.width), static_cast<NSUInteger>(document.height), 1);
+            [encoder dispatchThreads:threads threadsPerThreadgroup:threads_per_group];
+            [encoder endEncoding];
+        }
+
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+        if ([command_buffer status] == MTLCommandBufferStatusError) {
+            last_error_ = "MPS backend command failed: " + nsstring_to_string([[command_buffer error] localizedDescription]);
+            return false;
+        }
+        return true;
+    }
+}
+
+bool MpsEffectRenderer::read_output_pixels(std::vector<Pixel>& pixels) const {
+    if (impl_ == nullptr || impl_->output_texture == nil || impl_->width <= 0 || impl_->height <= 0) {
+        return false;
+    }
+    pixels.assign(static_cast<std::size_t>(impl_->width * impl_->height), 0);
+    const MTLRegion region = MTLRegionMake2D(0, 0, static_cast<NSUInteger>(impl_->width), static_cast<NSUInteger>(impl_->height));
+    [impl_->output_texture getBytes:pixels.data()
+                        bytesPerRow:static_cast<NSUInteger>(impl_->width * static_cast<int>(sizeof(Pixel)))
+                         fromRegion:region
+                        mipmapLevel:0];
+    return true;
+}
+
+} // namespace px

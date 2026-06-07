@@ -105,6 +105,7 @@ pixelart_configure_project_target(pixelart_core)
 
 add_library(pixelart_app
     src/platform/NativeFileDialogProvider.cpp
+    src/render/GpuEffectRenderer.cpp
     src/render/GLCanvasTexture.cpp
     src/render/Renderer3D.cpp
     src/ui/AppSettings.cpp
@@ -113,8 +114,19 @@ add_library(pixelart_app
     src/ui/SplashScreen.cpp
     src/ui/StartupSplash.cpp
     src/ui/EditorApp.cpp)
+if(APPLE)
+    target_sources(pixelart_app PRIVATE src/render/MpsEffectRenderer.mm)
+    set_source_files_properties(src/render/MpsEffectRenderer.mm PROPERTIES
+        LANGUAGE CXX
+        COMPILE_FLAGS "-x objective-c++ -fobjc-arc")
+else()
+    target_sources(pixelart_app PRIVATE src/render/MpsEffectRenderer.cpp)
+endif()
 target_include_directories(pixelart_app PUBLIC src)
 target_link_libraries(pixelart_app PUBLIC pixelart_core imgui_backend glad_gl_core_33 nfd::nfd OpenGL::GL PRIVATE stb_headers)
+if(APPLE)
+    target_link_libraries(pixelart_app PUBLIC "-framework Foundation" "-framework Metal" "-framework MetalPerformanceShaders")
+endif()
 target_compile_definitions(pixelart_app PUBLIC
     GL_SILENCE_DEPRECATION
     NOMINMAX
@@ -191,4 +203,19 @@ if(PIXELART_BUILD_TESTS)
     pixelart_configure_project_target(pixelart_opengl_smoke)
     add_test(NAME pixelart_opengl_smoke COMMAND pixelart_opengl_smoke)
     set_tests_properties(pixelart_opengl_smoke PROPERTIES TIMEOUT 15)
+
+    if(APPLE)
+        add_executable(pixelart_mps_smoke tests/mps_smoke.cpp)
+        target_link_libraries(pixelart_mps_smoke PRIVATE pixelart_app)
+        pixelart_configure_project_target(pixelart_mps_smoke)
+        add_test(NAME pixelart_mps_smoke COMMAND pixelart_mps_smoke)
+        set_tests_properties(pixelart_mps_smoke PROPERTIES TIMEOUT 15)
+    endif()
+
+    add_executable(pixelart_gpu_backend_benchmark tests/gpu_backend_benchmark.cpp)
+    target_link_libraries(pixelart_gpu_backend_benchmark PRIVATE pixelart_app)
+    target_include_directories(pixelart_gpu_backend_benchmark SYSTEM PRIVATE
+        ${glfw_SOURCE_DIR}/include)
+    target_compile_definitions(pixelart_gpu_backend_benchmark PRIVATE GL_SILENCE_DEPRECATION)
+    pixelart_configure_project_target(pixelart_gpu_backend_benchmark)
 endif()
