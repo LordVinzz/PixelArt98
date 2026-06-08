@@ -56,6 +56,91 @@ static Pixel sample_nearest(const std::vector<Pixel>& pixels, int width, int hei
     return pixels[static_cast<std::size_t>(sy * width + sx)];
 }
 
+static Pixel sample_transparent(const std::vector<Pixel>& pixels, int width, int height, int x, int y) {
+    if (x < 0 || y < 0 || x >= width || y >= height) {
+        return 0;
+    }
+    return pixels[static_cast<std::size_t>(y * width + x)];
+}
+
+static Pixel sample_bilinear(const std::vector<Pixel>& pixels, int width, int height, float x, float y) {
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const float tx = x - static_cast<float>(x0);
+    const float ty = y - static_cast<float>(y0);
+    const Pixel p00 = sample_transparent(pixels, width, height, x0, y0);
+    const Pixel p10 = sample_transparent(pixels, width, height, x0 + 1, y0);
+    const Pixel p01 = sample_transparent(pixels, width, height, x0, y0 + 1);
+    const Pixel p11 = sample_transparent(pixels, width, height, x0 + 1, y0 + 1);
+    auto channel = [&](auto fn) {
+        const float top = static_cast<float>(fn(p00)) * (1.0f - tx) + static_cast<float>(fn(p10)) * tx;
+        const float bottom = static_cast<float>(fn(p01)) * (1.0f - tx) + static_cast<float>(fn(p11)) * tx;
+        return to_u8(top * (1.0f - ty) + bottom * ty);
+    };
+    return rgba(channel(r), channel(g), channel(b), channel(a));
+}
+
+static float cubic_weight(float value) {
+    value = std::fabs(value);
+    if (value <= 1.0f) {
+        return 1.0f - 3.0f * value * value + 2.0f * value * value * value;
+    }
+    if (value < 2.0f) {
+        const float t = 2.0f - value;
+        return t * t * t;
+    }
+    return 0.0f;
+}
+
+static Pixel sample_bicubic(const std::vector<Pixel>& pixels, int width, int height, float x, float y) {
+    const int base_x = static_cast<int>(std::floor(x));
+    const int base_y = static_cast<int>(std::floor(y));
+    float red = 0.0f;
+    float green = 0.0f;
+    float blue = 0.0f;
+    float alpha = 0.0f;
+    float total_weight = 0.0f;
+    for (int yy = base_y - 1; yy <= base_y + 2; ++yy) {
+        const float wy = cubic_weight(y - static_cast<float>(yy));
+        for (int xx = base_x - 1; xx <= base_x + 2; ++xx) {
+            const float weight = wy * cubic_weight(x - static_cast<float>(xx));
+            if (weight <= 0.0f) {
+                continue;
+            }
+            const Pixel pixel = sample_transparent(pixels, width, height, xx, yy);
+            red += static_cast<float>(r(pixel)) * weight;
+            green += static_cast<float>(g(pixel)) * weight;
+            blue += static_cast<float>(b(pixel)) * weight;
+            alpha += static_cast<float>(a(pixel)) * weight;
+            total_weight += weight;
+        }
+    }
+    if (total_weight <= 0.0f) {
+        return 0;
+    }
+    return rgba(to_u8(red / total_weight),
+                to_u8(green / total_weight),
+                to_u8(blue / total_weight),
+                to_u8(alpha / total_weight));
+}
+
+static Pixel sample_resampled(const std::vector<Pixel>& pixels,
+                              int width,
+                              int height,
+                              float x,
+                              float y,
+                              ResamplingMode mode) {
+    switch (mode) {
+        case ResamplingMode::Nearest:
+            return sample_nearest(pixels, width, height, x, y);
+        case ResamplingMode::Bilinear:
+            return sample_bilinear(pixels, width, height, x, y);
+        case ResamplingMode::Bicubic:
+            return sample_bicubic(pixels, width, height, x, y);
+    }
+    return sample_nearest(pixels, width, height, x, y);
+}
+
 static Pixel mix_pixels(Pixel first, Pixel second, float amount) {
     const float t = std::clamp(amount, 0.0f, 1.0f);
     const float inv = 1.0f - t;
@@ -86,7 +171,8 @@ static void apply_affine(Document& doc,
                          float angle_degrees,
                          float zoom,
                          int pan_x,
-                         int pan_y) {
+                         int pan_y,
+                         ResamplingMode resampling = ResamplingMode::Nearest) {
     const float angle = angle_degrees * 3.14159265358979323846f / 180.0f;
     const float cos_a = std::cos(angle);
     const float sin_a = std::sin(angle);
@@ -98,7 +184,7 @@ static void apply_affine(Document& doc,
         const float dy = (static_cast<float>(y - pan_y) - cy) / scale;
         const float src_x = cos_a * dx + sin_a * dy + cx;
         const float src_y = -sin_a * dx + cos_a * dy + cy;
-        return sample_nearest(source, doc.width, doc.height, src_x, src_y);
+        return sample_resampled(source, doc.width, doc.height, src_x, src_y, resampling);
     });
 }
 
@@ -387,8 +473,13 @@ void apply_rotate_180(Document& doc) {
     });
 }
 
-void apply_rotate_zoom(Document& doc, float angle_degrees, float zoom, int pan_x, int pan_y) {
-    apply_affine(doc, "Rotate / Zoom", angle_degrees, zoom, pan_x, pan_y);
+void apply_rotate_zoom(Document& doc,
+                       float angle_degrees,
+                       float zoom,
+                       int pan_x,
+                       int pan_y,
+                       ResamplingMode resampling) {
+    apply_affine(doc, "Rotate / Zoom", angle_degrees, zoom, pan_x, pan_y, resampling);
 }
 
 void apply_square_blur(Document& doc, int radius) {
@@ -825,8 +916,8 @@ void apply_vignette(Document& doc, int radius, int strength) {
     });
 }
 
-void apply_straighten(Document& doc, float angle_degrees) {
-    apply_affine(doc, "Straighten", angle_degrees, 1.0f, 0, 0);
+void apply_straighten(Document& doc, float angle_degrees, ResamplingMode resampling) {
+    apply_affine(doc, "Straighten", angle_degrees, 1.0f, 0, 0, resampling);
 }
 
 void apply_edge_detect(Document& doc, int strength) {

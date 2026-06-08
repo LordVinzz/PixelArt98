@@ -26,6 +26,19 @@ namespace {
 
 constexpr int kMaxDocumentSize = 4096;
 constexpr float kCentimetersPerInch = 2.54f;
+constexpr const char* kResamplingModeNames[] = {"Nearest Neighbor", "Bilinear", "Bicubic"};
+
+ResamplingMode resampling_mode_from_index(int index) {
+    switch (std::clamp(index, 0, 2)) {
+        case 0:
+            return ResamplingMode::Nearest;
+        case 1:
+            return ResamplingMode::Bilinear;
+        case 2:
+            return ResamplingMode::Bicubic;
+    }
+    return ResamplingMode::Bicubic;
+}
 
 ImVec4 to_imvec4(Pixel p) {
     return ImVec4(r(p) / 255.0f, g(p) / 255.0f, b(p) / 255.0f, a(p) / 255.0f);
@@ -1148,6 +1161,7 @@ void EditorApp::render() {
     draw_model_preview_window();
     draw_tile_preview_window();
     draw_effect_preview_popup();
+    draw_rotate_zoom_popup();
     draw_error_console();
     draw_status_bar();
     end_history_frame();
@@ -1642,14 +1656,15 @@ void EditorApp::draw_main_menu() {
             set_status("Applied Rotate 180");
         }
         if (ImGui::MenuItem("Straighten")) {
-            apply_straighten(document_, static_cast<float>(effect_angle_));
-            texture_dirty_ = true;
-            set_status("Applied Straighten");
+            start_straighten_tool();
         }
         if (ImGui::MenuItem("Rotate / Zoom")) {
-            apply_rotate_zoom(document_, static_cast<float>(effect_angle_), effect_zoom_, 0, 0);
-            texture_dirty_ = true;
-            set_status("Applied Rotate / Zoom");
+            rotate_zoom_angle_ = static_cast<float>(effect_angle_);
+            rotate_zoom_zoom_ = effect_zoom_;
+            rotate_zoom_pan_x_ = 0;
+            rotate_zoom_pan_y_ = 0;
+            rotate_zoom_preview_dirty_ = true;
+            rotate_zoom_popup_requested_ = true;
         }
         ImGui::EndMenu();
     }
@@ -2132,6 +2147,11 @@ void EditorApp::draw_canvas() {
     ImGui::Checkbox("Grid", &show_grid_);
     ImGui::SameLine();
     ImGui::Checkbox("Onion", &onion_skin_);
+    if (straighten_active_) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(150.0f);
+        ImGui::Combo("Resampling##Straighten", &image_transform_resampling_, kResamplingModeNames, IM_ARRAYSIZE(kResamplingModeNames));
+    }
 
     ImGui::BeginChild("CanvasView",
                       ImVec2(0, 0),
@@ -2215,6 +2235,7 @@ void EditorApp::draw_canvas() {
     draw_selection_overlay(draw_list, origin);
     draw_lasso_preview(draw_list, origin);
     draw_tool_drag_preview(draw_list, origin);
+    draw_straighten_overlay(draw_list, origin);
     handle_canvas_input(origin, viewport_size, viewport_hovered, viewport_active, canvas_active);
     draw_list->Flags = old_flags;
     ImGui::EndChild();
@@ -2317,6 +2338,10 @@ void EditorApp::handle_canvas_input(const ImVec2& origin,
         return;
     }
     if (canvas_active && space_down && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        return;
+    }
+
+    if (straighten_active_ && handle_straighten_input(origin, viewport_hovered, canvas_active)) {
         return;
     }
 
@@ -2648,6 +2673,90 @@ bool EditorApp::mouse_to_pixel(const ImVec2& origin, int& out_x, int& out_y) con
     out_x = static_cast<int>(std::floor((mouse.x - origin.x) / zoom_));
     out_y = static_cast<int>(std::floor((mouse.y - origin.y) / zoom_));
     return document_.in_bounds(out_x, out_y);
+}
+
+void EditorApp::start_straighten_tool() {
+    const float inset_x = std::max(1.0f, static_cast<float>(document_.width) * 0.18f);
+    const float inset_y = std::max(1.0f, static_cast<float>(document_.height) * 0.18f);
+    const float max_x = std::max(0.0f, static_cast<float>(document_.width - 1));
+    const float max_y = std::max(0.0f, static_cast<float>(document_.height - 1));
+    straighten_points_[0] = ImVec2(std::min(inset_x, max_x), std::min(inset_y, max_y));
+    straighten_points_[1] = ImVec2(std::max(0.0f, max_x - inset_x), std::min(inset_y, max_y));
+    straighten_points_[2] = ImVec2(std::max(0.0f, max_x - inset_x), std::max(0.0f, max_y - inset_y));
+    straighten_points_[3] = ImVec2(std::min(inset_x, max_x), std::max(0.0f, max_y - inset_y));
+    straighten_drag_point_ = -1;
+    straighten_active_ = true;
+    set_status("Straighten: drag points, Enter applies, Esc cancels");
+}
+
+void EditorApp::cancel_straighten_tool() {
+    straighten_active_ = false;
+    straighten_drag_point_ = -1;
+    set_status("Canceled Straighten");
+}
+
+void EditorApp::apply_straighten_tool() {
+    const ImVec2 top(straighten_points_[1].x - straighten_points_[0].x,
+                     straighten_points_[1].y - straighten_points_[0].y);
+    const ImVec2 bottom(straighten_points_[2].x - straighten_points_[3].x,
+                        straighten_points_[2].y - straighten_points_[3].y);
+    const ImVec2 axis(top.x + bottom.x, top.y + bottom.y);
+    const float angle_degrees = -std::atan2(axis.y, axis.x) * 180.0f / 3.14159265358979323846f;
+    apply_affine_transform_to_document("Straighten",
+                                       angle_degrees,
+                                       1.0f,
+                                       0,
+                                       0,
+                                       resampling_mode_from_index(image_transform_resampling_));
+    straighten_active_ = false;
+    straighten_drag_point_ = -1;
+}
+
+bool EditorApp::handle_straighten_input(const ImVec2& origin, bool viewport_hovered, bool canvas_active) {
+    if (!straighten_active_) {
+        return false;
+    }
+    if (canvas_active && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        cancel_straighten_tool();
+        return true;
+    }
+    if (canvas_active && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))) {
+        apply_straighten_tool();
+        return true;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    auto point_to_screen = [&](const ImVec2& point) {
+        return ImVec2(origin.x + point.x * zoom_, origin.y + point.y * zoom_);
+    };
+    auto mouse_to_doc = [&]() {
+        return ImVec2(std::clamp((io.MousePos.x - origin.x) / zoom_, 0.0f, static_cast<float>(document_.width - 1)),
+                      std::clamp((io.MousePos.y - origin.y) / zoom_, 0.0f, static_cast<float>(document_.height - 1)));
+    };
+
+    if (viewport_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        float best_distance = std::numeric_limits<float>::max();
+        int best_point = -1;
+        for (int i = 0; i < 4; ++i) {
+            const ImVec2 screen = point_to_screen(straighten_points_[static_cast<std::size_t>(i)]);
+            const float dx = io.MousePos.x - screen.x;
+            const float dy = io.MousePos.y - screen.y;
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_point = i;
+            }
+        }
+        straighten_drag_point_ = std::max(0, best_point);
+        straighten_points_[static_cast<std::size_t>(straighten_drag_point_)] = mouse_to_doc();
+    }
+    if (straighten_drag_point_ >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        straighten_points_[static_cast<std::size_t>(straighten_drag_point_)] = mouse_to_doc();
+    }
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        straighten_drag_point_ = -1;
+    }
+    return true;
 }
 
 void EditorApp::finish_drag(int x, int y) {
@@ -3004,6 +3113,26 @@ void EditorApp::draw_tool_drag_preview(ImDrawList* draw_list, const ImVec2& orig
     draw_list->AddRect(min_pos, max_pos, selection_edge, 0.0f, 0, 2.0f);
 }
 
+void EditorApp::draw_straighten_overlay(ImDrawList* draw_list, const ImVec2& origin) const {
+    if (!straighten_active_) {
+        return;
+    }
+    std::array<ImVec2, 4> points{};
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        points[i] = ImVec2(origin.x + straighten_points_[i].x * zoom_,
+                           origin.y + straighten_points_[i].y * zoom_);
+    }
+    draw_list->AddQuadFilled(points[0], points[1], points[2], points[3], IM_COL32(230, 35, 35, 46));
+    draw_list->AddQuad(points[0], points[1], points[2], points[3], IM_COL32(255, 78, 78, 245), 2.0f);
+    draw_list->AddLine(points[0], points[2], IM_COL32(255, 78, 78, 150), 1.0f);
+    draw_list->AddLine(points[1], points[3], IM_COL32(255, 78, 78, 150), 1.0f);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const bool active = straighten_drag_point_ == static_cast<int>(i);
+        draw_list->AddCircleFilled(points[i], active ? 7.0f : 6.0f, IM_COL32(255, 235, 235, 255));
+        draw_list->AddCircle(points[i], active ? 7.0f : 6.0f, IM_COL32(160, 0, 0, 255), 0, 2.0f);
+    }
+}
+
 void EditorApp::commit_text_box() {
     if (!text_box_.active) {
         return;
@@ -3152,7 +3281,7 @@ void EditorApp::draw_layers_panel() {
     }
 
     int blend = static_cast<int>(active_layer.blend_mode);
-    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::SetNextItemWidth(std::min(220.0f, ImGui::GetContentRegionAvail().x * 0.72f));
     if (ImGui::Combo("Blend mode", &blend, blend_modes, IM_ARRAYSIZE(blend_modes))) {
         active_layer.blend_mode = static_cast<LayerBlendMode>(blend);
         texture_dirty_ = true;
@@ -3242,13 +3371,23 @@ void EditorApp::draw_layers_panel() {
         ImGui::PushID(i);
         Layer& layer = document_.layers[static_cast<std::size_t>(i)];
         const bool selected = document_.active_layer == i;
-        if (selected) {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_Header));
+        const float row_height = 58.0f;
+        const float row_width = ImGui::GetContentRegionAvail().x;
+        const ImVec2 row_min = ImGui::GetCursorScreenPos();
+        const ImVec2 row_max(row_min.x + row_width, row_min.y + row_height);
+        const bool row_hovered = ImGui::IsMouseHoveringRect(row_min, row_max);
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        const ImVec4 selected_color = ImGui::GetStyleColorVec4(ImGuiCol_Header);
+        const ImVec4 hovered_color = ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered);
+        const ImVec4 border_color = ImGui::GetStyleColorVec4(ImGuiCol_Border);
+        if (selected || row_hovered) {
+            draw_list->AddRectFilled(row_min,
+                                     row_max,
+                                     ImGui::ColorConvertFloat4ToU32(selected ? selected_color : hovered_color),
+                                     3.0f);
         }
-        ImGui::BeginChild("LayerRow", ImVec2(0.0f, 56.0f), true);
-        if (selected) {
-            ImGui::PopStyleColor();
-        }
+        draw_list->AddRect(row_min, row_max, ImGui::ColorConvertFloat4ToU32(border_color), 3.0f);
+        ImGui::SetCursorScreenPos(ImVec2(row_min.x + 6.0f, row_min.y + 7.0f));
 
         bool row_visible = layer.visible;
         if (ImGui::Checkbox("##visible", &row_visible)) {
@@ -3289,7 +3428,11 @@ void EditorApp::draw_layers_panel() {
             }
         }
         ImGui::EndGroup();
-        ImGui::EndChild();
+        if (row_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsAnyItemHovered()) {
+            document_.active_layer = i;
+        }
+        ImGui::SetCursorScreenPos(row_min);
+        ImGui::Dummy(ImVec2(row_width, row_height));
         ImGui::PopID();
     }
     ImGui::EndChild();
@@ -3414,111 +3557,122 @@ void EditorApp::draw_timeline_panel() {
 void EditorApp::draw_adjustments_panel() {
     ImGui::Begin("Adjustments");
     draw_histogram_plot();
-    ImGui::SeparatorText("Core");
-    ImGui::SliderInt("Brightness", &brightness_, -255, 255);
-    ImGui::SliderInt("Contrast", &contrast_, -255, 255);
-    if (ImGui::Button("Apply Brightness / Contrast")) {
-        apply_effect_to_document(EffectPreviewKind::BrightnessContrast);
-        brightness_ = 0;
-        contrast_ = 0;
+    auto reset_after_apply = [&](EffectPreviewKind kind) {
+        if (kind == EffectPreviewKind::BrightnessContrast) {
+            brightness_ = 0;
+            contrast_ = 0;
+        } else if (kind == EffectPreviewKind::Hsv) {
+            hue_ = saturation_ = value_ = 0.0f;
+        }
+    };
+    auto preview_apply = [&](EffectPreviewKind kind, bool reset_controls = false) {
+        ImGui::PushID(static_cast<int>(kind));
+        if (ImGui::Button("Preview", ImVec2(82.0f, 0.0f))) {
+            start_effect_preview(kind);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Apply", ImVec2(82.0f, 0.0f))) {
+            apply_effect_to_document(kind);
+            if (reset_controls) {
+                reset_after_apply(kind);
+            }
+        }
+        ImGui::PopID();
+    };
+    auto apply_button = [&](const char* label, EffectPreviewKind kind, float width = 0.0f) {
+        if (ImGui::Button(label, ImVec2(width, 0.0f))) {
+            apply_effect_to_document(kind);
+        }
+    };
+    auto preview_button = [&](const char* label, EffectPreviewKind kind, float width = 0.0f) {
+        if (ImGui::Button(label, ImVec2(width, 0.0f))) {
+            start_effect_preview(kind);
+        }
+    };
+    auto apply_cell = [&](const char* label, EffectPreviewKind kind) {
+        ImGui::TableNextColumn();
+        apply_button(label, kind, -1.0f);
+    };
+    auto preview_cell = [&](const char* label, EffectPreviewKind kind) {
+        ImGui::TableNextColumn();
+        preview_button(label, kind, -1.0f);
+    };
+
+    if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderInt("Brightness", &brightness_, -255, 255);
+        ImGui::SliderInt("Contrast", &contrast_, -255, 255);
+        preview_apply(EffectPreviewKind::BrightnessContrast, true);
+        ImGui::SameLine();
+        apply_button("Auto", EffectPreviewKind::AutoLevel, 64.0f);
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Preview##BrightnessContrast")) {
-        start_effect_preview(EffectPreviewKind::BrightnessContrast);
+
+    if (ImGui::CollapsingHeader("Color", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderFloat("Hue", &hue_, -180.0f, 180.0f, "%.1f");
+        ImGui::SliderFloat("Saturation", &saturation_, -1.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Value", &value_, -1.0f, 1.0f, "%.2f");
+        preview_apply(EffectPreviewKind::Hsv, true);
+        ImGui::SameLine();
+        apply_button("B&W", EffectPreviewKind::Grayscale, 64.0f);
+        ImGui::SameLine();
+        apply_button("Sepia", EffectPreviewKind::Sepia, 64.0f);
     }
-    ImGui::SliderFloat("Hue", &hue_, -180.0f, 180.0f, "%.1f");
-    ImGui::SliderFloat("Saturation", &saturation_, -1.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Value", &value_, -1.0f, 1.0f, "%.2f");
-    if (ImGui::Button("Apply HSV")) {
-        apply_effect_to_document(EffectPreviewKind::Hsv);
-        hue_ = saturation_ = value_ = 0.0f;
+
+    if (ImGui::CollapsingHeader("Levels", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderInt("Input Black", &levels_.in_black, 0, 254);
+        ImGui::SliderInt("Input White", &levels_.in_white, 1, 255);
+        ImGui::SliderFloat("Gamma", &levels_.gamma, 0.1f, 4.0f);
+        ImGui::SliderInt("Output Black", &levels_.out_black, 0, 255);
+        ImGui::SliderInt("Output White", &levels_.out_white, 0, 255);
+        preview_apply(EffectPreviewKind::Levels);
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Preview##HSV")) {
-        start_effect_preview(EffectPreviewKind::Hsv);
+
+    if (ImGui::CollapsingHeader("Pixel Art", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderInt("Posterize Levels", &posterize_levels_, 2, 32);
+        preview_apply(EffectPreviewKind::Posterize);
+        if (ImGui::BeginTable("PixelArtActions", 3, ImGuiTableFlags_SizingStretchSame)) {
+            apply_cell("Invert RGB", EffectPreviewKind::InvertColors);
+            apply_cell("Invert Alpha", EffectPreviewKind::InvertAlpha);
+            apply_cell("Quantize", EffectPreviewKind::PaletteQuantize);
+            preview_cell("Preview Quantize", EffectPreviewKind::PaletteQuantize);
+            apply_cell("Dither", EffectPreviewKind::PaletteDither);
+            preview_cell("Preview Dither", EffectPreviewKind::PaletteDither);
+            ImGui::EndTable();
+        }
     }
-    ImGui::SeparatorText("Levels");
-    ImGui::SliderInt("Input Black", &levels_.in_black, 0, 254);
-    ImGui::SliderInt("Input White", &levels_.in_white, 1, 255);
-    ImGui::SliderFloat("Gamma", &levels_.gamma, 0.1f, 4.0f);
-    ImGui::SliderInt("Output Black", &levels_.out_black, 0, 255);
-    ImGui::SliderInt("Output White", &levels_.out_white, 0, 255);
-    if (ImGui::Button("Apply Levels")) {
-        apply_effect_to_document(EffectPreviewKind::Levels);
+
+    if (ImGui::CollapsingHeader("Detail", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderInt("Radius", &effect_radius_, 1, 32);
+        ImGui::SliderInt("Amount", &effect_amount_, 0, 100);
+        if (ImGui::BeginTable("DetailActions", 3, ImGuiTableFlags_SizingStretchSame)) {
+            preview_cell("Blur", EffectPreviewKind::GaussianBlur);
+            preview_cell("Sharpen", EffectPreviewKind::Sharpen);
+            preview_cell("Reduce Noise", EffectPreviewKind::ReduceNoise);
+            preview_cell("Surface Blur", EffectPreviewKind::SurfaceBlur);
+            preview_cell("Glow", EffectPreviewKind::Glow);
+            preview_cell("Edge Detect", EffectPreviewKind::EdgeDetect);
+            ImGui::EndTable();
+        }
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Preview##Levels")) {
-        start_effect_preview(EffectPreviewKind::Levels);
-    }
-    ImGui::SeparatorText("Pixel Art");
-    ImGui::SliderInt("Posterize Levels", &posterize_levels_, 2, 32);
-    if (ImGui::Button("Posterize")) {
-        apply_effect_to_document(EffectPreviewKind::Posterize);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Invert")) {
-        apply_effect_to_document(EffectPreviewKind::InvertColors);
-    }
-    if (ImGui::Button("Grayscale")) {
-        apply_effect_to_document(EffectPreviewKind::Grayscale);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Quantize")) {
-        apply_effect_to_document(EffectPreviewKind::PaletteQuantize);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Preview Quantize")) {
-        start_effect_preview(EffectPreviewKind::PaletteQuantize);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Dither")) {
-        apply_effect_to_document(EffectPreviewKind::PaletteDither);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Preview Dither")) {
-        start_effect_preview(EffectPreviewKind::PaletteDither);
-    }
-    ImGui::SeparatorText("Paint.NET-style Effects");
-    ImGui::SliderInt("Effect Radius", &effect_radius_, 1, 32);
-    ImGui::SliderInt("Effect Amount", &effect_amount_, 0, 100);
-    ImGui::SliderInt("Effect Angle", &effect_angle_, -180, 180);
-    ImGui::SliderInt("Effect Cell Size", &effect_cell_size_, 2, 128);
-    ImGui::SliderInt("Effect Scale", &effect_scale_, 2, 256);
-    ImGui::SliderInt("Noise Intensity", &effect_noise_, 0, 255);
-    ImGui::SliderFloat("Effect Strength", &effect_strength_, -2.0f, 2.0f, "%.2f");
-    ImGui::SliderFloat("Effect Zoom", &effect_zoom_, 0.1f, 8.0f, "%.2f");
-    if (ImGui::Button("Blur")) {
-        start_effect_preview(EffectPreviewKind::GaussianBlur);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Sharpen")) {
-        start_effect_preview(EffectPreviewKind::Sharpen);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Pixelate")) {
-        start_effect_preview(EffectPreviewKind::Pixelate);
-    }
-    if (ImGui::Button("Glow")) {
-        start_effect_preview(EffectPreviewKind::Glow);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Vignette")) {
-        start_effect_preview(EffectPreviewKind::Vignette);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Twist")) {
-        start_effect_preview(EffectPreviewKind::Twist);
-    }
-    if (ImGui::Button("Clouds")) {
-        start_effect_preview(EffectPreviewKind::Clouds);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Mandelbrot")) {
-        start_effect_preview(EffectPreviewKind::MandelbrotFractal);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Edge Detect")) {
-        start_effect_preview(EffectPreviewKind::EdgeDetect);
+
+    if (ImGui::CollapsingHeader("Effects", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderInt("Angle", &effect_angle_, -180, 180);
+        ImGui::SliderInt("Cell Size", &effect_cell_size_, 2, 128);
+        ImGui::SliderInt("Scale", &effect_scale_, 2, 256);
+        ImGui::SliderInt("Noise", &effect_noise_, 0, 255);
+        ImGui::SliderFloat("Strength", &effect_strength_, -2.0f, 2.0f, "%.2f");
+        ImGui::SliderFloat("Zoom", &effect_zoom_, 0.1f, 8.0f, "%.2f");
+        if (ImGui::BeginTable("EffectActions", 3, ImGuiTableFlags_SizingStretchSame)) {
+            preview_cell("Pixelate", EffectPreviewKind::Pixelate);
+            preview_cell("Vignette", EffectPreviewKind::Vignette);
+            preview_cell("Twist", EffectPreviewKind::Twist);
+            preview_cell("Motion Blur", EffectPreviewKind::MotionBlur);
+            preview_cell("Add Noise", EffectPreviewKind::AddNoise);
+            preview_cell("Clouds", EffectPreviewKind::Clouds);
+            preview_cell("Mandelbrot", EffectPreviewKind::MandelbrotFractal);
+            preview_cell("Turbulence", EffectPreviewKind::Turbulence);
+            preview_cell("Emboss", EffectPreviewKind::Emboss);
+            ImGui::EndTable();
+        }
     }
     ImGui::End();
 }
@@ -3765,6 +3919,60 @@ bool EditorApp::try_mps_effect(EffectPreviewKind kind, std::vector<Pixel>& out_p
 #endif
 }
 
+bool EditorApp::try_gpu_affine_transform(float angle_degrees,
+                                         float zoom,
+                                         int pan_x,
+                                         int pan_y,
+                                         ResamplingMode resampling,
+                                         std::vector<Pixel>& out_pixels) {
+    if (!settings_.heavy_gpu_optimization || resampling == ResamplingMode::Bicubic) {
+        return false;
+    }
+    GpuEffectRequest request;
+    request.mode = GpuEffectMode::AffineTransform;
+    request.params = {radians(angle_degrees),
+                      zoom,
+                      static_cast<float>(pan_x),
+                      static_cast<float>(pan_y)};
+    request.params2 = {resampling == ResamplingMode::Bilinear ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    if (!gpu_effect_renderer_.render_active_cel(document_, request)) {
+        if (!gpu_effect_renderer_.last_error().empty()) {
+            report_error("Heavy GPU Optimization", gpu_effect_renderer_.last_error());
+        }
+        return false;
+    }
+    if (!gpu_effect_renderer_.read_output_pixels(out_pixels)) {
+        report_error("Heavy GPU Optimization", "Could not read GPU transform output");
+        return false;
+    }
+    return out_pixels.size() == document_.active_cel().pixels.size();
+}
+
+bool EditorApp::apply_affine_transform_to_document(const char* undo_name,
+                                                   float angle_degrees,
+                                                   float zoom,
+                                                   int pan_x,
+                                                   int pan_y,
+                                                   ResamplingMode resampling) {
+    std::vector<Pixel> gpu_pixels;
+    if (try_gpu_affine_transform(angle_degrees, zoom, pan_x, pan_y, resampling, gpu_pixels)) {
+        auto before = document_.snapshot_active_cel();
+        document_.active_cel().pixels = std::move(gpu_pixels);
+        document_.commit_active_cel_edit(undo_name, std::move(before));
+        texture_dirty_ = true;
+        set_status(std::string("Applied ") + undo_name + " using Heavy GPU Optimization");
+        return true;
+    }
+    if (std::string_view(undo_name) == "Straighten") {
+        apply_straighten(document_, angle_degrees, resampling);
+    } else {
+        apply_rotate_zoom(document_, angle_degrees, zoom, pan_x, pan_y, resampling);
+    }
+    texture_dirty_ = true;
+    set_status(std::string("Applied ") + undo_name);
+    return true;
+}
+
 bool EditorApp::apply_effect_to_document(EffectPreviewKind kind) {
     if (kind == EffectPreviewKind::None) {
         return false;
@@ -3941,6 +4149,19 @@ void EditorApp::rebuild_effect_preview() {
     composite_ = effect_preview_document_.composite_active();
     canvas_texture_.update(effect_preview_document_.width, effect_preview_document_.height, composite_);
     effect_preview_dirty_ = false;
+}
+
+void EditorApp::rebuild_rotate_zoom_preview() {
+    rotate_zoom_preview_document_ = document_;
+    apply_rotate_zoom(rotate_zoom_preview_document_,
+                      rotate_zoom_angle_,
+                      rotate_zoom_zoom_,
+                      rotate_zoom_pan_x_,
+                      rotate_zoom_pan_y_,
+                      resampling_mode_from_index(image_transform_resampling_));
+    auto preview = rotate_zoom_preview_document_.composite_active();
+    transform_preview_texture_.update(rotate_zoom_preview_document_.width, rotate_zoom_preview_document_.height, preview);
+    rotate_zoom_preview_dirty_ = false;
 }
 
 void EditorApp::apply_effect_preview_to_document() {
@@ -4134,15 +4355,172 @@ void EditorApp::draw_effect_preview_popup() {
     }
 }
 
-void EditorApp::draw_histogram_plot() {
-    auto hist = document_.histogram_luma();
-    static float values[256];
-    int max_value = 1;
-    for (int v : hist) max_value = std::max(max_value, v);
-    for (int i = 0; i < 256; ++i) {
-        values[i] = static_cast<float>(hist[static_cast<std::size_t>(i)]) / static_cast<float>(max_value);
+void EditorApp::draw_rotate_zoom_popup() {
+    if (rotate_zoom_popup_requested_) {
+        ImGui::OpenPopup("Rotate / Zoom");
+        rotate_zoom_popup_requested_ = false;
+        rotate_zoom_open_ = true;
+        rotate_zoom_preview_dirty_ = true;
     }
-    ImGui::PlotHistogram("Luma", values, 256, 0, nullptr, 0.0f, 1.0f, ImVec2(0, 80));
+
+    bool open = rotate_zoom_open_;
+    if (!ImGui::BeginPopupModal("Rotate / Zoom", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+        rotate_zoom_open_ = open;
+        return;
+    }
+
+    bool changed = false;
+    changed |= ImGui::SliderFloat("Angle", &rotate_zoom_angle_, -180.0f, 180.0f, "%.1f deg");
+    changed |= ImGui::SliderFloat("Zoom", &rotate_zoom_zoom_, 0.1f, 8.0f, "%.2f");
+    changed |= ImGui::SliderInt("Pan X", &rotate_zoom_pan_x_, -document_.width, document_.width);
+    changed |= ImGui::SliderInt("Pan Y", &rotate_zoom_pan_y_, -document_.height, document_.height);
+    changed |= ImGui::Combo("Resampling", &image_transform_resampling_, kResamplingModeNames, IM_ARRAYSIZE(kResamplingModeNames));
+    if (changed) {
+        rotate_zoom_preview_dirty_ = true;
+    }
+
+    ImGui::BeginGroup();
+    const ImVec2 dial_size(104.0f, 104.0f);
+    const ImVec2 dial_min = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##RotateDial", dial_size);
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    const ImVec2 center(dial_min.x + dial_size.x * 0.5f, dial_min.y + dial_size.y * 0.5f);
+    const float radius = 40.0f;
+    draw_list->AddCircle(center, radius, IM_COL32(190, 190, 190, 255), 64, 2.0f);
+    const float radians_value = rotate_zoom_angle_ * 3.14159265358979323846f / 180.0f;
+    const ImVec2 dot(center.x + std::cos(radians_value) * radius, center.y + std::sin(radians_value) * radius);
+    draw_list->AddLine(center, dot, IM_COL32(245, 180, 70, 255), 2.0f);
+    draw_list->AddCircleFilled(dot, 6.0f, IM_COL32(245, 180, 70, 255));
+    ImGui::EndGroup();
+
+    ImGui::SameLine();
+    if (rotate_zoom_preview_dirty_ || transform_preview_texture_.id() == 0) {
+        rebuild_rotate_zoom_preview();
+    }
+    ImGui::BeginGroup();
+    const float max_preview_size = 220.0f;
+    const float aspect = rotate_zoom_preview_document_.height > 0
+                             ? static_cast<float>(rotate_zoom_preview_document_.width) /
+                                   static_cast<float>(rotate_zoom_preview_document_.height)
+                             : 1.0f;
+    ImVec2 preview_size(max_preview_size, max_preview_size);
+    if (aspect >= 1.0f) {
+        preview_size.y = max_preview_size / std::max(0.01f, aspect);
+    } else {
+        preview_size.x = max_preview_size * aspect;
+    }
+    const ImVec2 preview_min = ImGui::GetCursorScreenPos();
+    const ImVec2 preview_max(preview_min.x + preview_size.x, preview_min.y + preview_size.y);
+    draw_list->AddRectFilled(preview_min, preview_max, IM_COL32(38, 38, 38, 255));
+    transform_preview_texture_.bind_nearest();
+    draw_list->AddImage(gl_texture_id(transform_preview_texture_.id()), preview_min, preview_max);
+    draw_list->AddRect(preview_min, preview_max, IM_COL32(95, 95, 95, 255));
+    ImGui::Dummy(preview_size);
+    ImGui::EndGroup();
+
+    ImGui::Separator();
+    if (ImGui::Button("Apply", ImVec2(96.0f, 0.0f))) {
+        apply_affine_transform_to_document("Rotate / Zoom",
+                                           rotate_zoom_angle_,
+                                           rotate_zoom_zoom_,
+                                           rotate_zoom_pan_x_,
+                                           rotate_zoom_pan_y_,
+                                           resampling_mode_from_index(image_transform_resampling_));
+        effect_angle_ = static_cast<int>(std::round(rotate_zoom_angle_));
+        effect_zoom_ = rotate_zoom_zoom_;
+        rotate_zoom_open_ = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(96.0f, 0.0f))) {
+        rotate_zoom_open_ = false;
+        ImGui::CloseCurrentPopup();
+        set_status("Canceled Rotate / Zoom");
+    }
+    ImGui::EndPopup();
+    rotate_zoom_open_ = open && rotate_zoom_open_;
+}
+
+void EditorApp::draw_histogram_plot() {
+    ImGui::TextUnformatted("Histogram");
+    ImGui::Checkbox("Luma", &histogram_luma_visible_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Red", &histogram_red_visible_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Green", &histogram_green_visible_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Blue", &histogram_blue_visible_);
+
+    const auto luma_hist = document_.histogram_luma();
+    const auto red_hist = document_.histogram_channel(0);
+    const auto green_hist = document_.histogram_channel(1);
+    const auto blue_hist = document_.histogram_channel(2);
+
+    auto normalize = [](const std::array<int, 256>& hist) {
+        std::array<float, 256> values{};
+        int max_value = 1;
+        for (int value : hist) {
+            max_value = std::max(max_value, value);
+        }
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values[i] = static_cast<float>(hist[i]) / static_cast<float>(max_value);
+        }
+        return values;
+    };
+
+    const auto luma_values = normalize(luma_hist);
+    const auto red_values = normalize(red_hist);
+    const auto green_values = normalize(green_hist);
+    const auto blue_values = normalize(blue_hist);
+
+    const float plot_height = 104.0f;
+    const float plot_width = std::max(160.0f, ImGui::GetContentRegionAvail().x);
+    const ImVec2 plot_size(plot_width, plot_height);
+    const ImVec2 plot_min = ImGui::GetCursorScreenPos();
+    const ImVec2 plot_max(plot_min.x + plot_size.x, plot_min.y + plot_size.y);
+    ImGui::InvisibleButton("##HistogramPlot", plot_size);
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    draw_list->AddRectFilled(plot_min, plot_max, IM_COL32(24, 24, 24, 255), 3.0f);
+    for (int i = 1; i < 4; ++i) {
+        const float x = plot_min.x + plot_size.x * static_cast<float>(i) / 4.0f;
+        const float y = plot_min.y + plot_size.y * static_cast<float>(i) / 4.0f;
+        draw_list->AddLine(ImVec2(x, plot_min.y), ImVec2(x, plot_max.y), IM_COL32(58, 58, 58, 140));
+        draw_list->AddLine(ImVec2(plot_min.x, y), ImVec2(plot_max.x, y), IM_COL32(58, 58, 58, 140));
+    }
+    draw_list->AddRect(plot_min, plot_max, IM_COL32(92, 92, 92, 210), 3.0f);
+
+    auto draw_curve = [&](const std::array<float, 256>& values, ImU32 color) {
+        std::array<ImVec2, 256> points{};
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            const float t = static_cast<float>(i) / 255.0f;
+            const float value = std::clamp(values[i], 0.0f, 1.0f);
+            points[i] = ImVec2(plot_min.x + t * plot_size.x, plot_max.y - value * plot_size.y);
+        }
+        draw_list->AddPolyline(points.data(), static_cast<int>(points.size()), color, ImDrawFlags_None, 1.8f);
+    };
+
+    if (histogram_luma_visible_) {
+        draw_curve(luma_values, IM_COL32(230, 230, 230, 235));
+    }
+    if (histogram_red_visible_) {
+        draw_curve(red_values, IM_COL32(245, 78, 78, 225));
+    }
+    if (histogram_green_visible_) {
+        draw_curve(green_values, IM_COL32(80, 210, 116, 225));
+    }
+    if (histogram_blue_visible_) {
+        draw_curve(blue_values, IM_COL32(92, 145, 255, 225));
+    }
+
+    if (!histogram_luma_visible_ && !histogram_red_visible_ && !histogram_green_visible_ && !histogram_blue_visible_) {
+        const char* label = "No histogram enabled";
+        const ImVec2 label_size = ImGui::CalcTextSize(label);
+        draw_list->AddText(ImVec2(plot_min.x + (plot_size.x - label_size.x) * 0.5f,
+                                  plot_min.y + (plot_size.y - label_size.y) * 0.5f),
+                           IM_COL32(160, 160, 160, 255),
+                           label);
+    }
 }
 
 void EditorApp::draw_model_panel() {

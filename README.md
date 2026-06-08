@@ -9,6 +9,8 @@
 
 ![PixelArt98 splash art](res/splash.png)
 
+[README](README.md) | [License](LICENSE) | [Comparisons](docs/COMPARISONS.md) | [Our Philosophy](docs/OUR_PHILOSOPHY.md)
+
 PixelArt98 is a native C++23 pixel-art editor inspired by classic desktop paint tools. It focuses on direct pixel editing, animation frames, layered compositing, and Minecraft-style cuboid texture workflows in one small OpenGL application.
 
 The badges above track the main deployment workflow. Each platform job builds the application and runs the complete test suite, including import/export roundtrip tests.

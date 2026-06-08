@@ -55,6 +55,7 @@ bool needs_full_image_coordinates(GpuEffectMode mode) {
         case GpuEffectMode::JuliaFractal:
         case GpuEffectMode::MandelbrotFractal:
         case GpuEffectMode::Turbulence:
+        case GpuEffectMode::AffineTransform:
             return true;
         default:
             return false;
@@ -213,6 +214,41 @@ float fbm(vec2 p) {
 
 vec4 sample_source(vec2 uv) {
     return texture(u_source, clamp(uv, vec2(0.0), vec2(1.0)));
+}
+
+vec4 fetch_source_or_transparent(ivec2 p) {
+    if (p.x < 0 || p.y < 0 || p.x >= int(u_size.x) || p.y >= int(u_size.y)) {
+        return vec4(0.0);
+    }
+    return texelFetch(u_source, p, 0);
+}
+
+vec4 sample_source_nearest_transparent(vec2 p) {
+    return fetch_source_or_transparent(ivec2(floor(p + vec2(0.5))));
+}
+
+vec4 sample_source_bilinear_transparent(vec2 p) {
+    ivec2 base = ivec2(floor(p));
+    vec2 t = fract(p);
+    vec4 p00 = fetch_source_or_transparent(base);
+    vec4 p10 = fetch_source_or_transparent(base + ivec2(1, 0));
+    vec4 p01 = fetch_source_or_transparent(base + ivec2(0, 1));
+    vec4 p11 = fetch_source_or_transparent(base + ivec2(1, 1));
+    return mix(mix(p00, p10, t.x), mix(p01, p11, t.x), t.y);
+}
+
+vec4 affine_transform(vec2 uv) {
+    vec2 dest = floor(uv * u_size.xy);
+    float scale = max(0.001, u_params.y);
+    vec2 center = u_size.xy * 0.5;
+    vec2 d = (dest - u_params.zw - center) / scale;
+    float c = cos(u_params.x);
+    float s = sin(u_params.x);
+    vec2 source = vec2(c * d.x + s * d.y, -s * d.x + c * d.y) + center;
+    if (u_params2.x > 0.5) {
+        return sample_source_bilinear_transparent(source);
+    }
+    return sample_source_nearest_transparent(source);
 }
 
 vec4 blur_box(vec2 uv, int radius) {
@@ -462,6 +498,7 @@ vec4 apply_effect(vec2 uv, vec4 src) {
         vec4 e = edge_color(uv);
         return vec4(mix(src.rgb, vec3(0.0), e.r * clamp(u_params.y / 100.0, 0.0, 1.0)), src.a);
     }
+    if (mode == 43) return affine_transform(uv);
     return src;
 }
 

@@ -362,10 +362,11 @@ static void test_gpu_chunking_policy() {
         GpuEffectMode::Clouds,
         GpuEffectMode::JuliaFractal,
         GpuEffectMode::MandelbrotFractal,
-        GpuEffectMode::Turbulence
+        GpuEffectMode::Turbulence,
+        GpuEffectMode::AffineTransform
     };
 
-    bool covered[43] = {};
+    bool covered[44] = {};
     for (GpuEffectMode mode : chunk_safe) {
         GpuEffectRequest request;
         request.mode = mode;

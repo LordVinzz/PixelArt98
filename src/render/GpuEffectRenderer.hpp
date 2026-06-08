@@ -57,7 +57,8 @@ enum class GpuEffectMode {
     EdgeDetect,
     Emboss,
     Outline,
-    Relief
+    Relief,
+    AffineTransform
 };
 
 struct GpuEffectRequest {

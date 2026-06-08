@@ -100,6 +100,7 @@ private:
     ToolContext tool_;
     GLCanvasTexture canvas_texture_;
     GLCanvasTexture onion_texture_;
+    GLCanvasTexture transform_preview_texture_;
     GpuEffectRenderer gpu_effect_renderer_;
     MpsEffectRenderer mps_effect_renderer_;
     std::array<GLCanvasTexture, 4> transform_icon_textures_;
@@ -136,6 +137,10 @@ private:
     bool effect_preview_active_ = false;
     bool effect_preview_dirty_ = false;
     bool effect_preview_popup_requested_ = false;
+    bool straighten_active_ = false;
+    bool rotate_zoom_popup_requested_ = false;
+    bool rotate_zoom_open_ = false;
+    bool rotate_zoom_preview_dirty_ = false;
     bool error_console_open_ = false;
     bool error_console_scroll_to_bottom_ = false;
     bool model_render_error_reported_ = false;
@@ -151,6 +156,8 @@ private:
     int skybox_index_ = 0;
     int loaded_skybox_index_ = -1;
     int canvas_drag_button_ = ImGuiMouseButton_Left;
+    int straighten_drag_point_ = -1;
+    int image_transform_resampling_ = 2;
     SelectionCombineMode selection_drag_mode_ = SelectionCombineMode::Replace;
     EffectPreviewKind effect_preview_kind_ = EffectPreviewKind::None;
     int drag_start_x_ = 0;
@@ -172,6 +179,7 @@ private:
     float model_transform_rotation_delta_degrees_ = 0.0f;
     UvRect uv_drag_start_rect_;
     Cuboid model_transform_start_cuboid_;
+    std::array<ImVec2, 4> straighten_points_ = {};
     std::vector<Pixel> stroke_before_;
     std::vector<Pixel> clone_source_pixels_;
     SelectionMask selection_before_;
@@ -181,6 +189,7 @@ private:
     std::deque<EditorHistoryEntry> redo_stack_;
     TextBox text_box_;
     Document effect_preview_document_;
+    Document rotate_zoom_preview_document_;
     Document history_before_document_;
     ModelDocument history_before_model_;
 
@@ -225,6 +234,14 @@ private:
     int effect_noise_ = 32;
     float effect_strength_ = 0.65f;
     float effect_zoom_ = 1.0f;
+    float rotate_zoom_angle_ = 0.0f;
+    float rotate_zoom_zoom_ = 1.0f;
+    int rotate_zoom_pan_x_ = 0;
+    int rotate_zoom_pan_y_ = 0;
+    bool histogram_luma_visible_ = true;
+    bool histogram_red_visible_ = true;
+    bool histogram_green_visible_ = true;
+    bool histogram_blue_visible_ = true;
 
     void update_playback();
     void refresh_texture();
@@ -257,6 +274,7 @@ private:
     void draw_model_preview_window();
     void draw_tile_preview_window();
     void draw_effect_preview_popup();
+    void draw_rotate_zoom_popup();
     void draw_error_console();
     void draw_status_bar();
 
@@ -274,6 +292,10 @@ private:
                              bool viewport_active,
                              bool canvas_active);
     bool mouse_to_pixel(const ImVec2& origin, int& out_x, int& out_y) const;
+    void start_straighten_tool();
+    void cancel_straighten_tool();
+    void apply_straighten_tool();
+    bool handle_straighten_input(const ImVec2& origin, bool viewport_hovered, bool canvas_active);
     void finish_drag(int x, int y);
     void commit_stroke();
     void update_pixel_drag_preview();
@@ -287,6 +309,7 @@ private:
     void draw_lasso_preview(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_selected_model_face_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_tool_drag_preview(ImDrawList* draw_list, const ImVec2& origin) const;
+    void draw_straighten_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_grid_overlay(ImDrawList* draw_list, const ImVec2& origin, const ImVec2& size) const;
     void draw_histogram_plot();
     void draw_uv_overlay(ImDrawList* draw_list, const ImVec2& origin, float scale) const;
@@ -302,8 +325,21 @@ private:
     GpuEffectRequest gpu_effect_request(EffectPreviewKind kind) const;
     bool try_mps_effect(EffectPreviewKind kind, std::vector<Pixel>& out_pixels);
     bool try_gpu_effect(EffectPreviewKind kind, std::vector<Pixel>& out_pixels);
+    bool try_gpu_affine_transform(float angle_degrees,
+                                  float zoom,
+                                  int pan_x,
+                                  int pan_y,
+                                  ResamplingMode resampling,
+                                  std::vector<Pixel>& out_pixels);
+    bool apply_affine_transform_to_document(const char* undo_name,
+                                            float angle_degrees,
+                                            float zoom,
+                                            int pan_x,
+                                            int pan_y,
+                                            ResamplingMode resampling);
     bool apply_effect_to_document(EffectPreviewKind kind);
     void rebuild_effect_preview();
+    void rebuild_rotate_zoom_preview();
     void apply_effect_to(Document& target) const;
     void apply_effect_preview_to_document();
     void close_effect_preview(bool apply);

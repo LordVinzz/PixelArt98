@@ -19,6 +19,12 @@ struct LevelsSettings {
     bool blue = true;
 };
 
+enum class ResamplingMode {
+    Nearest,
+    Bilinear,
+    Bicubic
+};
+
 void apply_brightness_contrast(Document& doc, int brightness, int contrast);
 void apply_hsv(Document& doc, float hue_degrees, float saturation_delta, float value_delta);
 void apply_levels(Document& doc, const LevelsSettings& settings);
@@ -34,7 +40,12 @@ void apply_flip_vertical(Document& doc);
 void apply_rotate_90_clockwise(Document& doc);
 void apply_rotate_90_counter_clockwise(Document& doc);
 void apply_rotate_180(Document& doc);
-void apply_rotate_zoom(Document& doc, float angle_degrees, float zoom, int pan_x, int pan_y);
+void apply_rotate_zoom(Document& doc,
+                       float angle_degrees,
+                       float zoom,
+                       int pan_x,
+                       int pan_y,
+                       ResamplingMode resampling = ResamplingMode::Nearest);
 
 void apply_oil_painting(Document& doc, int brush_size, int coarseness);
 void apply_ink_sketch(Document& doc, int outline, int coloring);
@@ -63,7 +74,9 @@ void apply_red_eye_removal(Document& doc, int strength);
 void apply_sharpen(Document& doc, int amount);
 void apply_soften_portrait(Document& doc, int softness, int lighting, int warmth);
 void apply_vignette(Document& doc, int radius, int strength);
-void apply_straighten(Document& doc, float angle_degrees);
+void apply_straighten(Document& doc,
+                      float angle_degrees,
+                      ResamplingMode resampling = ResamplingMode::Nearest);
 void apply_edge_detect(Document& doc, int strength);
 void apply_emboss(Document& doc, float angle_degrees);
 void apply_outline(Document& doc, int thickness, int intensity);

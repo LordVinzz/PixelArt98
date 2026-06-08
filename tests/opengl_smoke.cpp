@@ -5,6 +5,7 @@
 #define GLFW_INCLUDE_NONE
 
 #include "core/Document.hpp"
+#include "core/Filters.hpp"
 #include "core/Model.hpp"
 #include "render/GpuEffectRenderer.hpp"
 #include "render/GLCanvasTexture.hpp"
@@ -145,6 +146,32 @@ int main() {
                            });
         }
         ok = report_step("OpenGL grayscale effect and readback", grayscale_ok) && ok;
+        {
+            Document transform_doc = Document::create(8, 8);
+            for (int y = 0; y < transform_doc.height; ++y) {
+                for (int x = 0; x < transform_doc.width; ++x) {
+                    transform_doc.active_cel().pixels[static_cast<std::size_t>(y * transform_doc.width + x)] =
+                        rgba(static_cast<std::uint8_t>(x * 29),
+                             static_cast<std::uint8_t>(y * 31),
+                             static_cast<std::uint8_t>((x + y) * 17),
+                             255);
+                }
+            }
+            Document cpu_transform_doc = transform_doc;
+            apply_rotate_zoom(cpu_transform_doc, 90.0f, 1.0f, 0, 0, ResamplingMode::Nearest);
+            GpuEffectRenderer transform_renderer;
+            GpuEffectRequest transform_request;
+            transform_request.mode = GpuEffectMode::AffineTransform;
+            transform_request.params = {3.14159265358979323846f * 0.5f, 1.0f, 0.0f, 0.0f};
+            std::vector<Pixel> transform_pixels;
+            bool transform_ok = transform_renderer.render_active_cel(transform_doc, transform_request) &&
+                                transform_renderer.read_output_pixels(transform_pixels) &&
+                                outputs_match(transform_pixels, cpu_transform_doc.active_cel().pixels);
+            if (!transform_ok && !transform_renderer.last_error().empty()) {
+                std::cout << "       " << transform_renderer.last_error() << "\n";
+            }
+            ok = report_step("OpenGL affine transform matches CPU nearest reference", transform_ok) && ok;
+        }
 #if defined(__APPLE__)
         {
             MpsEffectRenderer mps_renderer;
