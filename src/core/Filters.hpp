@@ -6,7 +6,11 @@
 
 #include "core/Document.hpp"
 
+#include <array>
+
 namespace px {
+
+constexpr int kMaxCurvePoints = 8;
 
 struct LevelsSettings {
     int in_black = 0;
@@ -14,6 +18,16 @@ struct LevelsSettings {
     float gamma = 1.0f;
     int out_black = 0;
     int out_white = 255;
+    bool red = true;
+    bool green = true;
+    bool blue = true;
+};
+
+struct CurvesSettings {
+    std::array<float, kMaxCurvePoints> x = {0.0f, 1.0f};
+    std::array<float, kMaxCurvePoints> y = {0.0f, 1.0f};
+    int point_count = 2;
+    bool luma = true;
     bool red = true;
     bool green = true;
     bool blue = true;
@@ -29,6 +43,7 @@ void apply_brightness_contrast(Document& doc, int brightness, int contrast);
 void apply_hsv(Document& doc, float hue_degrees, float saturation_delta, float value_delta);
 void apply_levels(Document& doc, const LevelsSettings& settings);
 void apply_tonal_range(Document& doc, int white_point, int highlights, int shadows, int black_point);
+void apply_curves(Document& doc, const CurvesSettings& settings);
 void apply_auto_level(Document& doc);
 void apply_posterize(Document& doc, int levels);
 void apply_invert(Document& doc, bool alpha);

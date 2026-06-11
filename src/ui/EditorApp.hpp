@@ -40,6 +40,7 @@ enum class EffectPreviewKind {
     Hsv,
     Levels,
     TonalRange,
+    Curves,
     PaletteQuantize,
     PaletteDither,
     AutoLevel,
@@ -240,6 +241,8 @@ private:
     float saturation_ = 0.0f;
     float value_ = 0.0f;
     LevelsSettings levels_;
+    CurvesSettings curves_;
+    int histogram_curve_drag_handle_ = 0;
     int white_point_ = 0;
     int highlights_ = 0;
     int shadows_ = 0;

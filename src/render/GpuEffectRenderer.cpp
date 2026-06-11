@@ -163,6 +163,9 @@ uniform int u_mode;
 uniform vec4 u_size;
 uniform vec4 u_params;
 uniform vec4 u_params2;
+uniform int u_curve_point_count;
+uniform float u_curve_x[8];
+uniform float u_curve_y[8];
 uniform vec4 u_primary;
 uniform vec4 u_secondary;
 
@@ -249,6 +252,28 @@ vec4 affine_transform(vec2 uv) {
         return sample_source_bilinear_transparent(source);
     }
     return sample_source_nearest_transparent(source);
+}
+
+float evaluate_point_curve(float value) {
+    float target = clamp(value, 0.0, 1.0);
+    int count = clamp(u_curve_point_count, 2, 8);
+    if (target <= u_curve_x[0]) {
+        return clamp(u_curve_y[0], 0.0, 1.0);
+    }
+    for (int i = 1; i < 8; ++i) {
+        if (i < count) {
+            float x0 = clamp(u_curve_x[i - 1], 0.0, 1.0);
+            float x1 = clamp(u_curve_x[i], x0 + 0.001, 1.0);
+            if (target <= x1 || i == count - 1) {
+                float y0 = clamp(u_curve_y[i - 1], 0.0, 1.0);
+                float y1 = clamp(u_curve_y[i], 0.0, 1.0);
+                float t = clamp((target - x0) / max(0.001, x1 - x0), 0.0, 1.0);
+                float smooth = t * t * (3.0 - 2.0 * t);
+                return mix(y0, y1, smooth);
+            }
+        }
+    }
+    return clamp(u_curve_y[count - 1], 0.0, 1.0);
 }
 
 vec4 blur_box(vec2 uv, int radius) {
@@ -512,6 +537,22 @@ vec4 apply_effect(vec2 uv, vec4 src) {
         float highlight_weight = pow(lum, 1.6);
         color += shadows * 0.45 * shadow_weight * (shadows >= 0.0 ? (vec3(1.0) - color) : color);
         color += highlights * 0.45 * highlight_weight * (highlights >= 0.0 ? (vec3(1.0) - color) : color);
+        return vec4(clamp(color, 0.0, 1.0), src.a);
+    }
+    if (mode == 45) {
+        vec3 color = src.rgb;
+        if (u_params2.x > 0.5) {
+            float lum = clamp(luminance(color), 0.0, 1.0);
+            float mapped_lum = evaluate_point_curve(lum);
+            if (lum > 0.0001) {
+                color *= mapped_lum / lum;
+            } else {
+                color = vec3(mapped_lum);
+            }
+        }
+        if (u_params2.y > 0.5) color.r = evaluate_point_curve(color.r);
+        if (u_params2.z > 0.5) color.g = evaluate_point_curve(color.g);
+        if (u_params2.w > 0.5) color.b = evaluate_point_curve(color.b);
         return vec4(clamp(color, 0.0, 1.0), src.a);
     }
     return src;
@@ -789,6 +830,9 @@ bool GpuEffectRenderer::render_full_active_cel(const Document& document, const G
                 request.params[0], request.params[1], request.params[2], request.params[3]);
     glUniform4f(glGetUniformLocation(shader_program_, "u_params2"),
                 request.params2[0], request.params2[1], request.params2[2], request.params2[3]);
+    glUniform1i(glGetUniformLocation(shader_program_, "u_curve_point_count"), request.curve_point_count);
+    glUniform1fv(glGetUniformLocation(shader_program_, "u_curve_x"), kMaxCurvePoints, request.curve_x.data());
+    glUniform1fv(glGetUniformLocation(shader_program_, "u_curve_y"), kMaxCurvePoints, request.curve_y.data());
     glUniform4f(glGetUniformLocation(shader_program_, "u_primary"), primary[0], primary[1], primary[2], primary[3]);
     glUniform4f(glGetUniformLocation(shader_program_, "u_secondary"), secondary[0], secondary[1], secondary[2], secondary[3]);
 

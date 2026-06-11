@@ -184,6 +184,24 @@ static void test_filters() {
     assert(r(recovered_highlight) < 192);
     assert(a(tone.active_cel().pixels[checked_pixel_index(tone, 3, 0)]) == 128);
 
+    auto curves = Document::create(2, 1);
+    curves.active_cel().pixels[checked_pixel_index(curves, 0, 0)] = rgba(80, 120, 180, 255);
+    curves.active_cel().pixels[checked_pixel_index(curves, 1, 0)] = rgba(32, 32, 32, 0);
+    CurvesSettings curve_settings;
+    curve_settings.point_count = 3;
+    curve_settings.x = {0.0f, 0.35f, 1.0f};
+    curve_settings.y = {0.0f, 0.72f, 1.0f};
+    curve_settings.luma = false;
+    curve_settings.red = true;
+    curve_settings.green = false;
+    curve_settings.blue = false;
+    apply_curves(curves, curve_settings);
+    const Pixel curved = curves.active_cel().pixels[checked_pixel_index(curves, 0, 0)];
+    assert(r(curved) > 80);
+    assert(g(curved) == 120);
+    assert(b(curved) == 180);
+    assert(a(curves.active_cel().pixels[checked_pixel_index(curves, 1, 0)]) == 0);
+
     auto effects = Document::create(12, 12);
     for (int y = 0; y < effects.height; ++y) {
         for (int x = 0; x < effects.width; ++x) {
@@ -340,6 +358,7 @@ static void test_gpu_chunking_policy() {
         GpuEffectMode::Hsv,
         GpuEffectMode::Levels,
         GpuEffectMode::TonalRange,
+        GpuEffectMode::Curves,
         GpuEffectMode::PaletteQuantize,
         GpuEffectMode::PaletteDither,
         GpuEffectMode::AutoLevel,
@@ -385,7 +404,7 @@ static void test_gpu_chunking_policy() {
         GpuEffectMode::AffineTransform
     };
 
-    bool covered[45] = {};
+    bool covered[46] = {};
     for (GpuEffectMode mode : chunk_safe) {
         GpuEffectRequest request;
         request.mode = mode;

@@ -388,6 +388,70 @@ void apply_tonal_range(Document& doc, int white_point, int highlights, int shado
     });
 }
 
+static int normalized_curve_point_count(const CurvesSettings& settings) {
+    return std::clamp(settings.point_count, 2, kMaxCurvePoints);
+}
+
+static float evaluate_curve(float value, const CurvesSettings& settings) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    const int point_count = normalized_curve_point_count(settings);
+    if (value <= settings.x[0]) {
+        return std::clamp(settings.y[0], 0.0f, 1.0f);
+    }
+    for (int i = 1; i < point_count; ++i) {
+        const float x0 = std::clamp(settings.x[static_cast<std::size_t>(i - 1)], 0.0f, 1.0f);
+        const float x1 = std::clamp(settings.x[static_cast<std::size_t>(i)], x0 + 0.001f, 1.0f);
+        if (value <= x1 || i == point_count - 1) {
+            const float y0 = std::clamp(settings.y[static_cast<std::size_t>(i - 1)], 0.0f, 1.0f);
+            const float y1 = std::clamp(settings.y[static_cast<std::size_t>(i)], 0.0f, 1.0f);
+            const float t = std::clamp((value - x0) / std::max(0.001f, x1 - x0), 0.0f, 1.0f);
+            const float smooth = t * t * (3.0f - 2.0f * t);
+            return y0 + (y1 - y0) * smooth;
+        }
+    }
+    return std::clamp(settings.y[static_cast<std::size_t>(point_count - 1)], 0.0f, 1.0f);
+}
+
+void apply_curves(Document& doc, const CurvesSettings& settings) {
+    auto curve_channel = [&](float value) {
+        return evaluate_curve(value, settings);
+    };
+
+    transform_pixels(doc, "Curves", [&](int x, int y, Pixel pixel) {
+        if (!editable(doc, x, y, pixel)) {
+            return pixel;
+        }
+        float red = static_cast<float>(r(pixel)) / 255.0f;
+        float green = static_cast<float>(g(pixel)) / 255.0f;
+        float blue = static_cast<float>(b(pixel)) / 255.0f;
+        if (settings.luma) {
+            const float current_luma = std::clamp(luminance(pixel) / 255.0f, 0.0f, 1.0f);
+            const float mapped_luma = curve_channel(current_luma);
+            if (current_luma > 0.0001f) {
+                const float ratio = mapped_luma / current_luma;
+                red *= ratio;
+                green *= ratio;
+                blue *= ratio;
+            } else {
+                red = green = blue = mapped_luma;
+            }
+        }
+        if (settings.red) {
+            red = curve_channel(red);
+        }
+        if (settings.green) {
+            green = curve_channel(green);
+        }
+        if (settings.blue) {
+            blue = curve_channel(blue);
+        }
+        return rgba(to_u8(std::clamp(red, 0.0f, 1.0f) * 255.0f),
+                    to_u8(std::clamp(green, 0.0f, 1.0f) * 255.0f),
+                    to_u8(std::clamp(blue, 0.0f, 1.0f) * 255.0f),
+                    a(pixel));
+    });
+}
+
 void apply_auto_level(Document& doc) {
     int min_red = 255;
     int min_green = 255;

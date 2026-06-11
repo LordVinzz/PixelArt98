@@ -5,6 +5,7 @@
 #pragma once
 
 #include "core/Document.hpp"
+#include "core/Filters.hpp"
 #include "core/Pixel.hpp"
 
 #include <array>
@@ -59,13 +60,17 @@ enum class GpuEffectMode {
     Outline,
     Relief,
     AffineTransform,
-    TonalRange
+    TonalRange,
+    Curves
 };
 
 struct GpuEffectRequest {
     GpuEffectMode mode = GpuEffectMode::BrightnessContrast;
     std::array<float, 4> params = {};
     std::array<float, 4> params2 = {};
+    std::array<float, kMaxCurvePoints> curve_x = {};
+    std::array<float, kMaxCurvePoints> curve_y = {};
+    int curve_point_count = 0;
     Pixel primary = rgba(0, 0, 0, 255);
     Pixel secondary = rgba(255, 255, 255, 255);
 };

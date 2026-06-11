@@ -606,6 +606,7 @@ const char* effect_preview_name(EffectPreviewKind kind) {
         case EffectPreviewKind::Hsv: return "HSV";
         case EffectPreviewKind::Levels: return "Levels";
         case EffectPreviewKind::TonalRange: return "Tonal Range";
+        case EffectPreviewKind::Curves: return "Curves";
         case EffectPreviewKind::PaletteQuantize: return "Quantize to Palette";
         case EffectPreviewKind::PaletteDither: return "Dither to Palette";
         case EffectPreviewKind::AutoLevel: return "Auto-Level";
@@ -3885,6 +3886,15 @@ void EditorApp::draw_adjustments_panel() {
         ImGui::SliderInt("Highlights", &highlights_, -100, 100);
         ImGui::SliderInt("Shadows", &shadows_, -100, 100);
         ImGui::SliderInt("Black Point", &black_point_, -100, 100);
+        ImGui::SeparatorText("Curves");
+        preview_apply(EffectPreviewKind::Curves);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset##Curves", ImVec2(82.0f, 0.0f))) {
+            curves_ = CurvesSettings{};
+            if (effect_preview_active_ && effect_preview_kind_ == EffectPreviewKind::Curves) {
+                effect_preview_dirty_ = true;
+            }
+        }
     }
 
     if (ImGui::CollapsingHeader("Color", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -4052,6 +4062,16 @@ GpuEffectRequest EditorApp::gpu_effect_request(EffectPreviewKind kind) const {
                               static_cast<float>(highlights_) / 100.0f,
                               static_cast<float>(shadows_) / 100.0f,
                               static_cast<float>(black_point_) / 100.0f};
+            break;
+        case EffectPreviewKind::Curves:
+            request.mode = GpuEffectMode::Curves;
+            request.params2 = {histogram_luma_visible_ ? 1.0f : 0.0f,
+                               histogram_red_visible_ ? 1.0f : 0.0f,
+                               histogram_green_visible_ ? 1.0f : 0.0f,
+                               histogram_blue_visible_ ? 1.0f : 0.0f};
+            request.curve_x = curves_.x;
+            request.curve_y = curves_.y;
+            request.curve_point_count = std::clamp(curves_.point_count, 2, kMaxCurvePoints);
             break;
         case EffectPreviewKind::PaletteQuantize:
             request.mode = GpuEffectMode::PaletteQuantize;
@@ -4344,6 +4364,15 @@ void EditorApp::apply_effect_to(Document& target) const {
         case EffectPreviewKind::TonalRange:
             apply_tonal_range(target, white_point_, highlights_, shadows_, black_point_);
             break;
+        case EffectPreviewKind::Curves: {
+            CurvesSettings settings = curves_;
+            settings.luma = histogram_luma_visible_;
+            settings.red = histogram_red_visible_;
+            settings.green = histogram_green_visible_;
+            settings.blue = histogram_blue_visible_;
+            apply_curves(target, settings);
+            break;
+        }
         case EffectPreviewKind::PaletteQuantize:
             apply_palette_quantize(target, target.palette, false);
             break;
@@ -4574,6 +4603,16 @@ void EditorApp::draw_effect_preview_parameters() {
             changed |= ImGui::SliderInt("Highlights", &highlights_, -100, 100);
             changed |= ImGui::SliderInt("Shadows", &shadows_, -100, 100);
             changed |= ImGui::SliderInt("Black Point", &black_point_, -100, 100);
+            break;
+        case EffectPreviewKind::Curves:
+            changed |= ImGui::Checkbox("Luma", &histogram_luma_visible_);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Red", &histogram_red_visible_);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Green", &histogram_green_visible_);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Blue", &histogram_blue_visible_);
+            ImGui::Text("Points: %d / %d", std::clamp(curves_.point_count, 2, kMaxCurvePoints), kMaxCurvePoints);
             break;
         case EffectPreviewKind::RadialBlur:
         case EffectPreviewKind::ZoomBlur:
@@ -4869,13 +4908,14 @@ void EditorApp::draw_undo_tree_window() {
 
 void EditorApp::draw_histogram_plot() {
     ImGui::TextUnformatted("Histogram");
-    ImGui::Checkbox("Luma", &histogram_luma_visible_);
+    bool curve_changed = false;
+    curve_changed |= ImGui::Checkbox("Luma", &histogram_luma_visible_);
     ImGui::SameLine();
-    ImGui::Checkbox("Red", &histogram_red_visible_);
+    curve_changed |= ImGui::Checkbox("Red", &histogram_red_visible_);
     ImGui::SameLine();
-    ImGui::Checkbox("Green", &histogram_green_visible_);
+    curve_changed |= ImGui::Checkbox("Green", &histogram_green_visible_);
     ImGui::SameLine();
-    ImGui::Checkbox("Blue", &histogram_blue_visible_);
+    curve_changed |= ImGui::Checkbox("Blue", &histogram_blue_visible_);
 
     const auto luma_hist = document_.histogram_luma();
     const auto red_hist = document_.histogram_channel(0);
@@ -4946,6 +4986,146 @@ void EditorApp::draw_histogram_plot() {
                                   plot_min.y + (plot_size.y - label_size.y) * 0.5f),
                            IM_COL32(160, 160, 160, 255),
                            label);
+    }
+
+    curves_.point_count = std::clamp(curves_.point_count, 2, kMaxCurvePoints);
+    auto to_plot = [&](float x, float y) {
+        return ImVec2(plot_min.x + std::clamp(x, 0.0f, 1.0f) * plot_size.x,
+                      plot_max.y - std::clamp(y, 0.0f, 1.0f) * plot_size.y);
+    };
+    auto from_plot = [&](ImVec2 position) {
+        return ImVec2(std::clamp((position.x - plot_min.x) / plot_size.x, 0.0f, 1.0f),
+                      std::clamp(1.0f - (position.y - plot_min.y) / plot_size.y, 0.0f, 1.0f));
+    };
+    auto curve_y_at = [&](float value) {
+        value = std::clamp(value, 0.0f, 1.0f);
+        if (value <= curves_.x[0]) {
+            return std::clamp(curves_.y[0], 0.0f, 1.0f);
+        }
+        for (int point = 1; point < curves_.point_count; ++point) {
+            const float x0 = std::clamp(curves_.x[static_cast<std::size_t>(point - 1)], 0.0f, 1.0f);
+            const float x1 = std::clamp(curves_.x[static_cast<std::size_t>(point)], x0 + 0.001f, 1.0f);
+            if (value <= x1 || point == curves_.point_count - 1) {
+                const float y0 = std::clamp(curves_.y[static_cast<std::size_t>(point - 1)], 0.0f, 1.0f);
+                const float y1 = std::clamp(curves_.y[static_cast<std::size_t>(point)], 0.0f, 1.0f);
+                const float t = std::clamp((value - x0) / std::max(0.001f, x1 - x0), 0.0f, 1.0f);
+                const float smooth = t * t * (3.0f - 2.0f * t);
+                return y0 + (y1 - y0) * smooth;
+            }
+        }
+        return std::clamp(curves_.y[static_cast<std::size_t>(curves_.point_count - 1)], 0.0f, 1.0f);
+    };
+
+    std::array<ImVec2, 80> curve_points{};
+    for (std::size_t i = 0; i < curve_points.size(); ++i) {
+        const float x = static_cast<float>(i) / static_cast<float>(curve_points.size() - 1);
+        curve_points[i] = to_plot(x, curve_y_at(x));
+    }
+    draw_list->AddPolyline(curve_points.data(), static_cast<int>(curve_points.size()), IM_COL32(255, 205, 80, 245), ImDrawFlags_None, 2.2f);
+
+    auto distance_sq = [](ImVec2 lhs, ImVec2 rhs) {
+        const float dx = lhs.x - rhs.x;
+        const float dy = lhs.y - rhs.y;
+        return dx * dx + dy * dy;
+    };
+    auto point_position = [&](int index) {
+        return to_plot(curves_.x[static_cast<std::size_t>(index)], curves_.y[static_cast<std::size_t>(index)]);
+    };
+    int hovered_point = -1;
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    for (int point = 0; point < curves_.point_count; ++point) {
+        const ImVec2 position = point_position(point);
+        if (distance_sq(mouse, position) <= 100.0f) {
+            hovered_point = point;
+            break;
+        }
+    }
+
+    for (int point = 0; point < curves_.point_count; ++point) {
+        const ImVec2 position = point_position(point);
+        const bool active = histogram_curve_drag_handle_ == point + 1;
+        const bool hovered = hovered_point == point;
+        draw_list->AddCircleFilled(position,
+                                   active || hovered ? 6.8f : 5.2f,
+                                   hovered ? IM_COL32(255, 230, 130, 255) : IM_COL32(255, 205, 80, 255),
+                                   18);
+        draw_list->AddCircle(position, 7.5f, IM_COL32(30, 30, 30, 220), 18, 1.2f);
+    }
+
+    auto sort_curve_points = [&]() {
+        for (int i = 0; i < curves_.point_count - 1; ++i) {
+            for (int j = i + 1; j < curves_.point_count; ++j) {
+                if (curves_.x[static_cast<std::size_t>(j)] < curves_.x[static_cast<std::size_t>(i)]) {
+                    std::swap(curves_.x[static_cast<std::size_t>(i)], curves_.x[static_cast<std::size_t>(j)]);
+                    std::swap(curves_.y[static_cast<std::size_t>(i)], curves_.y[static_cast<std::size_t>(j)]);
+                }
+            }
+        }
+    };
+    auto insert_curve_point = [&](ImVec2 value) {
+        if (curves_.point_count >= kMaxCurvePoints) {
+            return false;
+        }
+        const std::size_t index = static_cast<std::size_t>(curves_.point_count);
+        curves_.x[index] = value.x;
+        curves_.y[index] = value.y;
+        ++curves_.point_count;
+        sort_curve_points();
+        return true;
+    };
+    auto delete_curve_point = [&](int index) {
+        if (index < 0 || curves_.point_count <= 2) {
+            return false;
+        }
+        for (int point = index; point < curves_.point_count - 1; ++point) {
+            curves_.x[static_cast<std::size_t>(point)] = curves_.x[static_cast<std::size_t>(point + 1)];
+            curves_.y[static_cast<std::size_t>(point)] = curves_.y[static_cast<std::size_t>(point + 1)];
+        }
+        --curves_.point_count;
+        histogram_curve_drag_handle_ = 0;
+        return true;
+    };
+
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        if (hovered_point >= 0) {
+            curve_changed |= delete_curve_point(hovered_point);
+        } else {
+            curve_changed |= insert_curve_point(from_plot(mouse));
+        }
+    }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        histogram_curve_drag_handle_ = hovered_point >= 0 ? hovered_point + 1 : 0;
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        histogram_curve_drag_handle_ = 0;
+    }
+    if (histogram_curve_drag_handle_ != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const ImVec2 value = from_plot(ImGui::GetIO().MousePos);
+        const int point = histogram_curve_drag_handle_ - 1;
+        const float min_x = point > 0 ? curves_.x[static_cast<std::size_t>(point - 1)] + 0.001f : 0.0f;
+        const float max_x = point + 1 < curves_.point_count ? curves_.x[static_cast<std::size_t>(point + 1)] - 0.001f : 1.0f;
+        curves_.x[static_cast<std::size_t>(point)] = std::clamp(value.x, min_x, max_x);
+        curves_.y[static_cast<std::size_t>(point)] = value.y;
+        curve_changed = true;
+    }
+
+    if (curve_changed && effect_preview_active_ && effect_preview_kind_ == EffectPreviewKind::Curves) {
+        effect_preview_dirty_ = true;
+    }
+
+    if (ImGui::Button("Preview Curves", ImVec2(122.0f, 0.0f))) {
+        start_effect_preview(EffectPreviewKind::Curves);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Apply Curves", ImVec2(112.0f, 0.0f))) {
+        apply_effect_to_document(EffectPreviewKind::Curves);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset Curves", ImVec2(112.0f, 0.0f))) {
+        curves_ = CurvesSettings{};
+        if (effect_preview_active_ && effect_preview_kind_ == EffectPreviewKind::Curves) {
+            effect_preview_dirty_ = true;
+        }
     }
 }
 

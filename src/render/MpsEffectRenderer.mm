@@ -20,9 +20,13 @@ struct MpsUniforms {
     std::int32_t mode = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
-    std::uint32_t pad = 0;
+    std::uint32_t curve_point_count = 0;
     simd_float4 params = {};
     simd_float4 params2 = {};
+    simd_float4 curve_x0 = {};
+    simd_float4 curve_x1 = {};
+    simd_float4 curve_y0 = {};
+    simd_float4 curve_y1 = {};
     simd_float4 primary = {};
     simd_float4 secondary = {};
 };
@@ -54,9 +58,13 @@ struct Uniforms {
     int mode;
     uint width;
     uint height;
-    uint pad;
+    uint curve_point_count;
     float4 params;
     float4 params2;
+    float4 curve_x0;
+    float4 curve_x1;
+    float4 curve_y0;
+    float4 curve_y1;
     float4 primary;
     float4 secondary;
 };
@@ -134,6 +142,36 @@ float4 edge_color(texture2d<float, access::read> source, int2 p, constant Unifor
     float down = luma(read_px(source, p + int2(0, 1), u).rgb);
     float edge = clamp(abs(right - left) + abs(down - up), 0.0, 1.0);
     return float4(float3(edge), read_px(source, p, u).a);
+}
+
+float curve_x_at(int index, constant Uniforms& u) {
+    return index < 4 ? u.curve_x0[index] : u.curve_x1[index - 4];
+}
+
+float curve_y_at(int index, constant Uniforms& u) {
+    return index < 4 ? u.curve_y0[index] : u.curve_y1[index - 4];
+}
+
+float evaluate_point_curve(float value, constant Uniforms& u) {
+    float target = clamp(value, 0.0, 1.0);
+    int count = clamp(int(u.curve_point_count), 2, 8);
+    if (target <= curve_x_at(0, u)) {
+        return clamp(curve_y_at(0, u), 0.0, 1.0);
+    }
+    for (int i = 1; i < 8; ++i) {
+        if (i < count) {
+            float x0 = clamp(curve_x_at(i - 1, u), 0.0, 1.0);
+            float x1 = clamp(curve_x_at(i, u), x0 + 0.001, 1.0);
+            if (target <= x1 || i == count - 1) {
+                float y0 = clamp(curve_y_at(i - 1, u), 0.0, 1.0);
+                float y1 = clamp(curve_y_at(i, u), 0.0, 1.0);
+                float t = clamp((target - x0) / max(0.001, x1 - x0), 0.0, 1.0);
+                float smooth = t * t * (3.0 - 2.0 * t);
+                return mix(y0, y1, smooth);
+            }
+        }
+    }
+    return clamp(curve_y_at(count - 1, u), 0.0, 1.0);
 }
 
 kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[texture(0)]],
@@ -254,6 +292,21 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
         float highlight_weight = pow(lum, 1.6);
         color += shadows * 0.45 * shadow_weight * (shadows >= 0.0 ? (float3(1.0) - color) : color);
         color += highlights * 0.45 * highlight_weight * (highlights >= 0.0 ? (float3(1.0) - color) : color);
+        out = float4(clamp(color, 0.0, 1.0), src.a);
+    } else if (u.mode == 45) {
+        float3 color = src.rgb;
+        if (u.params2.x > 0.5) {
+            float lum = clamp(luma(color), 0.0, 1.0);
+            float mapped_lum = evaluate_point_curve(lum, u);
+            if (lum > 0.0001) {
+                color *= mapped_lum / lum;
+            } else {
+                color = float3(mapped_lum);
+            }
+        }
+        if (u.params2.y > 0.5) color.r = evaluate_point_curve(color.r, u);
+        if (u.params2.z > 0.5) color.g = evaluate_point_curve(color.g, u);
+        if (u.params2.w > 0.5) color.b = evaluate_point_curve(color.b, u);
         out = float4(clamp(color, 0.0, 1.0), src.a);
     } else {
         float2 uv = float2(gid) / float2(max(1u, u.width), max(1u, u.height));
@@ -537,8 +590,13 @@ bool MpsEffectRenderer::render_full_active_cel(const Document& document, const G
             uniforms.mode = mode_value(request.mode);
             uniforms.width = static_cast<std::uint32_t>(document.width);
             uniforms.height = static_cast<std::uint32_t>(document.height);
+            uniforms.curve_point_count = static_cast<std::uint32_t>(request.curve_point_count);
             uniforms.params = simd_make_float4(request.params[0], request.params[1], request.params[2], request.params[3]);
             uniforms.params2 = simd_make_float4(request.params2[0], request.params2[1], request.params2[2], request.params2[3]);
+            uniforms.curve_x0 = simd_make_float4(request.curve_x[0], request.curve_x[1], request.curve_x[2], request.curve_x[3]);
+            uniforms.curve_x1 = simd_make_float4(request.curve_x[4], request.curve_x[5], request.curve_x[6], request.curve_x[7]);
+            uniforms.curve_y0 = simd_make_float4(request.curve_y[0], request.curve_y[1], request.curve_y[2], request.curve_y[3]);
+            uniforms.curve_y1 = simd_make_float4(request.curve_y[4], request.curve_y[5], request.curve_y[6], request.curve_y[7]);
             uniforms.primary = pixel_to_float4(request.primary);
             uniforms.secondary = pixel_to_float4(request.secondary);
 

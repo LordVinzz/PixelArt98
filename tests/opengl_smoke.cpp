@@ -147,6 +147,43 @@ int main() {
         }
         ok = report_step("OpenGL grayscale effect and readback", grayscale_ok) && ok;
         {
+            Document curve_doc = Document::create(8, 8);
+            for (int y = 0; y < curve_doc.height; ++y) {
+                for (int x = 0; x < curve_doc.width; ++x) {
+                    curve_doc.active_cel().pixels[static_cast<std::size_t>(y * curve_doc.width + x)] =
+                        rgba(static_cast<std::uint8_t>(x * 31),
+                             static_cast<std::uint8_t>(y * 29),
+                             static_cast<std::uint8_t>((x + y) * 15),
+                             255);
+                }
+            }
+            CurvesSettings curve_settings;
+            curve_settings.point_count = 3;
+            curve_settings.x = {0.0f, 0.35f, 1.0f};
+            curve_settings.y = {0.0f, 0.72f, 1.0f};
+            curve_settings.luma = false;
+            curve_settings.red = true;
+            curve_settings.green = false;
+            curve_settings.blue = true;
+            Document cpu_curve_doc = curve_doc;
+            apply_curves(cpu_curve_doc, curve_settings);
+            GpuEffectRenderer curve_renderer;
+            GpuEffectRequest curve_request;
+            curve_request.mode = GpuEffectMode::Curves;
+            curve_request.params2 = {0.0f, 1.0f, 0.0f, 1.0f};
+            curve_request.curve_x = curve_settings.x;
+            curve_request.curve_y = curve_settings.y;
+            curve_request.curve_point_count = curve_settings.point_count;
+            std::vector<Pixel> curve_pixels;
+            bool curve_ok = curve_renderer.render_active_cel(curve_doc, curve_request) &&
+                            curve_renderer.read_output_pixels(curve_pixels) &&
+                            outputs_match(curve_pixels, cpu_curve_doc.active_cel().pixels);
+            if (!curve_ok && !curve_renderer.last_error().empty()) {
+                std::cout << "       " << curve_renderer.last_error() << "\n";
+            }
+            ok = report_step("OpenGL curves effect matches CPU reference", curve_ok) && ok;
+        }
+        {
             Document transform_doc = Document::create(8, 8);
             for (int y = 0; y < transform_doc.height; ++y) {
                 for (int x = 0; x < transform_doc.width; ++x) {
