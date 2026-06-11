@@ -308,6 +308,14 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
         if (u.params2.z > 0.5) color.g = evaluate_point_curve(color.g, u);
         if (u.params2.w > 0.5) color.b = evaluate_point_curve(color.b, u);
         out = float4(clamp(color, 0.0, 1.0), src.a);
+    } else if (u.mode == 46) {
+        float temperature = clamp(u.params.x, -1.0, 1.0);
+        float warm = max(temperature, 0.0);
+        float cool = max(-temperature, 0.0);
+        float3 offset = float3(warm * 45.0 - cool * 28.0,
+                               warm * 12.0 + cool * 8.0,
+                               -warm * 35.0 + cool * 45.0) / 255.0;
+        out = float4(clamp(src.rgb + offset, 0.0, 1.0), src.a);
     } else {
         float2 uv = float2(gid) / float2(max(1u, u.width), max(1u, u.height));
         float2 center = float2(0.5);

@@ -604,6 +604,7 @@ const char* effect_preview_name(EffectPreviewKind kind) {
         case EffectPreviewKind::SurfaceBlur: return "Surface Blur";
         case EffectPreviewKind::BrightnessContrast: return "Brightness / Contrast";
         case EffectPreviewKind::Hsv: return "HSV";
+        case EffectPreviewKind::Temperature: return "Warmth / Coolness";
         case EffectPreviewKind::Levels: return "Levels";
         case EffectPreviewKind::TonalRange: return "Tonal Range";
         case EffectPreviewKind::Curves: return "Curves";
@@ -3816,33 +3817,6 @@ void EditorApp::draw_adjustments_panel() {
     }
     settings_.show_adjustments_panel = open;
     draw_histogram_plot();
-    auto reset_after_apply = [&](EffectPreviewKind kind) {
-        if (kind == EffectPreviewKind::BrightnessContrast) {
-            brightness_ = 0;
-            contrast_ = 0;
-        } else if (kind == EffectPreviewKind::Hsv) {
-            hue_ = saturation_ = value_ = 0.0f;
-        } else if (kind == EffectPreviewKind::TonalRange) {
-            white_point_ = 0;
-            highlights_ = 0;
-            shadows_ = 0;
-            black_point_ = 0;
-        }
-    };
-    auto preview_apply = [&](EffectPreviewKind kind, bool reset_controls = false) {
-        ImGui::PushID(static_cast<int>(kind));
-        if (ImGui::Button("Preview", ImVec2(82.0f, 0.0f))) {
-            start_effect_preview(kind);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Apply", ImVec2(82.0f, 0.0f))) {
-            apply_effect_to_document(kind);
-            if (reset_controls) {
-                reset_after_apply(kind);
-            }
-        }
-        ImGui::PopID();
-    };
     auto apply_button = [&](const char* label, EffectPreviewKind kind, float width = 0.0f) {
         if (ImGui::Button(label, ImVec2(width, 0.0f))) {
             apply_effect_to_document(kind);
@@ -3863,75 +3837,33 @@ void EditorApp::draw_adjustments_panel() {
     };
 
     if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
-        preview_apply(EffectPreviewKind::BrightnessContrast);
-        ImGui::SameLine();
-        if (ImGui::Button("Reset##Light", ImVec2(82.0f, 0.0f))) {
-            brightness_ = 0;
-            contrast_ = 0;
-        }
-        ImGui::SameLine();
-        apply_button("Auto", EffectPreviewKind::AutoLevel, 64.0f);
-        ImGui::SliderInt("Exposure", &brightness_, -255, 255);
-        ImGui::SliderInt("Contrast", &contrast_, -255, 255);
-        ImGui::SeparatorText("Tonal Range");
-        preview_apply(EffectPreviewKind::TonalRange);
-        ImGui::SameLine();
-        if (ImGui::Button("Reset##TonalRange", ImVec2(82.0f, 0.0f))) {
-            white_point_ = 0;
-            highlights_ = 0;
-            shadows_ = 0;
-            black_point_ = 0;
-        }
-        ImGui::SliderInt("White Point", &white_point_, -100, 100);
-        ImGui::SliderInt("Highlights", &highlights_, -100, 100);
-        ImGui::SliderInt("Shadows", &shadows_, -100, 100);
-        ImGui::SliderInt("Black Point", &black_point_, -100, 100);
-        ImGui::SeparatorText("Curves");
-        preview_apply(EffectPreviewKind::Curves);
-        ImGui::SameLine();
-        if (ImGui::Button("Reset##Curves", ImVec2(82.0f, 0.0f))) {
-            curves_ = CurvesSettings{};
-            if (effect_preview_active_ && effect_preview_kind_ == EffectPreviewKind::Curves) {
-                effect_preview_dirty_ = true;
-            }
+        if (ImGui::BeginTable("LightActions", 2, ImGuiTableFlags_SizingStretchSame)) {
+            preview_cell("Brightness / Contrast", EffectPreviewKind::BrightnessContrast);
+            preview_cell("Tonal Range", EffectPreviewKind::TonalRange);
+            preview_cell("Curves", EffectPreviewKind::Curves);
+            apply_cell("Auto-Level", EffectPreviewKind::AutoLevel);
+            ImGui::EndTable();
         }
     }
 
     if (ImGui::CollapsingHeader("Color", ImGuiTreeNodeFlags_DefaultOpen)) {
-        preview_apply(EffectPreviewKind::Hsv);
-        ImGui::SameLine();
-        if (ImGui::Button("Reset##Color", ImVec2(82.0f, 0.0f))) {
-            hue_ = saturation_ = value_ = 0.0f;
+        if (ImGui::BeginTable("ColorActions", 3, ImGuiTableFlags_SizingStretchSame)) {
+            preview_cell("Hue / Saturation", EffectPreviewKind::Hsv);
+            preview_cell("Warmth / Coolness", EffectPreviewKind::Temperature);
+            apply_cell("B&W", EffectPreviewKind::Grayscale);
+            apply_cell("Sepia", EffectPreviewKind::Sepia);
+            ImGui::EndTable();
         }
-        ImGui::SameLine();
-        apply_button("B&W", EffectPreviewKind::Grayscale, 64.0f);
-        ImGui::SameLine();
-        apply_button("Sepia", EffectPreviewKind::Sepia, 64.0f);
-        ImGui::SliderFloat("Hue", &hue_, -180.0f, 180.0f, "%.1f");
-        ImGui::SliderFloat("Saturation", &saturation_, -1.0f, 1.0f, "%.2f");
-        ImGui::SliderFloat("Value", &value_, -1.0f, 1.0f, "%.2f");
     }
 
     if (ImGui::CollapsingHeader("Levels", ImGuiTreeNodeFlags_DefaultOpen)) {
-        preview_apply(EffectPreviewKind::Levels);
-        ImGui::SameLine();
-        if (ImGui::Button("Reset##Levels", ImVec2(82.0f, 0.0f))) {
-            levels_ = LevelsSettings{};
+        if (ImGui::BeginTable("LevelsActions", 2, ImGuiTableFlags_SizingStretchSame)) {
+            preview_cell("Levels", EffectPreviewKind::Levels);
+            ImGui::EndTable();
         }
-        ImGui::SliderInt("Input Black", &levels_.in_black, 0, 254);
-        ImGui::SliderInt("Input White", &levels_.in_white, 1, 255);
-        ImGui::SliderFloat("Gamma", &levels_.gamma, 0.1f, 4.0f);
-        ImGui::SliderInt("Output Black", &levels_.out_black, 0, 255);
-        ImGui::SliderInt("Output White", &levels_.out_white, 0, 255);
     }
 
     if (ImGui::CollapsingHeader("Detail", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (ImGui::Button("Reset##Detail", ImVec2(82.0f, 0.0f))) {
-            effect_radius_ = 3;
-            effect_amount_ = 50;
-        }
-        ImGui::SliderInt("Radius", &effect_radius_, 1, 32);
-        ImGui::SliderInt("Amount", &effect_amount_, 0, 100);
         if (ImGui::BeginTable("DetailActions", 3, ImGuiTableFlags_SizingStretchSame)) {
             preview_cell("Blur", EffectPreviewKind::GaussianBlur);
             preview_cell("Sharpen", EffectPreviewKind::Sharpen);
@@ -3944,30 +3876,26 @@ void EditorApp::draw_adjustments_panel() {
     }
 
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderInt("Angle", &effect_angle_, -180, 180);
-        ImGui::SliderFloat("Zoom", &effect_zoom_, 0.1f, 8.0f, "%.2f");
-        if (ImGui::Button("Straighten", ImVec2(96.0f, 0.0f))) {
-            start_straighten_tool();
+        if (ImGui::BeginTable("TransformActions", 3, ImGuiTableFlags_SizingStretchSame)) {
+            ImGui::TableNextColumn();
+            if (ImGui::Button("Straighten", ImVec2(-1.0f, 0.0f))) {
+                start_straighten_tool();
+            }
+            ImGui::TableNextColumn();
+            if (ImGui::Button("Rotate / Zoom", ImVec2(-1.0f, 0.0f))) {
+                rotate_zoom_angle_ = static_cast<float>(effect_angle_);
+                rotate_zoom_zoom_ = effect_zoom_;
+                rotate_zoom_pan_x_ = 0;
+                rotate_zoom_pan_y_ = 0;
+                rotate_zoom_preview_dirty_ = true;
+                rotate_zoom_popup_requested_ = true;
+            }
+            preview_cell("Motion Blur", EffectPreviewKind::MotionBlur);
+            ImGui::EndTable();
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Rotate / Zoom", ImVec2(120.0f, 0.0f))) {
-            rotate_zoom_angle_ = static_cast<float>(effect_angle_);
-            rotate_zoom_zoom_ = effect_zoom_;
-            rotate_zoom_pan_x_ = 0;
-            rotate_zoom_pan_y_ = 0;
-            rotate_zoom_preview_dirty_ = true;
-            rotate_zoom_popup_requested_ = true;
-        }
-        ImGui::SameLine();
-        preview_button("Motion Blur", EffectPreviewKind::MotionBlur, 110.0f);
     }
 
     if (ImGui::CollapsingHeader("Creative")) {
-        ImGui::SliderInt("Cell Size", &effect_cell_size_, 2, 128);
-        ImGui::SliderInt("Scale", &effect_scale_, 2, 256);
-        ImGui::SliderInt("Noise", &effect_noise_, 0, 255);
-        ImGui::SliderFloat("Strength", &effect_strength_, -2.0f, 2.0f, "%.2f");
-        ImGui::SliderInt("Posterize Levels", &posterize_levels_, 2, 32);
         if (ImGui::BeginTable("CreativeActions", 3, ImGuiTableFlags_SizingStretchSame)) {
             preview_cell("Pixelate", EffectPreviewKind::Pixelate);
             preview_cell("Vignette", EffectPreviewKind::Vignette);
@@ -4047,6 +3975,10 @@ GpuEffectRequest EditorApp::gpu_effect_request(EffectPreviewKind kind) const {
         case EffectPreviewKind::Hsv:
             request.mode = GpuEffectMode::Hsv;
             request.params = {hue_ / 360.0f, saturation_, value_, 0.0f};
+            break;
+        case EffectPreviewKind::Temperature:
+            request.mode = GpuEffectMode::Temperature;
+            request.params = {static_cast<float>(temperature_) / 100.0f, 0.0f, 0.0f, 0.0f};
             break;
         case EffectPreviewKind::Levels:
             request.mode = GpuEffectMode::Levels;
@@ -4358,6 +4290,9 @@ void EditorApp::apply_effect_to(Document& target) const {
         case EffectPreviewKind::Hsv:
             apply_hsv(target, hue_, saturation_, value_);
             break;
+        case EffectPreviewKind::Temperature:
+            apply_temperature(target, temperature_);
+            break;
         case EffectPreviewKind::Levels:
             apply_levels(target, levels_);
             break;
@@ -4591,6 +4526,9 @@ void EditorApp::draw_effect_preview_parameters() {
             changed |= ImGui::SliderFloat("Saturation", &saturation_, -1.0f, 1.0f, "%.2f");
             changed |= ImGui::SliderFloat("Value", &value_, -1.0f, 1.0f, "%.2f");
             break;
+        case EffectPreviewKind::Temperature:
+            changed |= ImGui::SliderInt("Temperature", &temperature_, -100, 100);
+            break;
         case EffectPreviewKind::Levels:
             changed |= ImGui::SliderInt("Input Black", &levels_.in_black, 0, 254);
             changed |= ImGui::SliderInt("Input White", &levels_.in_white, 1, 255);
@@ -4605,14 +4543,7 @@ void EditorApp::draw_effect_preview_parameters() {
             changed |= ImGui::SliderInt("Black Point", &black_point_, -100, 100);
             break;
         case EffectPreviewKind::Curves:
-            changed |= ImGui::Checkbox("Luma", &histogram_luma_visible_);
-            ImGui::SameLine();
-            changed |= ImGui::Checkbox("Red", &histogram_red_visible_);
-            ImGui::SameLine();
-            changed |= ImGui::Checkbox("Green", &histogram_green_visible_);
-            ImGui::SameLine();
-            changed |= ImGui::Checkbox("Blue", &histogram_blue_visible_);
-            ImGui::Text("Points: %d / %d", std::clamp(curves_.point_count, 2, kMaxCurvePoints), kMaxCurvePoints);
+            changed |= draw_curves_editor();
             break;
         case EffectPreviewKind::RadialBlur:
         case EffectPreviewKind::ZoomBlur:
@@ -4988,6 +4919,83 @@ void EditorApp::draw_histogram_plot() {
                            label);
     }
 
+    if (curve_changed && effect_preview_active_ && effect_preview_kind_ == EffectPreviewKind::Curves) {
+        effect_preview_dirty_ = true;
+    }
+}
+
+bool EditorApp::draw_curves_editor() {
+    bool changed = false;
+    changed |= ImGui::Checkbox("Luma", &histogram_luma_visible_);
+    ImGui::SameLine();
+    changed |= ImGui::Checkbox("Red", &histogram_red_visible_);
+    ImGui::SameLine();
+    changed |= ImGui::Checkbox("Green", &histogram_green_visible_);
+    ImGui::SameLine();
+    changed |= ImGui::Checkbox("Blue", &histogram_blue_visible_);
+
+    const auto luma_hist = document_.histogram_luma();
+    const auto red_hist = document_.histogram_channel(0);
+    const auto green_hist = document_.histogram_channel(1);
+    const auto blue_hist = document_.histogram_channel(2);
+
+    auto normalize = [](const std::array<int, 256>& hist) {
+        std::array<float, 256> values{};
+        int max_value = 1;
+        for (int value : hist) {
+            max_value = std::max(max_value, value);
+        }
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values[i] = static_cast<float>(hist[i]) / static_cast<float>(max_value);
+        }
+        return values;
+    };
+
+    const auto luma_values = normalize(luma_hist);
+    const auto red_values = normalize(red_hist);
+    const auto green_values = normalize(green_hist);
+    const auto blue_values = normalize(blue_hist);
+
+    const float plot_height = 180.0f;
+    const float plot_width = std::max(260.0f, ImGui::GetContentRegionAvail().x);
+    const ImVec2 plot_size(plot_width, plot_height);
+    const ImVec2 plot_min = ImGui::GetCursorScreenPos();
+    const ImVec2 plot_max(plot_min.x + plot_size.x, plot_min.y + plot_size.y);
+    ImGui::InvisibleButton("##CurvesEditor", plot_size);
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    draw_list->AddRectFilled(plot_min, plot_max, IM_COL32(24, 24, 24, 255), 3.0f);
+    for (int i = 1; i < 4; ++i) {
+        const float x = plot_min.x + plot_size.x * static_cast<float>(i) / 4.0f;
+        const float y = plot_min.y + plot_size.y * static_cast<float>(i) / 4.0f;
+        draw_list->AddLine(ImVec2(x, plot_min.y), ImVec2(x, plot_max.y), IM_COL32(58, 58, 58, 140));
+        draw_list->AddLine(ImVec2(plot_min.x, y), ImVec2(plot_max.x, y), IM_COL32(58, 58, 58, 140));
+    }
+    draw_list->AddRect(plot_min, plot_max, IM_COL32(92, 92, 92, 210), 3.0f);
+
+    auto draw_histogram_curve = [&](const std::array<float, 256>& values, ImU32 color) {
+        std::array<ImVec2, 256> points{};
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            const float t = static_cast<float>(i) / 255.0f;
+            const float value = std::clamp(values[i], 0.0f, 1.0f);
+            points[i] = ImVec2(plot_min.x + t * plot_size.x, plot_max.y - value * plot_size.y);
+        }
+        draw_list->AddPolyline(points.data(), static_cast<int>(points.size()), color, ImDrawFlags_None, 1.2f);
+    };
+
+    if (histogram_luma_visible_) {
+        draw_histogram_curve(luma_values, IM_COL32(230, 230, 230, 145));
+    }
+    if (histogram_red_visible_) {
+        draw_histogram_curve(red_values, IM_COL32(245, 78, 78, 150));
+    }
+    if (histogram_green_visible_) {
+        draw_histogram_curve(green_values, IM_COL32(80, 210, 116, 150));
+    }
+    if (histogram_blue_visible_) {
+        draw_histogram_curve(blue_values, IM_COL32(92, 145, 255, 150));
+    }
+
     curves_.point_count = std::clamp(curves_.point_count, 2, kMaxCurvePoints);
     auto to_plot = [&](float x, float y) {
         return ImVec2(plot_min.x + std::clamp(x, 0.0f, 1.0f) * plot_size.x,
@@ -5088,9 +5096,9 @@ void EditorApp::draw_histogram_plot() {
 
     if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         if (hovered_point >= 0) {
-            curve_changed |= delete_curve_point(hovered_point);
+            changed |= delete_curve_point(hovered_point);
         } else {
-            curve_changed |= insert_curve_point(from_plot(mouse));
+            changed |= insert_curve_point(from_plot(mouse));
         }
     }
     if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -5106,27 +5114,16 @@ void EditorApp::draw_histogram_plot() {
         const float max_x = point + 1 < curves_.point_count ? curves_.x[static_cast<std::size_t>(point + 1)] - 0.001f : 1.0f;
         curves_.x[static_cast<std::size_t>(point)] = std::clamp(value.x, min_x, max_x);
         curves_.y[static_cast<std::size_t>(point)] = value.y;
-        curve_changed = true;
+        changed = true;
     }
 
-    if (curve_changed && effect_preview_active_ && effect_preview_kind_ == EffectPreviewKind::Curves) {
-        effect_preview_dirty_ = true;
-    }
-
-    if (ImGui::Button("Preview Curves", ImVec2(122.0f, 0.0f))) {
-        start_effect_preview(EffectPreviewKind::Curves);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Apply Curves", ImVec2(112.0f, 0.0f))) {
-        apply_effect_to_document(EffectPreviewKind::Curves);
-    }
-    ImGui::SameLine();
+    ImGui::Text("Points: %d / %d", curves_.point_count, kMaxCurvePoints);
     if (ImGui::Button("Reset Curves", ImVec2(112.0f, 0.0f))) {
         curves_ = CurvesSettings{};
-        if (effect_preview_active_ && effect_preview_kind_ == EffectPreviewKind::Curves) {
-            effect_preview_dirty_ = true;
-        }
+        histogram_curve_drag_handle_ = 0;
+        changed = true;
     }
+    return changed;
 }
 
 void EditorApp::draw_model_panel() {

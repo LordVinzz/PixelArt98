@@ -555,6 +555,15 @@ vec4 apply_effect(vec2 uv, vec4 src) {
         if (u_params2.w > 0.5) color.b = evaluate_point_curve(color.b);
         return vec4(clamp(color, 0.0, 1.0), src.a);
     }
+    if (mode == 46) {
+        float temperature = clamp(u_params.x, -1.0, 1.0);
+        float warm = max(temperature, 0.0);
+        float cool = max(-temperature, 0.0);
+        vec3 offset = vec3(warm * 45.0 - cool * 28.0,
+                           warm * 12.0 + cool * 8.0,
+                           -warm * 35.0 + cool * 45.0) / 255.0;
+        return vec4(clamp(src.rgb + offset, 0.0, 1.0), src.a);
+    }
     return src;
 }
 

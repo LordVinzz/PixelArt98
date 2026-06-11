@@ -202,6 +202,19 @@ static void test_filters() {
     assert(b(curved) == 180);
     assert(a(curves.active_cel().pixels[checked_pixel_index(curves, 1, 0)]) == 0);
 
+    auto temperature = Document::create(2, 1);
+    temperature.active_cel().pixels[checked_pixel_index(temperature, 0, 0)] = rgba(100, 100, 100, 255);
+    temperature.active_cel().pixels[checked_pixel_index(temperature, 1, 0)] = rgba(100, 100, 100, 0);
+    apply_temperature(temperature, 60);
+    const Pixel warm_pixel = temperature.active_cel().pixels[checked_pixel_index(temperature, 0, 0)];
+    assert(r(warm_pixel) > 100);
+    assert(g(warm_pixel) > 100);
+    assert(b(warm_pixel) < 100);
+    assert(a(temperature.active_cel().pixels[checked_pixel_index(temperature, 1, 0)]) == 0);
+    apply_temperature(temperature, -60);
+    const Pixel cooled_pixel = temperature.active_cel().pixels[checked_pixel_index(temperature, 0, 0)];
+    assert(b(cooled_pixel) > b(warm_pixel));
+
     auto effects = Document::create(12, 12);
     for (int y = 0; y < effects.height; ++y) {
         for (int x = 0; x < effects.width; ++x) {
@@ -356,6 +369,7 @@ static void test_gpu_chunking_policy() {
     const GpuEffectMode chunk_safe[] = {
         GpuEffectMode::BrightnessContrast,
         GpuEffectMode::Hsv,
+        GpuEffectMode::Temperature,
         GpuEffectMode::Levels,
         GpuEffectMode::TonalRange,
         GpuEffectMode::Curves,
@@ -404,7 +418,7 @@ static void test_gpu_chunking_policy() {
         GpuEffectMode::AffineTransform
     };
 
-    bool covered[46] = {};
+    bool covered[47] = {};
     for (GpuEffectMode mode : chunk_safe) {
         GpuEffectRequest request;
         request.mode = mode;

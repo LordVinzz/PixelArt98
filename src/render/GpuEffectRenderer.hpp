@@ -61,7 +61,8 @@ enum class GpuEffectMode {
     Relief,
     AffineTransform,
     TonalRange,
-    Curves
+    Curves,
+    Temperature
 };
 
 struct GpuEffectRequest {

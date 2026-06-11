@@ -332,6 +332,25 @@ void apply_hsv(Document& doc, float hue_degrees, float saturation_delta, float v
     });
 }
 
+void apply_temperature(Document& doc, int temperature) {
+    const float t = std::clamp(static_cast<float>(temperature) / 100.0f, -1.0f, 1.0f);
+    const float warm = std::max(t, 0.0f);
+    const float cool = std::max(-t, 0.0f);
+    const float red_offset = warm * 45.0f - cool * 28.0f;
+    const float green_offset = warm * 12.0f + cool * 8.0f;
+    const float blue_offset = -warm * 35.0f + cool * 45.0f;
+
+    transform_pixels(doc, "Warmth / Coolness", [&](int x, int y, Pixel pixel) {
+        if (!editable(doc, x, y, pixel)) {
+            return pixel;
+        }
+        return rgba(to_u8(static_cast<float>(r(pixel)) + red_offset),
+                    to_u8(static_cast<float>(g(pixel)) + green_offset),
+                    to_u8(static_cast<float>(b(pixel)) + blue_offset),
+                    a(pixel));
+    });
+}
+
 void apply_levels(Document& doc, const LevelsSettings& settings) {
     int in_black = std::clamp(settings.in_black, 0, 254);
     int in_white = std::clamp(settings.in_white, in_black + 1, 255);

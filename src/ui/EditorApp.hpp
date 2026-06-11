@@ -38,6 +38,7 @@ enum class EffectPreviewKind {
     SurfaceBlur,
     BrightnessContrast,
     Hsv,
+    Temperature,
     Levels,
     TonalRange,
     Curves,
@@ -240,6 +241,7 @@ private:
     float hue_ = 0.0f;
     float saturation_ = 0.0f;
     float value_ = 0.0f;
+    int temperature_ = 0;
     LevelsSettings levels_;
     CurvesSettings curves_;
     int histogram_curve_drag_handle_ = 0;
@@ -347,6 +349,7 @@ private:
     void draw_straighten_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_grid_overlay(ImDrawList* draw_list, const ImVec2& origin, const ImVec2& size) const;
     void draw_histogram_plot();
+    bool draw_curves_editor();
     void draw_uv_overlay(ImDrawList* draw_list, const ImVec2& origin, float scale) const;
     void handle_uv_input(const ImVec2& origin, float scale);
     void draw_model_preview();
