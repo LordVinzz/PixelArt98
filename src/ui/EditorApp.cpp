@@ -605,6 +605,7 @@ const char* effect_preview_name(EffectPreviewKind kind) {
         case EffectPreviewKind::BrightnessContrast: return "Brightness / Contrast";
         case EffectPreviewKind::Hsv: return "HSV";
         case EffectPreviewKind::Levels: return "Levels";
+        case EffectPreviewKind::TonalRange: return "Tonal Range";
         case EffectPreviewKind::PaletteQuantize: return "Quantize to Palette";
         case EffectPreviewKind::PaletteDither: return "Dither to Palette";
         case EffectPreviewKind::AutoLevel: return "Auto-Level";
@@ -3820,6 +3821,11 @@ void EditorApp::draw_adjustments_panel() {
             contrast_ = 0;
         } else if (kind == EffectPreviewKind::Hsv) {
             hue_ = saturation_ = value_ = 0.0f;
+        } else if (kind == EffectPreviewKind::TonalRange) {
+            white_point_ = 0;
+            highlights_ = 0;
+            shadows_ = 0;
+            black_point_ = 0;
         }
     };
     auto preview_apply = [&](EffectPreviewKind kind, bool reset_controls = false) {
@@ -3866,6 +3872,19 @@ void EditorApp::draw_adjustments_panel() {
         apply_button("Auto", EffectPreviewKind::AutoLevel, 64.0f);
         ImGui::SliderInt("Exposure", &brightness_, -255, 255);
         ImGui::SliderInt("Contrast", &contrast_, -255, 255);
+        ImGui::SeparatorText("Tonal Range");
+        preview_apply(EffectPreviewKind::TonalRange);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset##TonalRange", ImVec2(82.0f, 0.0f))) {
+            white_point_ = 0;
+            highlights_ = 0;
+            shadows_ = 0;
+            black_point_ = 0;
+        }
+        ImGui::SliderInt("White Point", &white_point_, -100, 100);
+        ImGui::SliderInt("Highlights", &highlights_, -100, 100);
+        ImGui::SliderInt("Shadows", &shadows_, -100, 100);
+        ImGui::SliderInt("Black Point", &black_point_, -100, 100);
     }
 
     if (ImGui::CollapsingHeader("Color", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -4026,6 +4045,13 @@ GpuEffectRequest EditorApp::gpu_effect_request(EffectPreviewKind kind) const {
                               levels_.gamma,
                               static_cast<float>(levels_.out_black) / 255.0f};
             request.params2 = {static_cast<float>(levels_.out_white) / 255.0f, 0.0f, 0.0f, 0.0f};
+            break;
+        case EffectPreviewKind::TonalRange:
+            request.mode = GpuEffectMode::TonalRange;
+            request.params = {static_cast<float>(white_point_) / 100.0f,
+                              static_cast<float>(highlights_) / 100.0f,
+                              static_cast<float>(shadows_) / 100.0f,
+                              static_cast<float>(black_point_) / 100.0f};
             break;
         case EffectPreviewKind::PaletteQuantize:
             request.mode = GpuEffectMode::PaletteQuantize;
@@ -4315,6 +4341,9 @@ void EditorApp::apply_effect_to(Document& target) const {
         case EffectPreviewKind::Levels:
             apply_levels(target, levels_);
             break;
+        case EffectPreviewKind::TonalRange:
+            apply_tonal_range(target, white_point_, highlights_, shadows_, black_point_);
+            break;
         case EffectPreviewKind::PaletteQuantize:
             apply_palette_quantize(target, target.palette, false);
             break;
@@ -4539,6 +4568,12 @@ void EditorApp::draw_effect_preview_parameters() {
             changed |= ImGui::SliderFloat("Gamma", &levels_.gamma, 0.1f, 4.0f);
             changed |= ImGui::SliderInt("Output Black", &levels_.out_black, 0, 255);
             changed |= ImGui::SliderInt("Output White", &levels_.out_white, 0, 255);
+            break;
+        case EffectPreviewKind::TonalRange:
+            changed |= ImGui::SliderInt("White Point", &white_point_, -100, 100);
+            changed |= ImGui::SliderInt("Highlights", &highlights_, -100, 100);
+            changed |= ImGui::SliderInt("Shadows", &shadows_, -100, 100);
+            changed |= ImGui::SliderInt("Black Point", &black_point_, -100, 100);
             break;
         case EffectPreviewKind::RadialBlur:
         case EffectPreviewKind::ZoomBlur:

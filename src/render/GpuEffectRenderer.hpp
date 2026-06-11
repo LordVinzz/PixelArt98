@@ -58,7 +58,8 @@ enum class GpuEffectMode {
     Emboss,
     Outline,
     Relief,
-    AffineTransform
+    AffineTransform,
+    TonalRange
 };
 
 struct GpuEffectRequest {

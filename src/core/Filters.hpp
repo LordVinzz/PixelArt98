@@ -28,6 +28,7 @@ enum class ResamplingMode {
 void apply_brightness_contrast(Document& doc, int brightness, int contrast);
 void apply_hsv(Document& doc, float hue_degrees, float saturation_delta, float value_delta);
 void apply_levels(Document& doc, const LevelsSettings& settings);
+void apply_tonal_range(Document& doc, int white_point, int highlights, int shadows, int black_point);
 void apply_auto_level(Document& doc);
 void apply_posterize(Document& doc, int levels);
 void apply_invert(Document& doc, bool alpha);

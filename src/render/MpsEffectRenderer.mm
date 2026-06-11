@@ -241,6 +241,20 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
         float l0 = luma(read_px(source, p - int2(1, 1), u).rgb);
         float l1 = luma(read_px(source, p + int2(1, 1), u).rgb);
         out = float4(float3(clamp((l0 - l1) + 0.5, 0.0, 1.0)), src.a);
+    } else if (u.mode == 44) {
+        float white_point = clamp(u.params.x, -1.0, 1.0);
+        float highlights = clamp(u.params.y, -1.0, 1.0);
+        float shadows = clamp(u.params.z, -1.0, 1.0);
+        float black_point = clamp(u.params.w, -1.0, 1.0);
+        float black_anchor = clamp(black_point * 0.20, -0.20, 0.20);
+        float white_anchor = clamp(1.0 - white_point * 0.20, 0.80, 1.20);
+        float3 color = clamp((src.rgb - float3(black_anchor)) / max(0.05, white_anchor - black_anchor), 0.0, 1.0);
+        float lum = clamp(luma(src.rgb), 0.0, 1.0);
+        float shadow_weight = pow(1.0 - lum, 1.6);
+        float highlight_weight = pow(lum, 1.6);
+        color += shadows * 0.45 * shadow_weight * (shadows >= 0.0 ? (float3(1.0) - color) : color);
+        color += highlights * 0.45 * highlight_weight * (highlights >= 0.0 ? (float3(1.0) - color) : color);
+        out = float4(clamp(color, 0.0, 1.0), src.a);
     } else {
         float2 uv = float2(gid) / float2(max(1u, u.width), max(1u, u.height));
         float2 center = float2(0.5);

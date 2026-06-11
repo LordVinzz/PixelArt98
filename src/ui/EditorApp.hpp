@@ -39,6 +39,7 @@ enum class EffectPreviewKind {
     BrightnessContrast,
     Hsv,
     Levels,
+    TonalRange,
     PaletteQuantize,
     PaletteDither,
     AutoLevel,
@@ -239,6 +240,10 @@ private:
     float saturation_ = 0.0f;
     float value_ = 0.0f;
     LevelsSettings levels_;
+    int white_point_ = 0;
+    int highlights_ = 0;
+    int shadows_ = 0;
+    int black_point_ = 0;
     int posterize_levels_ = 4;
     int effect_radius_ = 3;
     int effect_amount_ = 50;

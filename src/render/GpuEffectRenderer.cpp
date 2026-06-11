@@ -240,7 +240,7 @@ vec4 sample_source_bilinear_transparent(vec2 p) {
 vec4 affine_transform(vec2 uv) {
     vec2 dest = floor(uv * u_size.xy);
     float scale = max(0.001, u_params.y);
-    vec2 center = u_size.xy * 0.5;
+    vec2 center = (u_size.xy - vec2(1.0)) * 0.5;
     vec2 d = (dest - u_params.zw - center) / scale;
     float c = cos(u_params.x);
     float s = sin(u_params.x);
@@ -499,6 +499,21 @@ vec4 apply_effect(vec2 uv, vec4 src) {
         return vec4(mix(src.rgb, vec3(0.0), e.r * clamp(u_params.y / 100.0, 0.0, 1.0)), src.a);
     }
     if (mode == 43) return affine_transform(uv);
+    if (mode == 44) {
+        float white_point = clamp(u_params.x, -1.0, 1.0);
+        float highlights = clamp(u_params.y, -1.0, 1.0);
+        float shadows = clamp(u_params.z, -1.0, 1.0);
+        float black_point = clamp(u_params.w, -1.0, 1.0);
+        float black_anchor = clamp(black_point * 0.20, -0.20, 0.20);
+        float white_anchor = clamp(1.0 - white_point * 0.20, 0.80, 1.20);
+        vec3 color = clamp((src.rgb - vec3(black_anchor)) / max(0.05, white_anchor - black_anchor), 0.0, 1.0);
+        float lum = clamp(luminance(src.rgb), 0.0, 1.0);
+        float shadow_weight = pow(1.0 - lum, 1.6);
+        float highlight_weight = pow(lum, 1.6);
+        color += shadows * 0.45 * shadow_weight * (shadows >= 0.0 ? (vec3(1.0) - color) : color);
+        color += highlights * 0.45 * highlight_weight * (highlights >= 0.0 ? (vec3(1.0) - color) : color);
+        return vec4(clamp(color, 0.0, 1.0), src.a);
+    }
     return src;
 }
 

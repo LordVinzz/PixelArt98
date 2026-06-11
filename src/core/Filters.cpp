@@ -356,6 +356,38 @@ void apply_levels(Document& doc, const LevelsSettings& settings) {
     });
 }
 
+void apply_tonal_range(Document& doc, int white_point, int highlights, int shadows, int black_point) {
+    const float white = std::clamp(static_cast<float>(white_point) / 100.0f, -1.0f, 1.0f);
+    const float high = std::clamp(static_cast<float>(highlights) / 100.0f, -1.0f, 1.0f);
+    const float shadow = std::clamp(static_cast<float>(shadows) / 100.0f, -1.0f, 1.0f);
+    const float black = std::clamp(static_cast<float>(black_point) / 100.0f, -1.0f, 1.0f);
+
+    auto adjust_channel = [&](std::uint8_t channel, float luma) -> std::uint8_t {
+        float value = static_cast<float>(channel) / 255.0f;
+        const float black_anchor = std::clamp(black * 0.20f, -0.20f, 0.20f);
+        const float white_anchor = std::clamp(1.0f - white * 0.20f, 0.80f, 1.20f);
+        value = std::clamp((value - black_anchor) / std::max(0.05f, white_anchor - black_anchor), 0.0f, 1.0f);
+
+        const float tonal_luma = std::clamp(luma, 0.0f, 1.0f);
+        const float shadow_weight = std::pow(1.0f - tonal_luma, 1.6f);
+        const float highlight_weight = std::pow(tonal_luma, 1.6f);
+        value += shadow * 0.45f * shadow_weight * (shadow >= 0.0f ? (1.0f - value) : value);
+        value += high * 0.45f * highlight_weight * (high >= 0.0f ? (1.0f - value) : value);
+        return to_u8(std::clamp(value, 0.0f, 1.0f) * 255.0f);
+    };
+
+    transform_pixels(doc, "Tonal Range", [&](int x, int y, Pixel p) {
+        if (!editable(doc, x, y, p)) {
+            return p;
+        }
+        const float luma = luminance(p) / 255.0f;
+        return rgba(adjust_channel(r(p), luma),
+                    adjust_channel(g(p), luma),
+                    adjust_channel(b(p), luma),
+                    a(p));
+    });
+}
+
 void apply_auto_level(Document& doc) {
     int min_red = 255;
     int min_green = 255;

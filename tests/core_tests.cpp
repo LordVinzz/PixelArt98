@@ -172,6 +172,18 @@ static void test_filters() {
     Pixel post = doc.active_cel().pixels[0];
     assert((r(post) == 0 || r(post) == 255));
 
+    auto tone = Document::create(4, 1);
+    tone.active_cel().pixels[checked_pixel_index(tone, 0, 0)] = rgba(12, 12, 12, 255);
+    tone.active_cel().pixels[checked_pixel_index(tone, 1, 0)] = rgba(64, 64, 64, 255);
+    tone.active_cel().pixels[checked_pixel_index(tone, 2, 0)] = rgba(192, 192, 192, 255);
+    tone.active_cel().pixels[checked_pixel_index(tone, 3, 0)] = rgba(245, 245, 245, 128);
+    apply_tonal_range(tone, 35, -40, 45, -30);
+    const Pixel lifted_shadow = tone.active_cel().pixels[checked_pixel_index(tone, 1, 0)];
+    const Pixel recovered_highlight = tone.active_cel().pixels[checked_pixel_index(tone, 2, 0)];
+    assert(r(lifted_shadow) > 64);
+    assert(r(recovered_highlight) < 192);
+    assert(a(tone.active_cel().pixels[checked_pixel_index(tone, 3, 0)]) == 128);
+
     auto effects = Document::create(12, 12);
     for (int y = 0; y < effects.height; ++y) {
         for (int x = 0; x < effects.width; ++x) {
@@ -327,6 +339,7 @@ static void test_gpu_chunking_policy() {
         GpuEffectMode::BrightnessContrast,
         GpuEffectMode::Hsv,
         GpuEffectMode::Levels,
+        GpuEffectMode::TonalRange,
         GpuEffectMode::PaletteQuantize,
         GpuEffectMode::PaletteDither,
         GpuEffectMode::AutoLevel,
@@ -372,7 +385,7 @@ static void test_gpu_chunking_policy() {
         GpuEffectMode::AffineTransform
     };
 
-    bool covered[44] = {};
+    bool covered[45] = {};
     for (GpuEffectMode mode : chunk_safe) {
         GpuEffectRequest request;
         request.mode = mode;
