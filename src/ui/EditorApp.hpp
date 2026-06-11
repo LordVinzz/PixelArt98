@@ -87,9 +87,22 @@ struct EditorHistoryEntry {
     ModelDocument after_model;
 };
 
+struct EditorHistoryNode {
+    int id = 0;
+    int parent = -1;
+    std::vector<int> children;
+    std::string name;
+    Document before_document;
+    Document after_document;
+    ModelDocument before_model;
+    ModelDocument after_model;
+    int preferred_child = -1;
+};
+
 class EditorApp {
 public:
     explicit EditorApp(FileDialogProvider* dialogs = nullptr, AppSettings settings = {});
+    ~EditorApp();
 
     void render();
     bool wants_quit() const { return wants_quit_; }
@@ -185,8 +198,9 @@ private:
     SelectionMask selection_before_;
     std::vector<std::array<int, 2>> lasso_points_;
     std::vector<ErrorConsoleEntry> error_console_entries_;
-    std::deque<EditorHistoryEntry> undo_stack_;
-    std::deque<EditorHistoryEntry> redo_stack_;
+    std::vector<EditorHistoryNode> history_nodes_;
+    int history_current_node_ = 0;
+    int next_history_node_id_ = 1;
     TextBox text_box_;
     Document effect_preview_document_;
     Document rotate_zoom_preview_document_;
@@ -248,10 +262,21 @@ private:
     void set_status(const std::string& status);
     void report_error(std::string_view context, std::string_view details);
     void save_settings();
+    void handle_global_shortcuts();
     void begin_history_frame();
     void end_history_frame();
     bool editor_state_changed_from_history_baseline() const;
     bool history_interaction_in_progress() const;
+    std::string history_label_from_changes(const Document& before_document,
+                                           const ModelDocument& before_model,
+                                           const Document& after_document,
+                                           const ModelDocument& after_model,
+                                           const std::vector<std::string>& document_labels) const;
+    void reset_history_tree();
+    EditorHistoryNode* history_node_by_id(int id);
+    const EditorHistoryNode* history_node_by_id(int id) const;
+    void restore_history_node(int node_id);
+    void prune_history_tree();
     void push_history_entry(const std::string& name,
                             Document before_document,
                             ModelDocument before_model,
@@ -266,6 +291,7 @@ private:
     void draw_new_document_dialog();
     void draw_toolbar();
     void draw_canvas();
+    void draw_tool_options_bar();
     void draw_color_panel();
     void draw_layers_panel();
     void draw_timeline_panel();
@@ -275,6 +301,7 @@ private:
     void draw_tile_preview_window();
     void draw_effect_preview_popup();
     void draw_rotate_zoom_popup();
+    void draw_undo_tree_window();
     void draw_error_console();
     void draw_status_bar();
 

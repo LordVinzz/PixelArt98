@@ -183,6 +183,8 @@ public:
     bool undo();
     bool redo();
     void clear_history();
+    std::vector<std::string> consume_recent_commit_names();
+    void clear_recent_commit_names();
 
     void add_layer(const std::string& name);
     void duplicate_layer(int index);
@@ -212,6 +214,7 @@ public:
 private:
     std::deque<UndoCommand> undo_stack_;
     std::deque<UndoCommand> redo_stack_;
+    std::vector<std::string> recent_commit_names_;
 };
 
 std::vector<Pixel> default_palette();

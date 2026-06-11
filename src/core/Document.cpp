@@ -429,6 +429,7 @@ void Document::commit_active_cel_edit(const std::string& name, std::vector<Pixel
     if (before == after) {
         return;
     }
+    recent_commit_names_.push_back(name);
     UndoCommand command;
     command.name = name;
     command.frame = active_frame;
@@ -449,6 +450,7 @@ void Document::commit_selection_edit(const std::string& name, const SelectionMas
     if (before.mask == selection.mask && before.active == selection.active) {
         return;
     }
+    recent_commit_names_.push_back(name);
     UndoCommand command;
     command.name = name;
     command.before_selection = before;
@@ -463,6 +465,7 @@ void Document::commit_palette_edit(const std::string& name, const Palette& befor
     if (before.colors == palette.colors && before.active == palette.active) {
         return;
     }
+    recent_commit_names_.push_back(name);
     UndoCommand command;
     command.name = name;
     command.before_palette = before;
@@ -479,6 +482,7 @@ void Document::commit_structure_edit(const std::string& name,
                                      std::vector<AnimationTag> before_tags,
                                      int before_active_layer,
                                      int before_active_frame) {
+    recent_commit_names_.push_back(name);
     UndoCommand command;
     command.name = name;
     command.before_layers = std::move(before_layers);
@@ -560,6 +564,17 @@ bool Document::redo() {
 void Document::clear_history() {
     undo_stack_.clear();
     redo_stack_.clear();
+    recent_commit_names_.clear();
+}
+
+std::vector<std::string> Document::consume_recent_commit_names() {
+    std::vector<std::string> names = std::move(recent_commit_names_);
+    recent_commit_names_.clear();
+    return names;
+}
+
+void Document::clear_recent_commit_names() {
+    recent_commit_names_.clear();
 }
 
 void Document::add_layer(const std::string& name) {

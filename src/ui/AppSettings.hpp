@@ -14,6 +14,15 @@ struct AppSettings {
     bool auto_open_error_console = true;
     bool heavy_gpu_optimization = true;
     bool mps_backend = false;
+    bool show_tools_panel = true;
+    bool show_colors_panel = true;
+    bool show_layers_panel = true;
+    bool show_adjustments_panel = true;
+    bool show_animation_panel = false;
+    bool show_history_panel = false;
+    bool show_model_uv_panel = false;
+    bool show_3d_preview = false;
+    bool show_canvas_cuboid_uv_overlay = false;
 };
 
 [[nodiscard]] std::filesystem::path default_app_settings_path();

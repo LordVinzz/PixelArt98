@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <unordered_map>
 #include <string>
 #include <string_view>
@@ -1142,26 +1143,43 @@ EditorApp::EditorApp(FileDialogProvider* dialogs, AppSettings settings)
     }
     tool_.primary = rgba(0, 0, 0);
     tool_.secondary = rgba(255, 255, 255);
+    reset_history_tree();
+}
+
+EditorApp::~EditorApp() {
+    save_settings();
 }
 
 void EditorApp::render() {
     update_playback();
     refresh_texture();
     begin_history_frame();
+    handle_global_shortcuts();
     draw_dockspace();
     draw_main_menu();
     draw_new_document_dialog();
-    draw_toolbar();
+    if (settings_.show_tools_panel) {
+        draw_toolbar();
+    }
     draw_canvas();
-    draw_color_panel();
-    draw_layers_panel();
-    draw_timeline_panel();
-    draw_adjustments_panel();
+    if (settings_.show_colors_panel) {
+        draw_color_panel();
+    }
+    if (settings_.show_layers_panel) {
+        draw_layers_panel();
+    }
+    if (settings_.show_animation_panel) {
+        draw_timeline_panel();
+    }
+    if (settings_.show_adjustments_panel) {
+        draw_adjustments_panel();
+    }
     draw_model_panel();
     draw_model_preview_window();
     draw_tile_preview_window();
     draw_effect_preview_popup();
     draw_rotate_zoom_popup();
+    draw_undo_tree_window();
     draw_error_console();
     draw_status_bar();
     end_history_frame();
@@ -1230,6 +1248,21 @@ void EditorApp::save_settings() {
     }
 }
 
+void EditorApp::handle_global_shortcuts() {
+    ImGuiIO& io = ImGui::GetIO();
+    const bool action_modifier = io.KeyCtrl || io.KeySuper;
+    const bool shift = io.KeyShift;
+    const bool z_pressed = ImGui::IsKeyPressed(ImGuiKey_Z, false);
+    const bool y_pressed = ImGui::IsKeyPressed(ImGuiKey_Y, false);
+    const bool undo_requested = action_modifier && z_pressed && !shift;
+    const bool redo_requested = action_modifier && (y_pressed || (z_pressed && shift));
+    if (undo_requested) {
+        texture_dirty_ = undo_editor() || texture_dirty_;
+    } else if (redo_requested) {
+        texture_dirty_ = redo_editor() || texture_dirty_;
+    }
+}
+
 void EditorApp::sync_model_texture_metadata() {
     model_.texture_width = document_.width;
     model_.texture_height = document_.height;
@@ -1261,6 +1294,127 @@ bool EditorApp::history_interaction_in_progress() const {
            ImGui::IsAnyItemActive();
 }
 
+std::string EditorApp::history_label_from_changes(const Document& before_document,
+                                                  const ModelDocument& before_model,
+                                                  const Document& after_document,
+                                                  const ModelDocument& after_model,
+                                                  const std::vector<std::string>& document_labels) const {
+    if (!document_labels.empty()) {
+        if (document_labels.size() == 1) {
+            return document_labels.front();
+        }
+        bool same = true;
+        for (std::size_t i = 1; i < document_labels.size(); ++i) {
+            if (document_labels[i] != document_labels.front()) {
+                same = false;
+                break;
+            }
+        }
+        return same ? document_labels.front()
+                    : document_labels.front() + " +" + std::to_string(document_labels.size() - 1);
+    }
+    if (!model_state_equal(before_model, after_model)) {
+        if (before_model.cuboids.size() != after_model.cuboids.size()) {
+            return before_model.cuboids.size() < after_model.cuboids.size() ? "Add Cuboid" : "Remove Cuboid";
+        }
+        if (before_model.selected_cuboid != after_model.selected_cuboid ||
+            before_model.selected_face != after_model.selected_face) {
+            return "Select Model Part";
+        }
+        return "Edit Model";
+    }
+    if (!document_state_equal(before_document, after_document)) {
+        return "Edit";
+    }
+    return "Edit";
+}
+
+void EditorApp::reset_history_tree() {
+    document_.clear_recent_commit_names();
+    history_nodes_.clear();
+    EditorHistoryNode root;
+    root.id = 0;
+    root.parent = -1;
+    root.name = "Initial State";
+    root.before_document = document_;
+    root.after_document = document_;
+    root.before_model = model_;
+    root.after_model = model_;
+    history_nodes_.push_back(std::move(root));
+    history_current_node_ = 0;
+    next_history_node_id_ = 1;
+    history_before_document_ = document_;
+    history_before_model_ = model_;
+    history_pending_ = false;
+    history_suppress_frame_ = true;
+}
+
+EditorHistoryNode* EditorApp::history_node_by_id(int id) {
+    for (EditorHistoryNode& node : history_nodes_) {
+        if (node.id == id) {
+            return &node;
+        }
+    }
+    return nullptr;
+}
+
+const EditorHistoryNode* EditorApp::history_node_by_id(int id) const {
+    for (const EditorHistoryNode& node : history_nodes_) {
+        if (node.id == id) {
+            return &node;
+        }
+    }
+    return nullptr;
+}
+
+void EditorApp::restore_history_node(int node_id) {
+    const EditorHistoryNode* node = history_node_by_id(node_id);
+    if (node == nullptr) {
+        return;
+    }
+    document_ = node->after_document;
+    model_ = node->after_model;
+    document_.clear_recent_commit_names();
+    history_current_node_ = node->id;
+    sync_model_texture_metadata();
+    texture_dirty_ = true;
+    history_pending_ = false;
+    history_suppress_frame_ = true;
+}
+
+void EditorApp::prune_history_tree() {
+    constexpr std::size_t kMaxHistoryNodes = 129;
+    while (history_nodes_.size() > kMaxHistoryNodes) {
+        int prune_id = -1;
+        for (const EditorHistoryNode& node : history_nodes_) {
+            if (node.id != 0 && node.id != history_current_node_ && node.children.empty()) {
+                prune_id = node.id;
+                break;
+            }
+        }
+        if (prune_id < 0) {
+            return;
+        }
+        EditorHistoryNode* parent = nullptr;
+        if (const EditorHistoryNode* node = history_node_by_id(prune_id)) {
+            parent = history_node_by_id(node->parent);
+        }
+        if (parent != nullptr) {
+            parent->children.erase(std::remove(parent->children.begin(), parent->children.end(), prune_id),
+                                   parent->children.end());
+            if (parent->preferred_child == prune_id) {
+                parent->preferred_child = parent->children.empty() ? -1 : parent->children.back();
+            }
+        }
+        history_nodes_.erase(std::remove_if(history_nodes_.begin(),
+                                            history_nodes_.end(),
+                                            [prune_id](const EditorHistoryNode& node) {
+                                                return node.id == prune_id;
+                                            }),
+                             history_nodes_.end());
+    }
+}
+
 void EditorApp::push_history_entry(const std::string& name,
                                    Document before_document,
                                    ModelDocument before_model,
@@ -1269,11 +1423,21 @@ void EditorApp::push_history_entry(const std::string& name,
     if (document_state_equal(before_document, after_document) && model_state_equal(before_model, after_model)) {
         return;
     }
-    undo_stack_.push_back({name, std::move(before_document), std::move(after_document), std::move(before_model), std::move(after_model)});
-    if (undo_stack_.size() > 128) {
-        undo_stack_.pop_front();
+    EditorHistoryNode node;
+    node.id = next_history_node_id_++;
+    node.parent = history_current_node_;
+    node.name = name;
+    node.before_document = std::move(before_document);
+    node.before_model = std::move(before_model);
+    node.after_document = std::move(after_document);
+    node.after_model = std::move(after_model);
+    history_nodes_.push_back(std::move(node));
+    if (EditorHistoryNode* parent = history_node_by_id(history_current_node_)) {
+        parent->children.push_back(history_nodes_.back().id);
+        parent->preferred_child = history_nodes_.back().id;
     }
-    redo_stack_.clear();
+    history_current_node_ = history_nodes_.back().id;
+    prune_history_tree();
 }
 
 void EditorApp::end_history_frame() {
@@ -1293,24 +1457,23 @@ void EditorApp::end_history_frame() {
         history_pending_ = true;
         return;
     }
-    push_history_entry("Edit", history_before_document_, history_before_model_, document_, model_);
+    std::vector<std::string> document_labels = document_.consume_recent_commit_names();
+    const std::string label = history_label_from_changes(history_before_document_,
+                                                         history_before_model_,
+                                                         document_,
+                                                         model_,
+                                                         document_labels);
+    push_history_entry(label, history_before_document_, history_before_model_, document_, model_);
     history_pending_ = false;
     history_before_document_ = document_;
     history_before_model_ = model_;
 }
 
 bool EditorApp::undo_editor() {
-    if (!undo_stack_.empty()) {
-        EditorHistoryEntry entry = std::move(undo_stack_.back());
-        undo_stack_.pop_back();
-        document_ = entry.before_document;
-        model_ = entry.before_model;
-        redo_stack_.push_back(std::move(entry));
-        sync_model_texture_metadata();
-        texture_dirty_ = true;
-        history_pending_ = false;
-        history_suppress_frame_ = true;
-        set_status("Undo");
+    const EditorHistoryNode* current = history_node_by_id(history_current_node_);
+    if (current != nullptr && current->parent >= 0) {
+        restore_history_node(current->parent);
+        set_status("Undo: " + current->name);
         return true;
     }
     const bool changed = document_.undo();
@@ -1325,17 +1488,15 @@ bool EditorApp::undo_editor() {
 }
 
 bool EditorApp::redo_editor() {
-    if (!redo_stack_.empty()) {
-        EditorHistoryEntry entry = std::move(redo_stack_.back());
-        redo_stack_.pop_back();
-        document_ = entry.after_document;
-        model_ = entry.after_model;
-        undo_stack_.push_back(std::move(entry));
-        sync_model_texture_metadata();
-        texture_dirty_ = true;
-        history_pending_ = false;
-        history_suppress_frame_ = true;
-        set_status("Redo");
+    const EditorHistoryNode* current = history_node_by_id(history_current_node_);
+    if (current != nullptr && !current->children.empty()) {
+        int next_id = current->preferred_child;
+        if (history_node_by_id(next_id) == nullptr) {
+            next_id = current->children.back();
+        }
+        const EditorHistoryNode* next = history_node_by_id(next_id);
+        restore_history_node(next_id);
+        set_status(next != nullptr ? "Redo: " + next->name : "Redo");
         return true;
     }
     const bool changed = document_.redo();
@@ -1455,6 +1616,7 @@ void EditorApp::draw_main_menu() {
                 if (load_project(path, bundle, &error)) {
                     document_ = std::move(bundle.document);
                     model_ = std::move(bundle.model);
+                    reset_history_tree();
                     texture_dirty_ = true;
                     set_status(std::string("Loaded ") + path);
                 } else {
@@ -1472,6 +1634,7 @@ void EditorApp::draw_main_menu() {
                 if (import_image(path, imported, &error)) {
                     document_ = std::move(imported);
                     sync_model_texture_metadata();
+                    reset_history_tree();
                     texture_dirty_ = true;
                     set_status(std::string("Imported ") + path);
                 } else {
@@ -1545,6 +1708,7 @@ void EditorApp::draw_main_menu() {
                 if (import_aseprite(path, imported, &error)) {
                     document_ = std::move(imported);
                     sync_model_texture_metadata();
+                    reset_history_tree();
                     texture_dirty_ = true;
                     set_status(std::string("Imported ") + path);
                 } else {
@@ -1747,8 +1911,6 @@ void EditorApp::draw_main_menu() {
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Grid", nullptr, &show_grid_);
         ImGui::MenuItem("Checkerboard", nullptr, &show_checker_);
-        ImGui::MenuItem("Tile Preview", nullptr, &show_tile_preview_);
-        ImGui::MenuItem("Error Console", nullptr, &error_console_open_);
         if (ImGui::BeginMenu("3D Preview Skybox")) {
             for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(kSkyboxes)); ++i) {
                 if (ImGui::MenuItem(kSkyboxes[i].name, nullptr, skybox_index_ == i)) {
@@ -1773,6 +1935,27 @@ void EditorApp::draw_main_menu() {
         }
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("Window")) {
+        ImGui::MenuItem("Tools", nullptr, &settings_.show_tools_panel);
+        ImGui::MenuItem("Colors", nullptr, &settings_.show_colors_panel);
+        ImGui::MenuItem("Layers", nullptr, &settings_.show_layers_panel);
+        ImGui::MenuItem("Adjustments", nullptr, &settings_.show_adjustments_panel);
+        ImGui::MenuItem("Animation", nullptr, &settings_.show_animation_panel);
+        ImGui::MenuItem("History", nullptr, &settings_.show_history_panel);
+        ImGui::MenuItem("Tile Preview", nullptr, &show_tile_preview_);
+        ImGui::MenuItem("Error Console", nullptr, &error_console_open_);
+        ImGui::SeparatorText("Modeling");
+        if (ImGui::MenuItem("Cuboid / UV Editor", nullptr, &settings_.show_model_uv_panel)) {
+            save_settings();
+        }
+        if (ImGui::MenuItem("Canvas Cuboid UV Overlay", nullptr, &settings_.show_canvas_cuboid_uv_overlay)) {
+            save_settings();
+        }
+        if (ImGui::MenuItem("3D Preview", nullptr, &settings_.show_3d_preview)) {
+            save_settings();
+        }
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Options")) {
         if (ImGui::MenuItem("Show Splash Screen", nullptr, &settings_.show_splash_screen)) {
             save_settings();
@@ -1780,6 +1963,7 @@ void EditorApp::draw_main_menu() {
         if (ImGui::MenuItem("Auto-open Error Console", nullptr, &settings_.auto_open_error_console)) {
             save_settings();
         }
+        ImGui::SeparatorText("Performance");
         if (ImGui::MenuItem("Heavy GPU Optimization", nullptr, &settings_.heavy_gpu_optimization)) {
             if (!settings_.heavy_gpu_optimization) {
                 settings_.mps_backend = false;
@@ -2064,8 +2248,7 @@ void EditorApp::draw_new_document_dialog() {
         document_ = Document::create(width, height);
         model_ = ModelDocument::create_default();
         sync_model_texture_metadata();
-        undo_stack_.clear();
-        redo_stack_.clear();
+        reset_history_tree();
         canvas_pan_ = ImVec2(0.0f, 0.0f);
         canvas_fit_requested_ = true;
         texture_dirty_ = true;
@@ -2083,40 +2266,92 @@ void EditorApp::draw_new_document_dialog() {
 }
 
 void EditorApp::draw_toolbar() {
-    ImGui::Begin("Tools");
-    constexpr ToolType tools[] = {
-        ToolType::Pencil, ToolType::Brush, ToolType::Eraser, ToolType::Line,
-        ToolType::Rectangle, ToolType::Ellipse, ToolType::Bucket, ToolType::Gradient,
-        ToolType::Eyedropper, ToolType::CloneStamp, ToolType::RectSelect, ToolType::LassoSelect,
-        ToolType::MagicWand, ToolType::MovePixels, ToolType::Text
-    };
-    for (ToolType tool : tools) {
-        bool selected = tool_.tool == tool;
-        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-        if (ImGui::Button(tool_name(tool), ImVec2(132, 0))) {
+    bool open = settings_.show_tools_panel;
+    if (!ImGui::Begin("Tools", &open)) {
+        settings_.show_tools_panel = open;
+        ImGui::End();
+        return;
+    }
+    settings_.show_tools_panel = open;
+
+    auto tool_button = [&](ToolType tool, const char* hint) {
+        const bool selected = tool_.tool == tool;
+        if (selected) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        }
+        if (ImGui::Button(tool_name(tool), ImVec2(106.0f, 0.0f))) {
             tool_.tool = tool;
         }
-        if (selected) ImGui::PopStyleColor();
-    }
-    ImGui::Separator();
-    ImGui::SliderInt("Stroke", &tool_.brush_size, 1, 32);
-    ImGui::SliderInt("Tolerance", &tool_.tolerance, 0, 442);
-    ImGui::Checkbox("Contiguous", &tool_.contiguous);
-    ImGui::SeparatorText("Mask");
-    ImGui::Checkbox("Edit Active Mask", &edit_layer_mask_);
-    ImGui::Checkbox("Mask Overlay", &show_mask_overlay_);
-    if (edit_layer_mask_) {
-        ImGui::TextDisabled("Brushes edit grayscale mask values.");
-    }
-    ImGui::InputText("Text", text_buffer_, sizeof(text_buffer_));
-    if (text_box_.active) {
-        ImGui::Text("Text box at %d, %d", text_box_.x, text_box_.y);
-        if (ImGui::Button("Commit Text")) commit_text_box();
+        if (selected) {
+            ImGui::PopStyleColor();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("%s", hint);
+        }
+    };
+    auto tool_pair = [&](ToolType first, const char* first_hint, ToolType second, const char* second_hint) {
+        tool_button(first, first_hint);
         ImGui::SameLine();
-        if (ImGui::Button("Cancel Text")) cancel_text_box();
-    }
-    ImGui::Text("Clone source: %d, %d", tool_.clone_source_x, tool_.clone_source_y);
+        tool_button(second, second_hint);
+    };
+
+    ImGui::SeparatorText("Select");
+    tool_pair(ToolType::RectSelect, "Select a rectangular area", ToolType::LassoSelect, "Draw a freeform selection");
+    tool_pair(ToolType::MagicWand, "Select similar pixels", ToolType::MovePixels, "Move selected pixels");
+
+    ImGui::SeparatorText("Retouch");
+    tool_pair(ToolType::Eyedropper, "Pick a color from the image", ToolType::CloneStamp, "Paint from a sampled source");
+    tool_pair(ToolType::Bucket, "Fill matching pixels", ToolType::Gradient, "Blend between the two active colors");
+
+    ImGui::SeparatorText("Paint");
+    tool_pair(ToolType::Pencil, "Draw hard pixels", ToolType::Brush, "Draw with a larger stroke");
+    tool_button(ToolType::Eraser, "Erase pixels or mask values");
+
+    ImGui::SeparatorText("Shapes");
+    tool_pair(ToolType::Line, "Draw straight lines", ToolType::Rectangle, "Draw rectangles");
+    tool_pair(ToolType::Ellipse, "Draw ellipses", ToolType::Text, "Place text on the canvas");
     ImGui::End();
+}
+
+void EditorApp::draw_tool_options_bar() {
+    ImGui::SeparatorText("Tool Options");
+    ImGui::TextUnformatted(tool_name(tool_.tool));
+    ImGui::SameLine();
+    if (tool_.tool == ToolType::Pencil || tool_.tool == ToolType::Brush || tool_.tool == ToolType::Eraser ||
+        tool_.tool == ToolType::CloneStamp || tool_.tool == ToolType::Line ||
+        tool_.tool == ToolType::Rectangle || tool_.tool == ToolType::Ellipse) {
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::SliderInt("Stroke", &tool_.brush_size, 1, 32);
+        ImGui::SameLine();
+    }
+    if (tool_.tool == ToolType::Bucket || tool_.tool == ToolType::MagicWand) {
+        ImGui::SetNextItemWidth(150.0f);
+        ImGui::SliderInt("Tolerance", &tool_.tolerance, 0, 442);
+        ImGui::SameLine();
+        ImGui::Checkbox("Contiguous", &tool_.contiguous);
+        ImGui::SameLine();
+    }
+    if (tool_.tool == ToolType::Text) {
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::InputText("Text", text_buffer_, sizeof(text_buffer_));
+        ImGui::SameLine();
+    }
+    if (tool_.tool == ToolType::CloneStamp) {
+        ImGui::Text("Source %d, %d", tool_.clone_source_x, tool_.clone_source_y);
+        ImGui::SameLine();
+    }
+    if (text_box_.active) {
+        if (ImGui::Button("Apply Text")) commit_text_box();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) cancel_text_box();
+        ImGui::SameLine();
+    }
+    ImGui::Checkbox("Edit Mask", &edit_layer_mask_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Mask Overlay", &show_mask_overlay_);
+    if (edit_layer_mask_ && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::SetTooltip("Brushes edit grayscale mask values.");
+    }
 }
 
 void EditorApp::draw_canvas() {
@@ -2152,6 +2387,7 @@ void EditorApp::draw_canvas() {
         ImGui::SetNextItemWidth(150.0f);
         ImGui::Combo("Resampling##Straighten", &image_transform_resampling_, kResamplingModeNames, IM_ARRAYSIZE(kResamplingModeNames));
     }
+    draw_tool_options_bar();
 
     ImGui::BeginChild("CanvasView",
                       ImVec2(0, 0),
@@ -2359,14 +2595,6 @@ void EditorApp::handle_canvas_input(const ImVec2& origin,
         } else if (document_.selection.active) {
             clear_selection("Clear Selection");
         }
-    }
-    if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_Z)) {
-        texture_dirty_ = undo_editor() || texture_dirty_;
-    }
-    if (can_use_canvas_shortcuts && (shortcut_ctrl_or_super(ImGuiKey_Y) ||
-        ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z) ||
-        ImGui::Shortcut(ImGuiMod_Super | ImGuiMod_Shift | ImGuiKey_Z))) {
-        texture_dirty_ = redo_editor() || texture_dirty_;
     }
     if (can_use_canvas_shortcuts && shortcut_ctrl_or_super(ImGuiKey_A)) {
         auto before = document_.selection;
@@ -3031,6 +3259,9 @@ void EditorApp::draw_lasso_preview(ImDrawList* draw_list, const ImVec2& origin) 
 }
 
 void EditorApp::draw_selected_model_face_overlay(ImDrawList* draw_list, const ImVec2& origin) const {
+    if (!settings_.show_canvas_cuboid_uv_overlay) {
+        return;
+    }
     if (model_.cuboids.empty()) {
         return;
     }
@@ -3147,7 +3378,13 @@ void EditorApp::cancel_text_box() {
 }
 
 void EditorApp::draw_color_panel() {
-    ImGui::Begin("Colors");
+    bool open = settings_.show_colors_panel;
+    if (!ImGui::Begin("Colors", &open)) {
+        settings_.show_colors_panel = open;
+        ImGui::End();
+        return;
+    }
+    settings_.show_colors_panel = open;
     float primary[4] = {r(tool_.primary) / 255.0f, g(tool_.primary) / 255.0f, b(tool_.primary) / 255.0f, a(tool_.primary) / 255.0f};
     float secondary[4] = {r(tool_.secondary) / 255.0f, g(tool_.secondary) / 255.0f, b(tool_.secondary) / 255.0f, a(tool_.secondary) / 255.0f};
     if (ImGui::ColorPicker4("Primary", primary, ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_AlphaBar)) {
@@ -3228,7 +3465,13 @@ void EditorApp::draw_color_panel() {
 }
 
 void EditorApp::draw_layers_panel() {
-    ImGui::Begin("Layers");
+    bool open = settings_.show_layers_panel;
+    if (!ImGui::Begin("Layers", &open)) {
+        settings_.show_layers_panel = open;
+        ImGui::End();
+        return;
+    }
+    settings_.show_layers_panel = open;
     if (document_.layers.empty()) {
         ImGui::TextDisabled("No layers");
         ImGui::End();
@@ -3317,52 +3560,54 @@ void EditorApp::draw_layers_panel() {
     ImGui::Checkbox("Overlay", &show_mask_overlay_);
 
     ImGui::TextDisabled("Mask: %s", active_layer.mask.empty() ? "Not created" : (active_layer.mask_enabled ? "Enabled" : "Disabled"));
-    if (ImGui::Button("Reveal All")) {
-        active_layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 255);
-        active_layer.mask_enabled = true;
-        texture_dirty_ = true;
-    }
-    tooltip("Fill the active layer mask with white");
-    ImGui::SameLine();
-    if (ImGui::Button("Hide All")) {
-        active_layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 0);
-        active_layer.mask_enabled = true;
-        texture_dirty_ = true;
-    }
-    tooltip("Fill the active layer mask with black");
-    ImGui::SameLine();
-    if (ImGui::Button("From Selection")) {
-        fill_layer_mask_from_selection(active_layer, document_.selection, document_.width, document_.height);
-        texture_dirty_ = true;
-    }
-    tooltip("Build a mask from the current selection");
-
-    if (ImGui::Button("From Alpha")) {
-        fill_layer_mask_from_alpha(active_layer, document_.cel(document_.active_frame, document_.active_layer), document_.width, document_.height);
-        texture_dirty_ = true;
-    }
-    tooltip("Build a mask from the active layer alpha");
-    ImGui::SameLine();
-    if (ImGui::Button("Invert")) {
-        invert_layer_mask(active_layer, document_.width, document_.height);
-        texture_dirty_ = true;
-    }
-    tooltip("Invert the active layer mask");
-    ImGui::SameLine();
-    if (ImGui::Button("Clear")) {
-        active_layer.mask.clear();
-        active_layer.mask_enabled = false;
-        if (edit_layer_mask_) {
-            edit_layer_mask_ = false;
+    if (ImGui::CollapsingHeader("Mask Actions")) {
+        if (ImGui::Button("Reveal All")) {
+            active_layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 255);
+            active_layer.mask_enabled = true;
+            texture_dirty_ = true;
         }
-        texture_dirty_ = true;
+        tooltip("Fill the active layer mask with white");
+        ImGui::SameLine();
+        if (ImGui::Button("Hide All")) {
+            active_layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 0);
+            active_layer.mask_enabled = true;
+            texture_dirty_ = true;
+        }
+        tooltip("Fill the active layer mask with black");
+        ImGui::SameLine();
+        if (ImGui::Button("From Selection")) {
+            fill_layer_mask_from_selection(active_layer, document_.selection, document_.width, document_.height);
+            texture_dirty_ = true;
+        }
+        tooltip("Build a mask from the current selection");
+
+        if (ImGui::Button("From Alpha")) {
+            fill_layer_mask_from_alpha(active_layer, document_.cel(document_.active_frame, document_.active_layer), document_.width, document_.height);
+            texture_dirty_ = true;
+        }
+        tooltip("Build a mask from the active layer alpha");
+        ImGui::SameLine();
+        if (ImGui::Button("Invert")) {
+            invert_layer_mask(active_layer, document_.width, document_.height);
+            texture_dirty_ = true;
+        }
+        tooltip("Invert the active layer mask");
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+            active_layer.mask.clear();
+            active_layer.mask_enabled = false;
+            if (edit_layer_mask_) {
+                edit_layer_mask_ = false;
+            }
+            texture_dirty_ = true;
+        }
+        tooltip("Remove the active layer mask");
+        ImGui::SameLine();
+        if (ImGui::Button("Select Mask")) {
+            load_selection_from_layer_mask(document_.selection, active_layer, document_.width, document_.height);
+        }
+        tooltip("Load the active layer mask as a selection");
     }
-    tooltip("Remove the active layer mask");
-    ImGui::SameLine();
-    if (ImGui::Button("Select Mask")) {
-        load_selection_from_layer_mask(document_.selection, active_layer, document_.width, document_.height);
-    }
-    tooltip("Load the active layer mask as a selection");
 
     ImGui::SeparatorText("Layer Stack");
     const float stack_height = std::clamp(ImGui::GetContentRegionAvail().y - 68.0f, 180.0f, 360.0f);
@@ -3475,7 +3720,13 @@ void EditorApp::draw_layers_panel() {
 }
 
 void EditorApp::draw_timeline_panel() {
-    ImGui::Begin("Animation");
+    bool open = settings_.show_animation_panel;
+    if (!ImGui::Begin("Animation", &open)) {
+        settings_.show_animation_panel = open;
+        ImGui::End();
+        return;
+    }
+    settings_.show_animation_panel = open;
     if (ImGui::Button(playing_ ? "Pause" : "Play")) {
         playing_ = !playing_;
         playback_direction_ = 1;
@@ -3555,7 +3806,13 @@ void EditorApp::draw_timeline_panel() {
 }
 
 void EditorApp::draw_adjustments_panel() {
-    ImGui::Begin("Adjustments");
+    bool open = settings_.show_adjustments_panel;
+    if (!ImGui::Begin("Adjustments", &open)) {
+        settings_.show_adjustments_panel = open;
+        ImGui::End();
+        return;
+    }
+    settings_.show_adjustments_panel = open;
     draw_histogram_plot();
     auto reset_after_apply = [&](EffectPreviewKind kind) {
         if (kind == EffectPreviewKind::BrightnessContrast) {
@@ -3599,48 +3856,51 @@ void EditorApp::draw_adjustments_panel() {
     };
 
     if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderInt("Brightness", &brightness_, -255, 255);
-        ImGui::SliderInt("Contrast", &contrast_, -255, 255);
-        preview_apply(EffectPreviewKind::BrightnessContrast, true);
+        preview_apply(EffectPreviewKind::BrightnessContrast);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset##Light", ImVec2(82.0f, 0.0f))) {
+            brightness_ = 0;
+            contrast_ = 0;
+        }
         ImGui::SameLine();
         apply_button("Auto", EffectPreviewKind::AutoLevel, 64.0f);
+        ImGui::SliderInt("Exposure", &brightness_, -255, 255);
+        ImGui::SliderInt("Contrast", &contrast_, -255, 255);
     }
 
     if (ImGui::CollapsingHeader("Color", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderFloat("Hue", &hue_, -180.0f, 180.0f, "%.1f");
-        ImGui::SliderFloat("Saturation", &saturation_, -1.0f, 1.0f, "%.2f");
-        ImGui::SliderFloat("Value", &value_, -1.0f, 1.0f, "%.2f");
-        preview_apply(EffectPreviewKind::Hsv, true);
+        preview_apply(EffectPreviewKind::Hsv);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset##Color", ImVec2(82.0f, 0.0f))) {
+            hue_ = saturation_ = value_ = 0.0f;
+        }
         ImGui::SameLine();
         apply_button("B&W", EffectPreviewKind::Grayscale, 64.0f);
         ImGui::SameLine();
         apply_button("Sepia", EffectPreviewKind::Sepia, 64.0f);
+        ImGui::SliderFloat("Hue", &hue_, -180.0f, 180.0f, "%.1f");
+        ImGui::SliderFloat("Saturation", &saturation_, -1.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Value", &value_, -1.0f, 1.0f, "%.2f");
     }
 
     if (ImGui::CollapsingHeader("Levels", ImGuiTreeNodeFlags_DefaultOpen)) {
+        preview_apply(EffectPreviewKind::Levels);
+        ImGui::SameLine();
+        if (ImGui::Button("Reset##Levels", ImVec2(82.0f, 0.0f))) {
+            levels_ = LevelsSettings{};
+        }
         ImGui::SliderInt("Input Black", &levels_.in_black, 0, 254);
         ImGui::SliderInt("Input White", &levels_.in_white, 1, 255);
         ImGui::SliderFloat("Gamma", &levels_.gamma, 0.1f, 4.0f);
         ImGui::SliderInt("Output Black", &levels_.out_black, 0, 255);
         ImGui::SliderInt("Output White", &levels_.out_white, 0, 255);
-        preview_apply(EffectPreviewKind::Levels);
-    }
-
-    if (ImGui::CollapsingHeader("Pixel Art", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderInt("Posterize Levels", &posterize_levels_, 2, 32);
-        preview_apply(EffectPreviewKind::Posterize);
-        if (ImGui::BeginTable("PixelArtActions", 3, ImGuiTableFlags_SizingStretchSame)) {
-            apply_cell("Invert RGB", EffectPreviewKind::InvertColors);
-            apply_cell("Invert Alpha", EffectPreviewKind::InvertAlpha);
-            apply_cell("Quantize", EffectPreviewKind::PaletteQuantize);
-            preview_cell("Preview Quantize", EffectPreviewKind::PaletteQuantize);
-            apply_cell("Dither", EffectPreviewKind::PaletteDither);
-            preview_cell("Preview Dither", EffectPreviewKind::PaletteDither);
-            ImGui::EndTable();
-        }
     }
 
     if (ImGui::CollapsingHeader("Detail", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Button("Reset##Detail", ImVec2(82.0f, 0.0f))) {
+            effect_radius_ = 3;
+            effect_amount_ = 50;
+        }
         ImGui::SliderInt("Radius", &effect_radius_, 1, 32);
         ImGui::SliderInt("Amount", &effect_amount_, 0, 100);
         if (ImGui::BeginTable("DetailActions", 3, ImGuiTableFlags_SizingStretchSame)) {
@@ -3654,23 +3914,44 @@ void EditorApp::draw_adjustments_panel() {
         }
     }
 
-    if (ImGui::CollapsingHeader("Effects", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SliderInt("Angle", &effect_angle_, -180, 180);
+        ImGui::SliderFloat("Zoom", &effect_zoom_, 0.1f, 8.0f, "%.2f");
+        if (ImGui::Button("Straighten", ImVec2(96.0f, 0.0f))) {
+            start_straighten_tool();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Rotate / Zoom", ImVec2(120.0f, 0.0f))) {
+            rotate_zoom_angle_ = static_cast<float>(effect_angle_);
+            rotate_zoom_zoom_ = effect_zoom_;
+            rotate_zoom_pan_x_ = 0;
+            rotate_zoom_pan_y_ = 0;
+            rotate_zoom_preview_dirty_ = true;
+            rotate_zoom_popup_requested_ = true;
+        }
+        ImGui::SameLine();
+        preview_button("Motion Blur", EffectPreviewKind::MotionBlur, 110.0f);
+    }
+
+    if (ImGui::CollapsingHeader("Creative")) {
         ImGui::SliderInt("Cell Size", &effect_cell_size_, 2, 128);
         ImGui::SliderInt("Scale", &effect_scale_, 2, 256);
         ImGui::SliderInt("Noise", &effect_noise_, 0, 255);
         ImGui::SliderFloat("Strength", &effect_strength_, -2.0f, 2.0f, "%.2f");
-        ImGui::SliderFloat("Zoom", &effect_zoom_, 0.1f, 8.0f, "%.2f");
-        if (ImGui::BeginTable("EffectActions", 3, ImGuiTableFlags_SizingStretchSame)) {
+        ImGui::SliderInt("Posterize Levels", &posterize_levels_, 2, 32);
+        if (ImGui::BeginTable("CreativeActions", 3, ImGuiTableFlags_SizingStretchSame)) {
             preview_cell("Pixelate", EffectPreviewKind::Pixelate);
             preview_cell("Vignette", EffectPreviewKind::Vignette);
             preview_cell("Twist", EffectPreviewKind::Twist);
-            preview_cell("Motion Blur", EffectPreviewKind::MotionBlur);
             preview_cell("Add Noise", EffectPreviewKind::AddNoise);
             preview_cell("Clouds", EffectPreviewKind::Clouds);
-            preview_cell("Mandelbrot", EffectPreviewKind::MandelbrotFractal);
             preview_cell("Turbulence", EffectPreviewKind::Turbulence);
             preview_cell("Emboss", EffectPreviewKind::Emboss);
+            preview_cell("Posterize", EffectPreviewKind::Posterize);
+            apply_cell("Quantize", EffectPreviewKind::PaletteQuantize);
+            apply_cell("Dither", EffectPreviewKind::PaletteDither);
+            apply_cell("Invert RGB", EffectPreviewKind::InvertColors);
+            apply_cell("Invert Alpha", EffectPreviewKind::InvertAlpha);
             ImGui::EndTable();
         }
     }
@@ -4441,6 +4722,116 @@ void EditorApp::draw_rotate_zoom_popup() {
     rotate_zoom_open_ = open && rotate_zoom_open_;
 }
 
+void EditorApp::draw_undo_tree_window() {
+    if (!settings_.show_history_panel) {
+        return;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(340.0f, 300.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("History", &settings_.show_history_panel)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Actions: %d", std::max(0, static_cast<int>(history_nodes_.size()) - 1));
+    ImGui::Separator();
+
+    const ImVec2 canvas_size(std::max(260.0f, ImGui::GetContentRegionAvail().x),
+                             std::max(180.0f, ImGui::GetContentRegionAvail().y));
+    ImGui::BeginChild("UndoTreeCanvas", canvas_size, true, ImGuiWindowFlags_HorizontalScrollbar);
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    constexpr float indent = 28.0f;
+    constexpr float row_height = 30.0f;
+    constexpr float node_height = 22.0f;
+    constexpr float node_radius = 4.0f;
+
+    struct PositionedHistoryNode {
+        int id = 0;
+        int depth = 0;
+        ImVec2 pos = ImVec2(0, 0);
+    };
+    std::vector<PositionedHistoryNode> positioned;
+    int row = 0;
+    std::function<void(int, int)> layout_node = [&](int node_id, int depth) {
+        const EditorHistoryNode* node = history_node_by_id(node_id);
+        if (node == nullptr) {
+            return;
+        }
+        positioned.push_back({node_id, depth, ImVec2(8.0f + indent * static_cast<float>(depth),
+                                                     8.0f + row_height * static_cast<float>(row++))});
+        for (int child_id : node->children) {
+            layout_node(child_id, depth + 1);
+        }
+    };
+    layout_node(0, 0);
+
+    auto position_for_id = [&](int node_id) {
+        for (const PositionedHistoryNode& node : positioned) {
+            if (node.id == node_id) {
+                return node.pos;
+            }
+        }
+        return ImVec2(-1.0f, -1.0f);
+    };
+
+    for (const PositionedHistoryNode& node_position : positioned) {
+        const EditorHistoryNode* node = history_node_by_id(node_position.id);
+        if (node == nullptr) {
+            continue;
+        }
+        const ImVec2 parent_pos = position_for_id(node->parent);
+        if (parent_pos.x >= 0.0f) {
+            const ImVec2 a(origin.x + parent_pos.x + 9.0f, origin.y + parent_pos.y + node_height * 0.5f);
+            const ImVec2 b(origin.x + node_position.pos.x + 9.0f, origin.y + node_position.pos.y + node_height * 0.5f);
+            draw_list->AddLine(a, ImVec2(a.x, b.y), IM_COL32(120, 120, 120, 170), 1.5f);
+            draw_list->AddLine(ImVec2(a.x, b.y), b, IM_COL32(120, 120, 120, 170), 1.5f);
+        }
+    }
+
+    const float label_width = std::max(150.0f, canvas_size.x - 24.0f);
+    for (const PositionedHistoryNode& node_position : positioned) {
+        const EditorHistoryNode* node = history_node_by_id(node_position.id);
+        if (node == nullptr) {
+            continue;
+        }
+        const bool active = node->id == history_current_node_;
+        const bool ancestor = active || !node->children.empty();
+        const ImVec2 node_min(origin.x + node_position.pos.x, origin.y + node_position.pos.y);
+        const ImVec2 node_max(node_min.x + std::min(label_width, 240.0f), node_min.y + node_height);
+        const ImU32 fill = active ? IM_COL32(72, 118, 190, 235)
+                                  : ancestor ? IM_COL32(48, 48, 48, 235)
+                                             : IM_COL32(36, 36, 36, 210);
+        const ImU32 edge = active ? IM_COL32(160, 205, 255, 255) : IM_COL32(110, 110, 110, 210);
+        draw_list->AddRectFilled(node_min, node_max, fill, node_radius);
+        draw_list->AddRect(node_min, node_max, edge, node_radius, 0, active ? 2.0f : 1.0f);
+        draw_list->AddCircleFilled(ImVec2(node_min.x + 9.0f, node_min.y + node_height * 0.5f),
+                                   active ? 4.5f : 3.5f,
+                                   active ? IM_COL32(245, 245, 255, 255) : IM_COL32(180, 180, 180, 230));
+        const char* label = node->name.c_str();
+        draw_list->AddText(ImVec2(node_min.x + 18.0f, node_min.y + 3.0f),
+                           active ? IM_COL32(255, 255, 255, 255) : IM_COL32(220, 220, 220, 235),
+                           label);
+
+        ImGui::SetCursorScreenPos(node_min);
+        ImGui::PushID(node->id);
+        if (ImGui::InvisibleButton("history-node", ImVec2(node_max.x - node_min.x, node_height))) {
+            if (EditorHistoryNode* parent = history_node_by_id(node->parent)) {
+                parent->preferred_child = node->id;
+            }
+            restore_history_node(node->id);
+            set_status("Restored history: " + node->name);
+        }
+        ImGui::PopID();
+    }
+
+    const float required_height = std::max(canvas_size.y, 16.0f + row_height * static_cast<float>(positioned.size()));
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::Dummy(ImVec2(canvas_size.x, required_height));
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 void EditorApp::draw_histogram_plot() {
     ImGui::TextUnformatted("Histogram");
     ImGui::Checkbox("Luma", &histogram_luma_visible_);
@@ -4524,7 +4915,17 @@ void EditorApp::draw_histogram_plot() {
 }
 
 void EditorApp::draw_model_panel() {
-    ImGui::Begin("Model / UV");
+    if (!settings_.show_model_uv_panel) {
+        return;
+    }
+
+    bool open = settings_.show_model_uv_panel;
+    if (!ImGui::Begin("Model / UV", &open)) {
+        settings_.show_model_uv_panel = open;
+        ImGui::End();
+        return;
+    }
+    settings_.show_model_uv_panel = open;
     sync_model_texture_metadata();
     if (ImGui::Button("+ Cuboid")) model_.add_cuboid();
     ImGui::SameLine();
@@ -4574,10 +4975,16 @@ void EditorApp::draw_model_panel() {
 }
 
 void EditorApp::draw_model_preview_window() {
+    if (!settings_.show_3d_preview) {
+        return;
+    }
+
     ImGui::SetNextWindowSize(ImVec2(460, 340), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("3D Preview")) {
+    bool open = settings_.show_3d_preview;
+    if (ImGui::Begin("3D Preview", &open)) {
         draw_model_preview();
     }
+    settings_.show_3d_preview = open;
     ImGui::End();
 }
 

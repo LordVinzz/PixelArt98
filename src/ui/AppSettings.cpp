@@ -56,6 +56,33 @@ AppSettings load_app_settings(const std::filesystem::path& path, std::string* er
         if (root.contains("mps_backend")) {
             settings.mps_backend = root.at("mps_backend").get<bool>();
         }
+        if (root.contains("show_tools_panel")) {
+            settings.show_tools_panel = root.at("show_tools_panel").get<bool>();
+        }
+        if (root.contains("show_colors_panel")) {
+            settings.show_colors_panel = root.at("show_colors_panel").get<bool>();
+        }
+        if (root.contains("show_layers_panel")) {
+            settings.show_layers_panel = root.at("show_layers_panel").get<bool>();
+        }
+        if (root.contains("show_adjustments_panel")) {
+            settings.show_adjustments_panel = root.at("show_adjustments_panel").get<bool>();
+        }
+        if (root.contains("show_animation_panel")) {
+            settings.show_animation_panel = root.at("show_animation_panel").get<bool>();
+        }
+        if (root.contains("show_history_panel")) {
+            settings.show_history_panel = root.at("show_history_panel").get<bool>();
+        }
+        if (root.contains("show_model_uv_panel")) {
+            settings.show_model_uv_panel = root.at("show_model_uv_panel").get<bool>();
+        }
+        if (root.contains("show_3d_preview")) {
+            settings.show_3d_preview = root.at("show_3d_preview").get<bool>();
+        }
+        if (root.contains("show_canvas_cuboid_uv_overlay")) {
+            settings.show_canvas_cuboid_uv_overlay = root.at("show_canvas_cuboid_uv_overlay").get<bool>();
+        }
         if (!settings.heavy_gpu_optimization) {
             settings.mps_backend = false;
         }
@@ -76,6 +103,15 @@ bool save_app_settings(const AppSettings& settings, const std::filesystem::path&
         root["auto_open_error_console"] = settings.auto_open_error_console;
         root["heavy_gpu_optimization"] = settings.heavy_gpu_optimization;
         root["mps_backend"] = settings.heavy_gpu_optimization && settings.mps_backend;
+        root["show_tools_panel"] = settings.show_tools_panel;
+        root["show_colors_panel"] = settings.show_colors_panel;
+        root["show_layers_panel"] = settings.show_layers_panel;
+        root["show_adjustments_panel"] = settings.show_adjustments_panel;
+        root["show_animation_panel"] = settings.show_animation_panel;
+        root["show_history_panel"] = settings.show_history_panel;
+        root["show_model_uv_panel"] = settings.show_model_uv_panel;
+        root["show_3d_preview"] = settings.show_3d_preview;
+        root["show_canvas_cuboid_uv_overlay"] = settings.show_canvas_cuboid_uv_overlay;
 
         std::ofstream file(path, std::ios::trunc);
         if (!file.is_open()) {
