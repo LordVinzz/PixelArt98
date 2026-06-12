@@ -145,6 +145,16 @@ private:
     bool playing_ = false;
     float playback_accum_ = 0.0f;
     int playback_direction_ = 1;
+    int animation_timeline_fps_ = 12;
+    float animation_timeline_pixels_per_second_ = 180.0f;
+    int timeline_trim_frame_ = -1;
+    int timeline_trim_neighbor_frame_ = -1;
+    int timeline_trim_start_duration_ms_ = 0;
+    int timeline_trim_neighbor_start_duration_ms_ = 0;
+    float timeline_trim_start_mouse_x_ = 0.0f;
+    int timeline_rename_cue_ = -1;
+    bool timeline_rename_popup_requested_ = false;
+    char timeline_rename_cue_name_[96] = "";
     ModelViewportState model_viewport_;
 
     bool drag_active_ = false;
@@ -253,7 +263,6 @@ private:
     char model_path_[512] = "model.json";
     char minecraft_model_path_[512] = "minecraft_model.json";
     char minecraft_texture_path_[512] = "texture.png";
-    char tag_name_[96] = "Tag";
     char text_buffer_[128] = "TEXT";
     char status_[512] = "Ready";
     int error_console_sequence_ = 0;

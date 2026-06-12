@@ -1,6 +1,6 @@
 # Our Philosophy
 
-[README](../README.md) | [License](../LICENSE) | [Comparisons](COMPARISONS.md) | [Our Philosophy](OUR_PHILOSOPHY.md)
+[README](../README.md) | [License](../LICENSE) | [Animation](ANIMATION.md) | [Comparisons](COMPARISONS.md) | [Our Philosophy](OUR_PHILOSOPHY.md)
 
 PixelArt98 exists because creative software should feel like a tool in your hands, not a meter running in the background.
 

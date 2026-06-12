@@ -3982,80 +3982,396 @@ void EditorApp::draw_timeline_panel() {
         return;
     }
     settings_.show_animation_panel = open;
-    if (ImGui::Button(playing_ ? "Pause" : "Play")) {
+
+    if (document_.frames.empty()) {
+        ImGui::TextDisabled("No frames");
+        ImGui::End();
+        return;
+    }
+    document_.active_frame = std::clamp(document_.active_frame, 0, static_cast<int>(document_.frames.size()) - 1);
+    constexpr float kTimelineMinClipWidth = 44.0f;
+    constexpr float kTimelineBaseMinZoom = 80.0f;
+    constexpr float kTimelineBaseMaxZoom = 520.0f;
+    auto shortest_frame_duration_ms = [&]() {
+        int shortest = std::numeric_limits<int>::max();
+        for (const Frame& frame : document_.frames) {
+            shortest = std::min(shortest, std::max(1, frame.duration_ms));
+        }
+        return std::max(1, shortest);
+    };
+    auto minimum_timeline_zoom = [&]() {
+        return std::max(kTimelineBaseMinZoom,
+                        std::ceil(kTimelineMinClipWidth * 1000.0f /
+                                  static_cast<float>(shortest_frame_duration_ms())));
+    };
+    auto maximum_timeline_zoom = [&]() {
+        return std::max(kTimelineBaseMaxZoom, minimum_timeline_zoom());
+    };
+    auto timeline_quantum_ms = [&]() {
+        return std::max(1, static_cast<int>(std::round(1000.0f / static_cast<float>(animation_timeline_fps_))));
+    };
+    auto quantize_timeline_delta = [&](float delta_ms) {
+        if (ImGui::GetIO().KeyShift) {
+            return static_cast<int>(std::round(delta_ms));
+        }
+        const int quantum = timeline_quantum_ms();
+        return static_cast<int>(std::round(delta_ms / static_cast<float>(quantum))) * quantum;
+    };
+    auto clamp_timeline_zoom = [&]() {
+        animation_timeline_pixels_per_second_ = std::clamp(animation_timeline_pixels_per_second_,
+                                                           minimum_timeline_zoom(),
+                                                           maximum_timeline_zoom());
+    };
+    auto begin_timeline_trim = [&](int frame_index, int neighbor_index) {
+        timeline_trim_frame_ = frame_index;
+        timeline_trim_neighbor_frame_ = neighbor_index;
+        timeline_trim_start_duration_ms_ = document_.frames[static_cast<std::size_t>(frame_index)].duration_ms;
+        timeline_trim_neighbor_start_duration_ms_ = neighbor_index >= 0
+                                                       ? document_.frames[static_cast<std::size_t>(neighbor_index)].duration_ms
+                                                       : 0;
+        timeline_trim_start_mouse_x_ = ImGui::GetIO().MousePos.x;
+    };
+    auto apply_timeline_trim = [&](int frame_index, int neighbor_index) {
+        constexpr int kMinFrameDurationMs = 20;
+        if (timeline_trim_frame_ != frame_index || timeline_trim_neighbor_frame_ != neighbor_index) {
+            begin_timeline_trim(frame_index, neighbor_index);
+        }
+        int delta_ms = quantize_timeline_delta((ImGui::GetIO().MousePos.x - timeline_trim_start_mouse_x_) *
+                                               1000.0f / animation_timeline_pixels_per_second_);
+        if (neighbor_index >= 0) {
+            const int min_delta = kMinFrameDurationMs - timeline_trim_neighbor_start_duration_ms_;
+            const int max_delta = timeline_trim_start_duration_ms_ - kMinFrameDurationMs;
+            delta_ms = std::clamp(delta_ms, min_delta, max_delta);
+            document_.frames[static_cast<std::size_t>(neighbor_index)].duration_ms =
+                timeline_trim_neighbor_start_duration_ms_ + delta_ms;
+            document_.frames[static_cast<std::size_t>(frame_index)].duration_ms =
+                timeline_trim_start_duration_ms_ - delta_ms;
+        } else {
+            document_.frames[static_cast<std::size_t>(frame_index)].duration_ms =
+                std::clamp(timeline_trim_start_duration_ms_ + delta_ms, kMinFrameDurationMs, 10000);
+        }
+        document_.active_frame = frame_index;
+        clamp_timeline_zoom();
+    };
+    animation_timeline_fps_ = std::clamp(animation_timeline_fps_, 1, 60);
+    clamp_timeline_zoom();
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        timeline_trim_frame_ = -1;
+        timeline_trim_neighbor_frame_ = -1;
+    }
+
+    auto frame_start_ms = [&](int frame_index) {
+        int total = 0;
+        for (int i = 0; i < frame_index && i < static_cast<int>(document_.frames.size()); ++i) {
+            total += std::max(1, document_.frames[static_cast<std::size_t>(i)].duration_ms);
+        }
+        return total;
+    };
+    auto time_x = [&](float lane_x, int ms) {
+        return lane_x + static_cast<float>(ms) * animation_timeline_pixels_per_second_ / 1000.0f;
+    };
+    auto format_time = [](int ms) {
+        char value[32];
+        const int seconds = ms / 1000;
+        const int millis = ms % 1000;
+        std::snprintf(value, sizeof(value), "%02d:%02d.%03d", seconds / 60, seconds % 60, millis);
+        return std::string(value);
+    };
+    auto add_cue_at_active_frame = [&]() {
+        const std::string name = "Cue " + std::to_string(document_.tags.size() + 1);
+        document_.add_tag(name, document_.active_frame, document_.active_frame);
+    };
+    auto move_cue_to_frame = [&](int cue_index, int frame_index) {
+        if (cue_index < 0 || cue_index >= static_cast<int>(document_.tags.size())) {
+            return;
+        }
+        AnimationTag& cue = document_.tags[static_cast<std::size_t>(cue_index)];
+        const int length = std::max(0, cue.to - cue.from);
+        const int last = static_cast<int>(document_.frames.size()) - 1;
+        cue.from = std::clamp(frame_index, 0, last);
+        cue.to = std::clamp(cue.from + length, cue.from, last);
+    };
+
+    ImGuiIO& io = ImGui::GetIO();
+    const bool animation_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    const bool animation_hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+    const bool can_use_animation_shortcuts = animation_focused && !io.WantTextInput && !ImGui::IsAnyItemActive();
+    if (can_use_animation_shortcuts && ImGui::IsKeyPressed(ImGuiKey_Space)) {
         playing_ = !playing_;
         playback_direction_ = 1;
     }
-    ImGui::SameLine();
-    ImGui::Checkbox("Onion Skin", &onion_skin_);
-    ImGui::SameLine();
-    int playback_mode = static_cast<int>(document_.playback_mode);
-    const char* playback_modes[] = {"Loop", "Ping-Pong"};
-    ImGui::SetNextItemWidth(120);
-    if (ImGui::Combo("Mode", &playback_mode, playback_modes, IM_ARRAYSIZE(playback_modes))) {
-        document_.playback_mode = static_cast<PlaybackMode>(playback_mode);
+    if (can_use_animation_shortcuts && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))) {
+        playing_ = false;
+        playback_accum_ = 0.0f;
+    }
+    if (can_use_animation_shortcuts && ImGui::IsKeyPressed(ImGuiKey_P)) {
+        document_.playback_mode = document_.playback_mode == PlaybackMode::PingPong ? PlaybackMode::Loop : PlaybackMode::PingPong;
         playback_direction_ = 1;
     }
-    if (ImGui::Button("+ Blank")) {
+    if (can_use_animation_shortcuts && ImGui::IsKeyPressed(ImGuiKey_N)) {
         document_.add_frame(false);
         texture_dirty_ = true;
     }
-    ImGui::SameLine();
-    if (ImGui::Button("+ Duplicate")) {
-        document_.add_frame(true);
+    if (can_use_animation_shortcuts && (shortcut_ctrl_or_super(ImGuiKey_C) || shortcut_ctrl_or_super(ImGuiKey_V))) {
+        document_.duplicate_frame(document_.active_frame);
         texture_dirty_ = true;
     }
-    ImGui::SameLine();
-    if (ImGui::Button("- Frame")) {
+    if (can_use_animation_shortcuts && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace))) {
         texture_dirty_ = document_.remove_frame(document_.active_frame) || texture_dirty_;
     }
-    ImGui::SameLine();
-    if (ImGui::Button("< Frame")) {
+    if (can_use_animation_shortcuts && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
         document_.move_frame(document_.active_frame, std::max(0, document_.active_frame - 1));
         texture_dirty_ = true;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Frame >")) {
+    } else if (can_use_animation_shortcuts && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
         document_.move_frame(document_.active_frame, std::min(static_cast<int>(document_.frames.size()) - 1, document_.active_frame + 1));
         texture_dirty_ = true;
+    } else if (can_use_animation_shortcuts && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+        document_.active_frame = std::max(0, document_.active_frame - 1);
+        playback_accum_ = 0.0f;
+        texture_dirty_ = true;
+    } else if (can_use_animation_shortcuts && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+        document_.active_frame = std::min(static_cast<int>(document_.frames.size()) - 1, document_.active_frame + 1);
+        playback_accum_ = 0.0f;
+        texture_dirty_ = true;
     }
+    if (can_use_animation_shortcuts && ImGui::IsKeyPressed(ImGuiKey_M)) {
+        add_cue_at_active_frame();
+    }
+
+    int total_ms = 0;
+    for (const Frame& frame : document_.frames) {
+        total_ms += std::max(1, frame.duration_ms);
+    }
+    ImGui::TextDisabled("Frame %d/%d  |  %s / %s",
+                        document_.active_frame + 1,
+                        static_cast<int>(document_.frames.size()),
+                        format_time(frame_start_ms(document_.active_frame)).c_str(),
+                        format_time(total_ms).c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("| %s", playback_mode_name(document_.playback_mode));
+    ImGui::SameLine();
+    ImGui::Checkbox("Onion Skin", &onion_skin_);
+
+    const float timeline_height = 158.0f;
+    ImGui::BeginChild("Timeline", ImVec2(0.0f, timeline_height), true, ImGuiWindowFlags_HorizontalScrollbar);
+    if ((animation_focused || animation_hovered) && io.MouseWheel != 0.0f) {
+        if (action_modifier_down(io)) {
+            const float factor = std::pow(1.12f, io.MouseWheel);
+            animation_timeline_pixels_per_second_ *= factor;
+            clamp_timeline_zoom();
+        } else if (io.KeyShift) {
+            ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseWheel * 64.0f);
+        }
+    }
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    const ImVec2 canvas_min = ImGui::GetCursorScreenPos();
+    const float lane_x = canvas_min.x + 12.0f;
+    const float ruler_y = canvas_min.y + 16.0f;
+    const float cue_y = canvas_min.y + 34.0f;
+    const float frame_y = canvas_min.y + 72.0f;
+    const float frame_h = 48.0f;
+    const float total_width = std::max(ImGui::GetContentRegionAvail().x - 24.0f,
+                                       static_cast<float>(total_ms) * animation_timeline_pixels_per_second_ / 1000.0f + 24.0f);
+
+    const ImU32 ruler_color = ImGui::GetColorU32(ImGuiCol_Border);
+    const ImU32 text_color = ImGui::GetColorU32(ImGuiCol_Text);
+    const ImU32 dim_text_color = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    draw_list->AddLine(ImVec2(lane_x, ruler_y), ImVec2(lane_x + total_width, ruler_y), ruler_color, 1.0f);
+    const int tick_step_ms = animation_timeline_pixels_per_second_ >= 260.0f ? 500 : 1000;
+    for (int tick = 0; tick <= total_ms + tick_step_ms; tick += tick_step_ms) {
+        const float x = time_x(lane_x, tick);
+        const bool major = tick % 1000 == 0;
+        draw_list->AddLine(ImVec2(x, ruler_y - (major ? 6.0f : 3.0f)),
+                           ImVec2(x, frame_y + frame_h + 10.0f),
+                           major ? ruler_color : ImGui::GetColorU32(ImGuiCol_Separator),
+                           major ? 1.0f : 0.5f);
+        if (major) {
+            const std::string label = format_time(tick);
+            draw_list->AddText(ImVec2(x + 4.0f, canvas_min.y + 1.0f), dim_text_color, label.c_str());
+        }
+    }
+
+    constexpr std::array<ImU32, 6> tag_colors = {
+        IM_COL32(93, 150, 255, 185),
+        IM_COL32(245, 174, 73, 185),
+        IM_COL32(111, 207, 151, 185),
+        IM_COL32(218, 112, 214, 185),
+        IM_COL32(235, 91, 91, 185),
+        IM_COL32(118, 214, 214, 185)
+    };
+    for (int tag_index = 0; tag_index < static_cast<int>(document_.tags.size()); ++tag_index) {
+        const AnimationTag& tag = document_.tags[static_cast<std::size_t>(tag_index)];
+        const int from = std::clamp(tag.from, 0, static_cast<int>(document_.frames.size()) - 1);
+        const int to = std::clamp(tag.to, from, static_cast<int>(document_.frames.size()) - 1);
+        const float x0 = time_x(lane_x, frame_start_ms(from));
+        const float x1 = time_x(lane_x, frame_start_ms(to) + document_.frames[static_cast<std::size_t>(to)].duration_ms);
+        const float y0 = cue_y + static_cast<float>(tag_index % 2) * 18.0f;
+        const float cue_width = std::max(8.0f, x1 - x0);
+        const ImU32 color = tag_colors[static_cast<std::size_t>(tag_index) % tag_colors.size()];
+        draw_list->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + cue_width, y0 + 14.0f), color, 3.0f);
+        draw_list->PushClipRect(ImVec2(x0 + 4.0f, y0), ImVec2(x0 + cue_width - 3.0f, y0 + 14.0f), true);
+        draw_list->AddText(ImVec2(x0 + 4.0f, y0 - 1.0f), text_color, tag.name.c_str());
+        draw_list->PopClipRect();
+        ImGui::PushID(tag_index);
+        ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+        ImGui::InvisibleButton("cue", ImVec2(cue_width, 14.0f));
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+            ImGui::SetDragDropPayload("PX_TIMELINE_CUE", &tag_index, sizeof(tag_index));
+            ImGui::Text("Move %s", tag.name.c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            timeline_rename_cue_ = tag_index;
+            copy_path(timeline_rename_cue_name_, sizeof(timeline_rename_cue_name_), tag.name);
+            timeline_rename_popup_requested_ = true;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("%s\nDrag to move\nRight-click to rename", tag.name.c_str());
+        }
+        ImGui::PopID();
+    }
+
+    int cursor_ms = 0;
     for (int i = 0; i < static_cast<int>(document_.frames.size()); ++i) {
         ImGui::PushID(i);
-        bool selected = i == document_.active_frame;
-        char label[32];
-        std::snprintf(label, sizeof(label), "F%d", i + 1);
-        if (ImGui::Selectable(label, selected, 0, ImVec2(42, 24))) {
+        const int duration_ms = std::max(1, document_.frames[static_cast<std::size_t>(i)].duration_ms);
+        const float x0 = time_x(lane_x, cursor_ms);
+        const float width = std::max(44.0f, static_cast<float>(duration_ms) * animation_timeline_pixels_per_second_ / 1000.0f);
+        const float x1 = x0 + width;
+        const bool selected = i == document_.active_frame;
+        const float body_x = x0 + (i > 0 ? 7.0f : 0.0f);
+        const float body_width = std::max(1.0f, width - (i > 0 ? 14.0f : 7.0f));
+        ImGui::SetCursorScreenPos(ImVec2(body_x, frame_y));
+        ImGui::InvisibleButton("frame", ImVec2(body_width, frame_h));
+        if (ImGui::IsItemClicked()) {
             document_.active_frame = i;
+            playback_accum_ = 0.0f;
             texture_dirty_ = true;
         }
-        if ((i + 1) % 12 != 0) ImGui::SameLine();
-        ImGui::PopID();
-    }
-    ImGui::NewLine();
-    ImGui::SliderInt("Frame duration ms", &document_.frames[static_cast<std::size_t>(document_.active_frame)].duration_ms, 20, 2000);
-    ImGui::SeparatorText("Tags");
-    ImGui::InputText("Tag Name", tag_name_, sizeof(tag_name_));
-    if (ImGui::Button("+ Tag")) {
-        document_.add_tag(tag_name_, document_.active_frame, document_.active_frame);
-    }
-    for (int i = 0; i < static_cast<int>(document_.tags.size()); ++i) {
-        ImGui::PushID(i);
-        AnimationTag& tag = document_.tags[static_cast<std::size_t>(i)];
-        char name[96];
-        copy_path(name, sizeof(name), tag.name);
-        if (ImGui::InputText("Name", name, sizeof(name))) tag.name = name;
-        ImGui::SetNextItemWidth(80);
-        ImGui::SliderInt("From", &tag.from, 0, static_cast<int>(document_.frames.size()) - 1);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(80);
-        ImGui::SliderInt("To", &tag.to, tag.from, static_cast<int>(document_.frames.size()) - 1);
-        ImGui::SameLine();
-        if (ImGui::Button("Remove")) {
-            document_.remove_tag(i);
-            ImGui::PopID();
-            break;
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+            ImGui::SetDragDropPayload("PX_TIMELINE_FRAME", &i, sizeof(i));
+            ImGui::Text("Move Frame %d", i + 1);
+            ImGui::EndDragDropSource();
         }
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("PX_TIMELINE_FRAME")) {
+                const int source_frame = *static_cast<const int*>(payload->Data);
+                if (source_frame != i &&
+                    source_frame >= 0 &&
+                    source_frame < static_cast<int>(document_.frames.size())) {
+                    document_.move_frame(source_frame, i);
+                    document_.active_frame = i;
+                    playback_accum_ = 0.0f;
+                    texture_dirty_ = true;
+                }
+            }
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("PX_TIMELINE_CUE")) {
+                const int cue_index = *static_cast<const int*>(payload->Data);
+                move_cue_to_frame(cue_index, i);
+            }
+            ImGui::EndDragDropTarget();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            const int hover_hold = std::max(1, static_cast<int>(std::round(static_cast<float>(duration_ms) *
+                                                                           static_cast<float>(animation_timeline_fps_) / 1000.0f)));
+            ImGui::SetTooltip("Frame %d\nStart %s\nHold %d frame%s\nDrag to move",
+                              i + 1,
+                              format_time(cursor_ms).c_str(),
+                              hover_hold,
+                              hover_hold == 1 ? "" : "s");
+        }
+
+        if (i > 0) {
+            ImGui::SetCursorScreenPos(ImVec2(x0, frame_y));
+            ImGui::InvisibleButton("trim_left", ImVec2(7.0f, frame_h));
+            if (ImGui::IsItemActivated()) {
+                begin_timeline_trim(i, i - 1);
+            }
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                apply_timeline_trim(i, i - 1);
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("Adjacent trim\nShift: fine trim");
+            }
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(x1 - 7.0f, frame_y));
+        ImGui::InvisibleButton("trim", ImVec2(7.0f, frame_h));
+        const bool adjacent_right_trim = action_modifier_down(ImGui::GetIO()) && i + 1 < static_cast<int>(document_.frames.size());
+        if (ImGui::IsItemActivated()) {
+            begin_timeline_trim(adjacent_right_trim ? i + 1 : i, adjacent_right_trim ? i : -1);
+        }
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            const int trim_frame = timeline_trim_frame_ >= 0 ? timeline_trim_frame_ : i;
+            const int trim_neighbor = timeline_trim_frame_ >= 0 ? timeline_trim_neighbor_frame_ : -1;
+            apply_timeline_trim(trim_frame, trim_neighbor);
+            if (trim_neighbor == i) {
+                document_.active_frame = i;
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("Drag to trim frame hold\nCtrl/Cmd: adjacent trim\nShift: fine trim");
+        }
+
+        const ImU32 fill = selected ? ImGui::GetColorU32(ImGuiCol_HeaderActive)
+                                    : ImGui::GetColorU32(ImGuiCol_Header);
+        const ImU32 border = selected ? IM_COL32(255, 214, 92, 255)
+                                      : ImGui::GetColorU32(ImGuiCol_Border);
+        draw_list->AddRectFilled(ImVec2(x0, frame_y), ImVec2(x1 - 1.0f, frame_y + frame_h), fill, 4.0f);
+        draw_list->AddRect(ImVec2(x0, frame_y), ImVec2(x1 - 1.0f, frame_y + frame_h), border, 4.0f, 0, selected ? 2.0f : 1.0f);
+        draw_list->AddRectFilled(ImVec2(x1 - 7.0f, frame_y + 4.0f), ImVec2(x1 - 3.0f, frame_y + frame_h - 4.0f), border, 2.0f);
+
+        char label[64];
+        const int hold = std::max(1, static_cast<int>(std::round(static_cast<float>(duration_ms) *
+                                                                 static_cast<float>(animation_timeline_fps_) / 1000.0f)));
+        std::snprintf(label, sizeof(label), "F%d", i + 1);
+        draw_list->AddText(ImVec2(x0 + 8.0f, frame_y + 7.0f), text_color, label);
+        std::snprintf(label, sizeof(label), "%d fr", hold);
+        draw_list->AddText(ImVec2(x0 + 8.0f, frame_y + 25.0f), dim_text_color, label);
+
+        cursor_ms += duration_ms;
         ImGui::PopID();
+    }
+    const float playhead_x = time_x(lane_x, frame_start_ms(document_.active_frame));
+    draw_list->AddLine(ImVec2(playhead_x, ruler_y - 10.0f),
+                       ImVec2(playhead_x, frame_y + frame_h + 16.0f),
+                       IM_COL32(255, 214, 92, 255),
+                       2.0f);
+    draw_list->AddTriangleFilled(ImVec2(playhead_x, ruler_y - 10.0f),
+                                 ImVec2(playhead_x - 5.0f, ruler_y - 1.0f),
+                                 ImVec2(playhead_x + 5.0f, ruler_y - 1.0f),
+                                 IM_COL32(255, 214, 92, 255));
+    ImGui::SetCursorScreenPos(canvas_min);
+    ImGui::Dummy(ImVec2(total_width + 32.0f, timeline_height - 32.0f));
+    ImGui::EndChild();
+
+    if (timeline_rename_popup_requested_) {
+        ImGui::OpenPopup("Rename Cue");
+        timeline_rename_popup_requested_ = false;
+    }
+    if (ImGui::BeginPopup("Rename Cue")) {
+        if (timeline_rename_cue_ >= 0 && timeline_rename_cue_ < static_cast<int>(document_.tags.size())) {
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::InputText("Name", timeline_rename_cue_name_, sizeof(timeline_rename_cue_name_), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                document_.tags[static_cast<std::size_t>(timeline_rename_cue_)].name = timeline_rename_cue_name_;
+                timeline_rename_cue_ = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::Button("Apply", ImVec2(72.0f, 0.0f))) {
+                document_.tags[static_cast<std::size_t>(timeline_rename_cue_)].name = timeline_rename_cue_name_;
+                timeline_rename_cue_ = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(72.0f, 0.0f))) {
+                timeline_rename_cue_ = -1;
+                ImGui::CloseCurrentPopup();
+            }
+        } else {
+            timeline_rename_cue_ = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
     ImGui::End();
 }

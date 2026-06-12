@@ -1,6 +1,6 @@
 # Comparisons
 
-[README](../README.md) | [License](../LICENSE) | [Comparisons](COMPARISONS.md) | [Our Philosophy](OUR_PHILOSOPHY.md)
+[README](../README.md) | [License](../LICENSE) | [Animation](ANIMATION.md) | [Comparisons](COMPARISONS.md) | [Our Philosophy](OUR_PHILOSOPHY.md)
 
 This table compares PixelArt98 with Photoshop, Lightroom, and Aseprite from the point of view of a user who wants a practical image and pixel-art editor without being pushed into a paid ecosystem.
 
