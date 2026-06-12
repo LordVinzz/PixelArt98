@@ -197,8 +197,12 @@ bool json_to_document(const nlohmann::json& root, Document& out, std::string* er
             }
             document.frames.push_back(std::move(frame));
         }
-        document.active_layer = std::clamp(root.value("active_layer", 0), 0, static_cast<int>(document.layers.size()) - 1);
-        document.active_frame = std::clamp(root.value("active_frame", 0), 0, static_cast<int>(document.frames.size()) - 1);
+        document.active_layer = document.layers.empty()
+                                    ? 0
+                                    : std::clamp(root.value("active_layer", 0), 0, static_cast<int>(document.layers.size()) - 1);
+        document.active_frame = document.frames.empty()
+                                    ? 0
+                                    : std::clamp(root.value("active_frame", 0), 0, static_cast<int>(document.frames.size()) - 1);
         document.playback_mode = playback_mode_from_json(root.value("playback_mode", "Loop"));
         document.tags.clear();
         if (root.contains("tags")) {

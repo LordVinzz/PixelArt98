@@ -1994,35 +1994,36 @@ void EditorApp::draw_main_menu() {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Image")) {
-        if (ImGui::MenuItem("Flip Horizontal")) {
+        const bool can_edit_pixels = document_.has_active_cel();
+        if (ImGui::MenuItem("Flip Horizontal", nullptr, false, can_edit_pixels)) {
             apply_flip_horizontal(document_);
             texture_dirty_ = true;
             set_status("Applied Flip Horizontal");
         }
-        if (ImGui::MenuItem("Flip Vertical")) {
+        if (ImGui::MenuItem("Flip Vertical", nullptr, false, can_edit_pixels)) {
             apply_flip_vertical(document_);
             texture_dirty_ = true;
             set_status("Applied Flip Vertical");
         }
-        if (ImGui::MenuItem("Rotate 90 Clockwise")) {
+        if (ImGui::MenuItem("Rotate 90 Clockwise", nullptr, false, can_edit_pixels)) {
             apply_rotate_90_clockwise(document_);
             texture_dirty_ = true;
             set_status("Applied Rotate 90 Clockwise");
         }
-        if (ImGui::MenuItem("Rotate 90 Counter-Clockwise")) {
+        if (ImGui::MenuItem("Rotate 90 Counter-Clockwise", nullptr, false, can_edit_pixels)) {
             apply_rotate_90_counter_clockwise(document_);
             texture_dirty_ = true;
             set_status("Applied Rotate 90 Counter-Clockwise");
         }
-        if (ImGui::MenuItem("Rotate 180")) {
+        if (ImGui::MenuItem("Rotate 180", nullptr, false, can_edit_pixels)) {
             apply_rotate_180(document_);
             texture_dirty_ = true;
             set_status("Applied Rotate 180");
         }
-        if (ImGui::MenuItem("Straighten")) {
+        if (ImGui::MenuItem("Straighten", nullptr, false, can_edit_pixels)) {
             start_straighten_tool();
         }
-        if (ImGui::MenuItem("Rotate / Zoom")) {
+        if (ImGui::MenuItem("Rotate / Zoom", nullptr, false, can_edit_pixels)) {
             rotate_zoom_angle_ = static_cast<float>(effect_angle_);
             rotate_zoom_zoom_ = effect_zoom_;
             rotate_zoom_pan_x_ = 0;
@@ -2742,9 +2743,8 @@ void EditorApp::handle_canvas_input(const ImVec2& origin,
     bool image_hovered = viewport_hovered && point_in_rect(io.MousePos, origin, image_max);
     bool over_pixel = image_hovered && mouse_to_pixel(origin, px_i, py_i);
     const bool can_use_canvas_shortcuts = canvas_active && !text_box_.active && !io.WantTextInput && !ImGui::IsAnyItemActive();
-    const bool mask_editing = edit_layer_mask_ &&
-                              document_.active_layer >= 0 &&
-                              document_.active_layer < static_cast<int>(document_.layers.size());
+    const bool has_active_cel = document_.has_active_cel();
+    const bool mask_editing = edit_layer_mask_ && has_active_cel;
     auto mask_value_from_color = [](Pixel pixel) {
         return static_cast<std::uint8_t>(std::clamp(pixel_luma(pixel), 0.0f, 255.0f) + 0.5f);
     };
@@ -2881,12 +2881,20 @@ void EditorApp::handle_canvas_input(const ImVec2& origin,
     }
 
     if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && tool_.tool == ToolType::CloneStamp) {
+        if (!has_active_cel) {
+            set_status("Create a layer to edit pixels");
+            return;
+        }
         tool_.clone_source_x = px_i;
         tool_.clone_source_y = py_i;
         set_status("Clone source set");
     }
 
     if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && tool_.tool == ToolType::Bucket) {
+        if (!has_active_cel) {
+            set_status("Create a layer to edit pixels");
+            return;
+        }
         if (mask_editing) {
             fill_mask_bucket(document_, px_i, py_i, mask_value_from_color(tool_.secondary), tool_.tolerance, tool_.contiguous != io.KeyShift);
             set_status("Filled mask");
@@ -2943,6 +2951,11 @@ void EditorApp::handle_canvas_input(const ImVec2& origin,
     }
 
     if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (!has_active_cel) {
+            set_status("Create a layer to edit pixels");
+            drag_active_ = false;
+            return;
+        }
         drag_active_ = true;
         canvas_drag_button_ = ImGuiMouseButton_Left;
         drag_start_x_ = px_i;
@@ -3261,7 +3274,7 @@ void EditorApp::commit_stroke() {
 }
 
 void EditorApp::update_pixel_drag_preview() {
-    if (!pixel_drag_preview_active_ || stroke_before_.size() != document_.active_cel().pixels.size()) {
+    if (!pixel_drag_preview_active_ || !document_.has_active_cel() || stroke_before_.size() != document_.active_cel().pixels.size()) {
         return;
     }
     document_.active_cel().pixels = stroke_before_;
@@ -3319,7 +3332,7 @@ void EditorApp::commit_pixel_drag_preview() {
 }
 
 void EditorApp::cancel_pixel_drag_preview() {
-    if (stroke_before_.size() == document_.active_cel().pixels.size()) {
+    if (document_.has_active_cel() && stroke_before_.size() == document_.active_cel().pixels.size()) {
         document_.active_cel().pixels = std::move(stroke_before_);
     }
     pixel_drag_preview_active_ = false;
@@ -3328,6 +3341,9 @@ void EditorApp::cancel_pixel_drag_preview() {
 }
 
 bool EditorApp::delete_selection_contents() {
+    if (!document_.has_active_cel()) {
+        return false;
+    }
     if (document_.floating_selection.active) {
         if (stroke_before_.size() != document_.active_cel().pixels.size()) {
             stroke_before_ = document_.snapshot_active_cel();
@@ -3691,21 +3707,15 @@ void EditorApp::draw_layers_panel() {
         return;
     }
     settings_.show_layers_panel = open;
-    if (document_.layers.empty()) {
-        ImGui::TextDisabled("No layers");
-        ImGui::End();
-        return;
-    }
-
-    document_.active_layer = std::clamp(document_.active_layer, 0, static_cast<int>(document_.layers.size()) - 1);
-    Layer& active_layer = document_.layers[static_cast<std::size_t>(document_.active_layer)];
     const char* blend_modes[] = {"Normal", "Multiply", "Additive", "Color Burn", "Color Dodge", "Reflect", "Glow",
                                  "Overlay", "Difference", "Negation", "Lighten", "Darken", "Screen", "Xor"};
     const std::size_t mask_size = static_cast<std::size_t>(document_.width * document_.height);
-    if (edit_layer_mask_ && (!active_layer.mask_enabled || active_layer.mask.size() != mask_size)) {
-        active_layer.mask_enabled = true;
-        ensure_layer_mask(active_layer, document_.width, document_.height, 255);
-        texture_dirty_ = true;
+    const bool has_layers = !document_.layers.empty();
+    if (has_layers) {
+        document_.active_layer = std::clamp(document_.active_layer, 0, static_cast<int>(document_.layers.size()) - 1);
+    } else {
+        document_.active_layer = 0;
+        edit_layer_mask_ = false;
     }
 
     auto tooltip = [](const char* text) {
@@ -3723,109 +3733,120 @@ void EditorApp::draw_layers_panel() {
         }
         return clicked && !disabled;
     };
-    ImGui::SeparatorText("Selected Layer");
-    char name[128];
-    copy_path(name, sizeof(name), active_layer.name);
-    if (ImGui::InputText("Name", name, sizeof(name))) {
-        active_layer.name = name;
-    }
-
-    bool visible = active_layer.visible;
-    if (ImGui::Checkbox("Visible", &visible)) {
-        active_layer.visible = visible;
-        texture_dirty_ = true;
-    }
-    ImGui::SameLine();
-    bool clip_to_below = active_layer.clip_to_below;
-    if (ImGui::Checkbox("Clip to below", &clip_to_below)) {
-        active_layer.clip_to_below = clip_to_below;
-        texture_dirty_ = true;
-    }
-
-    int blend = static_cast<int>(active_layer.blend_mode);
-    ImGui::SetNextItemWidth(std::min(220.0f, ImGui::GetContentRegionAvail().x * 0.72f));
-    if (ImGui::Combo("Blend mode", &blend, blend_modes, IM_ARRAYSIZE(blend_modes))) {
-        active_layer.blend_mode = static_cast<LayerBlendMode>(blend);
-        texture_dirty_ = true;
-    }
-
-    float opacity_percent = active_layer.opacity * 100.0f;
-    if (ImGui::SliderFloat("Opacity", &opacity_percent, 0.0f, 100.0f, "%.0f%%")) {
-        active_layer.opacity = std::clamp(opacity_percent / 100.0f, 0.0f, 1.0f);
-        texture_dirty_ = true;
-    }
-
-    bool mask_enabled = active_layer.mask_enabled;
-    if (ImGui::Checkbox("Layer mask", &mask_enabled)) {
-        active_layer.mask_enabled = mask_enabled;
-        if (active_layer.mask_enabled) {
-            ensure_layer_mask(active_layer, document_.width, document_.height, 255);
-        } else if (edit_layer_mask_) {
-            edit_layer_mask_ = false;
-        }
-        texture_dirty_ = true;
-    }
-    ImGui::SameLine();
-    bool edit_mask = edit_layer_mask_;
-    if (ImGui::Checkbox("Edit mask", &edit_mask)) {
-        edit_layer_mask_ = edit_mask;
-        if (edit_layer_mask_) {
+    if (has_layers) {
+        Layer& active_layer = document_.layers[static_cast<std::size_t>(document_.active_layer)];
+        if (edit_layer_mask_ && (!active_layer.mask_enabled || active_layer.mask.size() != mask_size)) {
             active_layer.mask_enabled = true;
             ensure_layer_mask(active_layer, document_.width, document_.height, 255);
             texture_dirty_ = true;
         }
-    }
-    ImGui::SameLine();
-    ImGui::Checkbox("Overlay", &show_mask_overlay_);
 
-    ImGui::TextDisabled("Mask: %s", active_layer.mask.empty() ? "Not created" : (active_layer.mask_enabled ? "Enabled" : "Disabled"));
-    if (ImGui::CollapsingHeader("Mask Actions")) {
-        if (ImGui::Button("Reveal All")) {
-            active_layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 255);
-            active_layer.mask_enabled = true;
-            texture_dirty_ = true;
+        ImGui::SeparatorText("Selected Layer");
+        char name[128];
+        copy_path(name, sizeof(name), active_layer.name);
+        if (ImGui::InputText("Name", name, sizeof(name))) {
+            active_layer.name = name;
         }
-        tooltip("Fill the active layer mask with white");
-        ImGui::SameLine();
-        if (ImGui::Button("Hide All")) {
-            active_layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 0);
-            active_layer.mask_enabled = true;
-            texture_dirty_ = true;
-        }
-        tooltip("Fill the active layer mask with black");
-        ImGui::SameLine();
-        if (ImGui::Button("From Selection")) {
-            fill_layer_mask_from_selection(active_layer, document_.selection, document_.width, document_.height);
-            texture_dirty_ = true;
-        }
-        tooltip("Build a mask from the current selection");
 
-        if (ImGui::Button("From Alpha")) {
-            fill_layer_mask_from_alpha(active_layer, document_.cel(document_.active_frame, document_.active_layer), document_.width, document_.height);
+        bool visible = active_layer.visible;
+        if (ImGui::Checkbox("Visible", &visible)) {
+            active_layer.visible = visible;
             texture_dirty_ = true;
         }
-        tooltip("Build a mask from the active layer alpha");
         ImGui::SameLine();
-        if (ImGui::Button("Invert")) {
-            invert_layer_mask(active_layer, document_.width, document_.height);
+        bool clip_to_below = active_layer.clip_to_below;
+        if (ImGui::Checkbox("Clip to below", &clip_to_below)) {
+            active_layer.clip_to_below = clip_to_below;
             texture_dirty_ = true;
         }
-        tooltip("Invert the active layer mask");
-        ImGui::SameLine();
-        if (ImGui::Button("Clear")) {
-            active_layer.mask.clear();
-            active_layer.mask_enabled = false;
-            if (edit_layer_mask_) {
+
+        int blend = static_cast<int>(active_layer.blend_mode);
+        ImGui::SetNextItemWidth(std::min(220.0f, ImGui::GetContentRegionAvail().x * 0.72f));
+        if (ImGui::Combo("Blend mode", &blend, blend_modes, IM_ARRAYSIZE(blend_modes))) {
+            active_layer.blend_mode = static_cast<LayerBlendMode>(blend);
+            texture_dirty_ = true;
+        }
+
+        float opacity_percent = active_layer.opacity * 100.0f;
+        if (ImGui::SliderFloat("Opacity", &opacity_percent, 0.0f, 100.0f, "%.0f%%")) {
+            active_layer.opacity = std::clamp(opacity_percent / 100.0f, 0.0f, 1.0f);
+            texture_dirty_ = true;
+        }
+
+        bool mask_enabled = active_layer.mask_enabled;
+        if (ImGui::Checkbox("Layer mask", &mask_enabled)) {
+            active_layer.mask_enabled = mask_enabled;
+            if (active_layer.mask_enabled) {
+                ensure_layer_mask(active_layer, document_.width, document_.height, 255);
+            } else if (edit_layer_mask_) {
                 edit_layer_mask_ = false;
             }
             texture_dirty_ = true;
         }
-        tooltip("Remove the active layer mask");
         ImGui::SameLine();
-        if (ImGui::Button("Select Mask")) {
-            load_selection_from_layer_mask(document_.selection, active_layer, document_.width, document_.height);
+        bool edit_mask = edit_layer_mask_;
+        if (ImGui::Checkbox("Edit mask", &edit_mask)) {
+            edit_layer_mask_ = edit_mask;
+            if (edit_layer_mask_) {
+                active_layer.mask_enabled = true;
+                ensure_layer_mask(active_layer, document_.width, document_.height, 255);
+                texture_dirty_ = true;
+            }
         }
-        tooltip("Load the active layer mask as a selection");
+        ImGui::SameLine();
+        ImGui::Checkbox("Overlay", &show_mask_overlay_);
+
+        ImGui::TextDisabled("Mask: %s", active_layer.mask.empty() ? "Not created" : (active_layer.mask_enabled ? "Enabled" : "Disabled"));
+        if (ImGui::CollapsingHeader("Mask Actions")) {
+            if (ImGui::Button("Reveal All")) {
+                active_layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 255);
+                active_layer.mask_enabled = true;
+                texture_dirty_ = true;
+            }
+            tooltip("Fill the active layer mask with white");
+            ImGui::SameLine();
+            if (ImGui::Button("Hide All")) {
+                active_layer.mask.assign(static_cast<std::size_t>(document_.width * document_.height), 0);
+                active_layer.mask_enabled = true;
+                texture_dirty_ = true;
+            }
+            tooltip("Fill the active layer mask with black");
+            ImGui::SameLine();
+            if (ImGui::Button("From Selection")) {
+                fill_layer_mask_from_selection(active_layer, document_.selection, document_.width, document_.height);
+                texture_dirty_ = true;
+            }
+            tooltip("Build a mask from the current selection");
+
+            if (ImGui::Button("From Alpha")) {
+                fill_layer_mask_from_alpha(active_layer, document_.cel(document_.active_frame, document_.active_layer), document_.width, document_.height);
+                texture_dirty_ = true;
+            }
+            tooltip("Build a mask from the active layer alpha");
+            ImGui::SameLine();
+            if (ImGui::Button("Invert")) {
+                invert_layer_mask(active_layer, document_.width, document_.height);
+                texture_dirty_ = true;
+            }
+            tooltip("Invert the active layer mask");
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) {
+                active_layer.mask.clear();
+                active_layer.mask_enabled = false;
+                if (edit_layer_mask_) {
+                    edit_layer_mask_ = false;
+                }
+                texture_dirty_ = true;
+            }
+            tooltip("Remove the active layer mask");
+            ImGui::SameLine();
+            if (ImGui::Button("Select Mask")) {
+                load_selection_from_layer_mask(document_.selection, active_layer, document_.width, document_.height);
+            }
+            tooltip("Load the active layer mask as a selection");
+        }
+    } else {
+        ImGui::TextDisabled("No layers");
     }
 
     ImGui::SeparatorText("Layer Stack");
@@ -3866,10 +3887,18 @@ void EditorApp::draw_layers_panel() {
         }
         ImGui::SameLine();
         ImGui::BeginGroup();
-        const std::string label = layer.name + "##select";
-        if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0.0f, 0.0f))) {
+        const ImVec2 name_min = ImGui::GetCursorScreenPos();
+        const float name_width = std::max(36.0f, row_max.x - name_min.x - 8.0f);
+        const float name_height = ImGui::GetTextLineHeight();
+        if (ImGui::Selectable("##select", selected, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(name_width, name_height))) {
             document_.active_layer = i;
         }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && ImGui::CalcTextSize(layer.name.c_str()).x > name_width) {
+            ImGui::SetTooltip("%s", layer.name.c_str());
+        }
+        draw_list->PushClipRect(name_min, ImVec2(name_min.x + name_width, name_min.y + name_height), true);
+        draw_list->AddText(name_min, ImGui::GetColorU32(ImGuiCol_Text), layer.name.c_str());
+        draw_list->PopClipRect();
         ImGui::TextDisabled("Layer %d  |  %s  |  %.0f%%",
                             i + 1,
                             layer_blend_mode_name(layer.blend_mode),
@@ -3907,13 +3936,13 @@ void EditorApp::draw_layers_panel() {
     }
     tooltip("Create a new layer above the stack");
     ImGui::SameLine();
-    if (guarded_button("Duplicate", false, ImVec2(80.0f, 0.0f))) {
+    if (guarded_button("Duplicate", !has_layers, ImVec2(80.0f, 0.0f))) {
         document_.duplicate_layer(document_.active_layer);
         texture_dirty_ = true;
     }
     tooltip("Duplicate the selected layer");
     ImGui::SameLine();
-    if (guarded_button("Delete", document_.layers.size() <= 1, ImVec2(64.0f, 0.0f))) {
+    if (guarded_button("Delete", !has_layers, ImVec2(64.0f, 0.0f))) {
         texture_dirty_ = document_.remove_layer(document_.active_layer) || texture_dirty_;
     }
     tooltip("Delete the selected layer");
@@ -3935,7 +3964,7 @@ void EditorApp::draw_layers_panel() {
     }
     tooltip("Merge the selected layer into the layer below");
     ImGui::SameLine();
-    if (guarded_button("Depth Map", depth_job_running_, ImVec2(92.0f, 0.0f))) {
+    if (guarded_button("Depth Map", depth_job_running_ || !has_layers, ImVec2(92.0f, 0.0f))) {
         depth_source_layer_ = document_.active_layer;
         depth_map_popup_requested_ = true;
         depth_map_open_ = true;
@@ -4375,6 +4404,9 @@ bool EditorApp::try_gpu_effect(EffectPreviewKind kind, std::vector<Pixel>& out_p
     if (!settings_.heavy_gpu_optimization || kind == EffectPreviewKind::None) {
         return false;
     }
+    if (!document_.has_active_cel()) {
+        return false;
+    }
     if (kind == EffectPreviewKind::DepthOfField && !valid_depth_of_field_layer(document_)) {
         return false;
     }
@@ -4397,6 +4429,9 @@ bool EditorApp::try_gpu_effect(EffectPreviewKind kind, std::vector<Pixel>& out_p
 
 bool EditorApp::try_mps_effect(EffectPreviewKind kind, std::vector<Pixel>& out_pixels) {
     if (!settings_.heavy_gpu_optimization || !settings_.mps_backend || kind == EffectPreviewKind::None) {
+        return false;
+    }
+    if (!document_.has_active_cel()) {
         return false;
     }
 #if defined(__APPLE__)
@@ -4427,6 +4462,9 @@ bool EditorApp::try_gpu_affine_transform(float angle_degrees,
     if (!settings_.heavy_gpu_optimization || resampling == ResamplingMode::Bicubic) {
         return false;
     }
+    if (!document_.has_active_cel()) {
+        return false;
+    }
     GpuEffectRequest request;
     request.mode = GpuEffectMode::AffineTransform;
     request.params = {radians(angle_degrees),
@@ -4453,6 +4491,10 @@ bool EditorApp::apply_affine_transform_to_document(const char* undo_name,
                                                    int pan_x,
                                                    int pan_y,
                                                    ResamplingMode resampling) {
+    if (!document_.has_active_cel()) {
+        set_status("Create a layer to edit pixels");
+        return false;
+    }
     std::vector<Pixel> gpu_pixels;
     if (try_gpu_affine_transform(angle_degrees, zoom, pan_x, pan_y, resampling, gpu_pixels)) {
         auto before = document_.snapshot_active_cel();
@@ -4474,6 +4516,10 @@ bool EditorApp::apply_affine_transform_to_document(const char* undo_name,
 
 bool EditorApp::apply_effect_to_document(EffectPreviewKind kind) {
     if (kind == EffectPreviewKind::None) {
+        return false;
+    }
+    if (!document_.has_active_cel()) {
+        set_status("Create a layer to edit pixels");
         return false;
     }
     if (kind == EffectPreviewKind::DepthOfField && !valid_depth_of_field_layer(document_)) {
@@ -4667,6 +4713,12 @@ void EditorApp::rebuild_effect_preview() {
     if (!effect_preview_active_ || effect_preview_kind_ == EffectPreviewKind::None) {
         return;
     }
+    if (!document_.has_active_cel()) {
+        composite_ = document_.composite_active();
+        canvas_texture_.update(document_.width, document_.height, composite_);
+        effect_preview_dirty_ = false;
+        return;
+    }
     effect_preview_document_ = document_;
     std::vector<Pixel> gpu_pixels;
     if (try_gpu_effect(effect_preview_kind_, gpu_pixels)) {
@@ -4681,6 +4733,12 @@ void EditorApp::rebuild_effect_preview() {
 
 void EditorApp::rebuild_rotate_zoom_preview() {
     rotate_zoom_preview_document_ = document_;
+    if (!rotate_zoom_preview_document_.has_active_cel()) {
+        auto preview = rotate_zoom_preview_document_.composite_active();
+        transform_preview_texture_.update(rotate_zoom_preview_document_.width, rotate_zoom_preview_document_.height, preview);
+        rotate_zoom_preview_dirty_ = false;
+        return;
+    }
     apply_rotate_zoom(rotate_zoom_preview_document_,
                       rotate_zoom_angle_,
                       rotate_zoom_zoom_,
@@ -5114,7 +5172,9 @@ void EditorApp::insert_depth_map_layer(const DepthExtractionResult& result) {
         report_error("Depth Map", "Depth result size does not match the document");
         return;
     }
-    const int source_layer = std::clamp(depth_source_layer_, 0, static_cast<int>(document_.layers.size()) - 1);
+    const int source_layer = document_.layers.empty()
+                                 ? 0
+                                 : std::clamp(depth_source_layer_, 0, static_cast<int>(document_.layers.size()) - 1);
     const std::string source_name = document_.layers.empty() ? std::string("Layer") : document_.layers[static_cast<std::size_t>(source_layer)].name;
     const int insert_index = std::min(source_layer + 1, static_cast<int>(document_.layers.size()));
     document_.insert_layer(insert_index, source_name + " Depth Map", result.pixels, "Generate Depth Map");
@@ -6200,10 +6260,12 @@ void EditorApp::draw_status_bar() {
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x, viewport->WorkPos.y + viewport->WorkSize.y - 24.0f));
     ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, 24.0f));
     ImGui::Begin("Status", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    const int layer_count = static_cast<int>(document_.layers.size());
+    const int shown_layer = layer_count == 0 ? 0 : document_.active_layer + 1;
     ImGui::Text("%s | %dx%d | Frame %d/%d | Layer %d/%d | %s",
                 status_, document_.width, document_.height,
                 document_.active_frame + 1, static_cast<int>(document_.frames.size()),
-                document_.active_layer + 1, static_cast<int>(document_.layers.size()),
+                shown_layer, layer_count,
                 tool_name(tool_.tool));
     ImGui::End();
 }

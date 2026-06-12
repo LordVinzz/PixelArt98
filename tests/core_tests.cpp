@@ -251,6 +251,24 @@ static void test_animation_layers() {
     assert(doc.remove_layer(0));
     assert(doc.layers.size() == 1);
     assert(doc.frames[0].cels.size() == 1);
+
+    auto empty_layers = Document::create(7, 5);
+    assert(empty_layers.remove_layer(0));
+    assert(empty_layers.layers.empty());
+    assert(empty_layers.frames.size() == 1);
+    assert(empty_layers.frames[0].cels.empty());
+    assert(empty_layers.composite_active().size() == 35);
+    empty_layers.add_layer("Paint");
+    assert(empty_layers.layers.size() == 1);
+    assert(empty_layers.frames[0].cels.size() == 1);
+    assert(empty_layers.active_layer == 0);
+    assert(empty_layers.active_cel().pixels.size() == 35);
+    assert(empty_layers.undo());
+    assert(empty_layers.layers.empty());
+    assert(empty_layers.frames[0].cels.empty());
+    assert(empty_layers.redo());
+    assert(empty_layers.layers.size() == 1);
+    assert(empty_layers.active_cel().pixels.size() == 35);
 }
 
 static void test_layer_masks_and_clipping() {

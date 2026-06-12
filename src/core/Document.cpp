@@ -396,6 +396,20 @@ bool Document::valid() const {
     return width > 0 && height > 0 && !layers.empty() && !frames.empty();
 }
 
+bool Document::has_active_cel() const {
+    if (active_frame < 0 || active_frame >= static_cast<int>(frames.size()) ||
+        active_layer < 0 || active_layer >= static_cast<int>(layers.size())) {
+        return false;
+    }
+    const Frame& frame = frames[static_cast<std::size_t>(active_frame)];
+    if (active_layer >= static_cast<int>(frame.cels.size())) {
+        return false;
+    }
+    const std::size_t expected_size = static_cast<std::size_t>(std::max(0, width)) *
+                                      static_cast<std::size_t>(std::max(0, height));
+    return frame.cels[static_cast<std::size_t>(active_layer)].pixels.size() == expected_size;
+}
+
 bool Document::in_bounds(int x, int y) const {
     return x >= 0 && y >= 0 && x < width && y < height;
 }
@@ -421,10 +435,16 @@ const Cel& Document::active_cel() const {
 }
 
 std::vector<Pixel> Document::snapshot_active_cel() const {
+    if (!has_active_cel()) {
+        return {};
+    }
     return active_cel().pixels;
 }
 
 void Document::commit_active_cel_edit(const std::string& name, std::vector<Pixel> before) {
+    if (!has_active_cel()) {
+        return;
+    }
     const auto& after = active_cel().pixels;
     if (before == after) {
         return;
@@ -537,8 +557,8 @@ bool Document::undo() {
     if (cmd.before_selection) selection = *cmd.before_selection;
     if (cmd.before_palette) palette = *cmd.before_palette;
     apply_tile_diffs(*this, cmd.pixel_diffs, false);
-    active_frame = std::clamp(cmd.before_active_frame, 0, static_cast<int>(frames.size()) - 1);
-    active_layer = std::clamp(cmd.before_active_layer, 0, static_cast<int>(layers.size()) - 1);
+    active_frame = frames.empty() ? 0 : std::clamp(cmd.before_active_frame, 0, static_cast<int>(frames.size()) - 1);
+    active_layer = layers.empty() ? 0 : std::clamp(cmd.before_active_layer, 0, static_cast<int>(layers.size()) - 1);
     redo_stack_.push_back(std::move(cmd));
     return true;
 }
@@ -555,8 +575,8 @@ bool Document::redo() {
     if (cmd.after_selection) selection = *cmd.after_selection;
     if (cmd.after_palette) palette = *cmd.after_palette;
     apply_tile_diffs(*this, cmd.pixel_diffs, true);
-    active_frame = std::clamp(cmd.after_active_frame, 0, static_cast<int>(frames.size()) - 1);
-    active_layer = std::clamp(cmd.after_active_layer, 0, static_cast<int>(layers.size()) - 1);
+    active_frame = frames.empty() ? 0 : std::clamp(cmd.after_active_frame, 0, static_cast<int>(frames.size()) - 1);
+    active_layer = layers.empty() ? 0 : std::clamp(cmd.after_active_layer, 0, static_cast<int>(layers.size()) - 1);
     undo_stack_.push_back(std::move(cmd));
     return true;
 }
@@ -587,12 +607,18 @@ void Document::add_layer(const std::string& name) {
     auto before_tags = tags;
     int before_active_layer = active_layer;
     int before_active_frame = active_frame;
+    if (frames.empty()) {
+        frames.push_back(Frame{});
+        active_frame = 0;
+    }
+    const std::size_t expected_size = static_cast<std::size_t>(std::max(0, width)) *
+                                      static_cast<std::size_t>(std::max(0, height));
     Layer layer;
     layer.name = name.empty() ? "Layer" : name;
     layers.push_back(std::move(layer));
     for (auto& frame : frames) {
         Cel cel;
-        cel.pixels.assign(static_cast<std::size_t>(width * height), 0);
+        cel.pixels.assign(expected_size, 0);
         frame.cels.push_back(std::move(cel));
     }
     active_layer = static_cast<int>(layers.size()) - 1;
@@ -657,7 +683,7 @@ void Document::duplicate_layer(int index) {
 }
 
 bool Document::remove_layer(int index) {
-    if (layers.size() <= 1 || index < 0 || index >= static_cast<int>(layers.size())) {
+    if (index < 0 || index >= static_cast<int>(layers.size())) {
         return false;
     }
     auto before_layers = layers;
@@ -665,11 +691,14 @@ bool Document::remove_layer(int index) {
     auto before_tags = tags;
     int before_active_layer = active_layer;
     int before_active_frame = active_frame;
+    floating_selection.clear();
     layers.erase(layers.begin() + index);
     for (auto& frame : frames) {
-        frame.cels.erase(frame.cels.begin() + index);
+        if (index < static_cast<int>(frame.cels.size())) {
+            frame.cels.erase(frame.cels.begin() + index);
+        }
     }
-    active_layer = std::clamp(active_layer, 0, static_cast<int>(layers.size()) - 1);
+    active_layer = layers.empty() ? 0 : std::clamp(active_layer, 0, static_cast<int>(layers.size()) - 1);
     commit_structure_edit("Remove Layer", std::move(before_layers), std::move(before_frames), std::move(before_tags), before_active_layer, before_active_frame);
     return true;
 }
@@ -826,12 +855,15 @@ std::vector<Pixel> Document::composite_frame(int frame_index) const {
         return out;
     }
     const auto& frame = frames[static_cast<std::size_t>(frame_index)];
-    for (std::size_t layer_index = 0; layer_index < layers.size(); ++layer_index) {
+    for (std::size_t layer_index = 0; layer_index < layers.size() && layer_index < frame.cels.size(); ++layer_index) {
         const Layer& layer = layers[layer_index];
         if (!layer.visible || layer.opacity <= 0.0f) {
             continue;
         }
         const Cel& c = frame.cels[layer_index];
+        if (c.pixels.size() != out.size()) {
+            continue;
+        }
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 int sx = x - c.x;
@@ -891,6 +923,9 @@ std::array<int, 256> Document::histogram_channel(int channel) const {
 }
 
 void Document::replace_active_pixels(std::vector<Pixel> pixels, const std::string& undo_name) {
+    if (!has_active_cel()) {
+        return;
+    }
     if (pixels.size() != active_cel().pixels.size()) {
         return;
     }
@@ -900,6 +935,9 @@ void Document::replace_active_pixels(std::vector<Pixel> pixels, const std::strin
 }
 
 bool Document::delete_selected_pixels(const std::string& undo_name) {
+    if (!has_active_cel()) {
+        return false;
+    }
     if (!selection.active || selection.selected_count() == 0) {
         return false;
     }
@@ -928,6 +966,9 @@ bool Document::delete_selected_pixels(const std::string& undo_name) {
 }
 
 bool Document::begin_floating_selection() {
+    if (!has_active_cel()) {
+        return false;
+    }
     auto selection_bounds = selection.bounds();
     if (!selection_bounds) {
         return false;
@@ -970,7 +1011,7 @@ void Document::move_floating_selection(int dx, int dy) {
 }
 
 void Document::cancel_floating_selection() {
-    if (!floating_selection.active) {
+    if (!floating_selection.active || !has_active_cel()) {
         return;
     }
     auto& pixels = active_cel().pixels;
@@ -990,7 +1031,7 @@ void Document::cancel_floating_selection() {
 }
 
 void Document::commit_floating_selection(const std::string& undo_name, std::vector<Pixel> before) {
-    if (!floating_selection.active) {
+    if (!floating_selection.active || !has_active_cel()) {
         return;
     }
     auto& pixels = active_cel().pixels;

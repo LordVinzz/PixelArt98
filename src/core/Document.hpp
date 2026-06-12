@@ -162,6 +162,7 @@ public:
     static Document create(int w, int h);
 
     bool valid() const;
+    bool has_active_cel() const;
     bool in_bounds(int x, int y) const;
     int pixel_index(int x, int y) const;
 
