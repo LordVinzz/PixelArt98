@@ -62,7 +62,8 @@ enum class GpuEffectMode {
     AffineTransform,
     TonalRange,
     Curves,
-    Temperature
+    Temperature,
+    DepthOfField
 };
 
 struct GpuEffectRequest {
@@ -74,6 +75,7 @@ struct GpuEffectRequest {
     int curve_point_count = 0;
     Pixel primary = rgba(0, 0, 0, 255);
     Pixel secondary = rgba(255, 255, 255, 255);
+    std::vector<Pixel> depth_pixels;
 };
 
 struct GpuBackendCapabilities {
@@ -125,6 +127,7 @@ private:
     unsigned int framebuffer_ = 0;
     unsigned int output_texture_ = 0;
     unsigned int source_texture_ = 0;
+    unsigned int depth_texture_ = 0;
     unsigned int mask_texture_ = 0;
     unsigned int vertex_array_ = 0;
     unsigned int vertex_buffer_ = 0;

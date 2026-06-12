@@ -135,6 +135,16 @@ float4 blur_box(texture2d<float, access::read> source, int2 p, constant Uniforms
     return sum / max(1.0, count);
 }
 
+int depth_of_field_radius(texture2d<float, access::read> depth_tex, uint2 gid, constant Uniforms& u) {
+    float depth = depth_tex.read(gid).r * 255.0;
+    float focus = clamp(u.params.x, 0.0, 1.0) * 255.0;
+    float aperture = clamp(u.params.y, 0.0, 1.0);
+    float falloff = max(1.0, u.params.z);
+    float max_radius = clamp(u.params.w, 1.0, 32.0);
+    float amount = clamp(abs(depth - focus) / falloff, 0.0, 1.0) * aperture;
+    return int(floor(amount * max_radius + 0.5001));
+}
+
 float4 edge_color(texture2d<float, access::read> source, int2 p, constant Uniforms& u) {
     float left = luma(read_px(source, p + int2(-1, 0), u).rgb);
     float right = luma(read_px(source, p + int2(1, 0), u).rgb);
@@ -177,6 +187,7 @@ float evaluate_point_curve(float value, constant Uniforms& u) {
 kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[texture(0)]],
                                    texture2d<float, access::read> mask_tex [[texture(1)]],
                                    texture2d<float, access::write> dest [[texture(2)]],
+                                   texture2d<float, access::read> depth_tex [[texture(3)]],
                                    constant Uniforms& u [[buffer(0)]],
                                    uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= u.width || gid.y >= u.height) {
@@ -316,6 +327,9 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
                                warm * 12.0 + cool * 8.0,
                                -warm * 35.0 + cool * 45.0) / 255.0;
         out = float4(clamp(src.rgb + offset, 0.0, 1.0), src.a);
+    } else if (u.mode == 47) {
+        int radius = depth_of_field_radius(depth_tex, gid, u);
+        out = radius <= 0 ? src : blur_box(source, p, u, radius);
     } else {
         float2 uv = float2(gid) / float2(max(1u, u.width), max(1u, u.height));
         float2 center = float2(0.5);
@@ -359,6 +373,7 @@ struct MpsEffectRenderer::Impl {
     __strong id<MTLLibrary> library = nil;
     __strong id<MTLComputePipelineState> pipeline = nil;
     __strong id<MTLTexture> source_texture = nil;
+    __strong id<MTLTexture> depth_texture = nil;
     __strong id<MTLTexture> mask_texture = nil;
     __strong id<MTLTexture> output_texture = nil;
     int width = 0;
@@ -495,6 +510,32 @@ static Document extract_mps_tile_document(const Document& document,
     return tile;
 }
 
+static std::vector<Pixel> extract_mps_tile_pixels(const std::vector<Pixel>& pixels,
+                                                  int width,
+                                                  int height,
+                                                  int core_x,
+                                                  int core_y,
+                                                  int core_w,
+                                                  int core_h,
+                                                  int halo) {
+    const int left = std::min(halo, core_x);
+    const int top = std::min(halo, core_y);
+    const int right = std::min(halo, width - (core_x + core_w));
+    const int bottom = std::min(halo, height - (core_y + core_h));
+    const int tile_x = core_x - left;
+    const int tile_y = core_y - top;
+    const int tile_w = core_w + left + right;
+    const int tile_h = core_h + top + bottom;
+    std::vector<Pixel> tile(static_cast<std::size_t>(tile_w * tile_h), 0);
+    for (int y = 0; y < tile_h; ++y) {
+        for (int x = 0; x < tile_w; ++x) {
+            tile[static_cast<std::size_t>(y * tile_w + x)] =
+                pixels[static_cast<std::size_t>((tile_y + y) * width + tile_x + x)];
+        }
+    }
+    return tile;
+}
+
 bool MpsEffectRenderer::render_full_active_cel(const Document& document, const GpuEffectRequest& request) {
     auto& impl = *impl_;
     @autoreleasepool {
@@ -547,15 +588,20 @@ bool MpsEffectRenderer::render_full_active_cel(const Document& document, const G
             last_error_ = "MPS backend skipped: active cel pixel buffer has the wrong size";
             return false;
         }
+        if (request.mode == GpuEffectMode::DepthOfField && request.depth_pixels.size() != pixel_count) {
+            last_error_ = "MPS depth of field skipped: depth pixel buffer has the wrong size";
+            return false;
+        }
 
         if (impl.width != document.width || impl.height != document.height ||
-            impl.source_texture == nil || impl.mask_texture == nil || impl.output_texture == nil) {
+            impl.source_texture == nil || impl.depth_texture == nil || impl.mask_texture == nil || impl.output_texture == nil) {
             impl.source_texture = make_texture(impl.device, document.width, document.height);
+            impl.depth_texture = make_texture(impl.device, document.width, document.height);
             impl.mask_texture = make_texture(impl.device, document.width, document.height);
             impl.output_texture = make_texture(impl.device, document.width, document.height);
             impl.width = document.width;
             impl.height = document.height;
-            if (impl.source_texture == nil || impl.mask_texture == nil || impl.output_texture == nil) {
+            if (impl.source_texture == nil || impl.depth_texture == nil || impl.mask_texture == nil || impl.output_texture == nil) {
                 last_error_ = "MPS backend unavailable: could not allocate textures";
                 return false;
             }
@@ -566,6 +612,11 @@ bool MpsEffectRenderer::render_full_active_cel(const Document& document, const G
                                 mipmapLevel:0
                                   withBytes:pixels.data()
                                 bytesPerRow:static_cast<NSUInteger>(document.width * static_cast<int>(sizeof(Pixel)))];
+        const Pixel* depth_bytes = request.mode == GpuEffectMode::DepthOfField ? request.depth_pixels.data() : pixels.data();
+        [impl.depth_texture replaceRegion:region
+                               mipmapLevel:0
+                                 withBytes:depth_bytes
+                               bytesPerRow:static_cast<NSUInteger>(document.width * static_cast<int>(sizeof(Pixel)))];
 
         impl.mask_pixels.assign(pixel_count, rgba(255, 255, 255, 255));
         if (document.selection.active && document.selection.mask.size() == pixel_count) {
@@ -617,6 +668,7 @@ bool MpsEffectRenderer::render_full_active_cel(const Document& document, const G
             [encoder setTexture:impl.source_texture atIndex:0];
             [encoder setTexture:impl.mask_texture atIndex:1];
             [encoder setTexture:impl.output_texture atIndex:2];
+            [encoder setTexture:impl.depth_texture atIndex:3];
             [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
 
             const NSUInteger thread_width = std::min<NSUInteger>(16, impl.pipeline.threadExecutionWidth);
@@ -663,7 +715,7 @@ bool MpsEffectRenderer::render_active_cel(const Document& document, const GpuEff
         return false;
     }
 
-    const std::uint64_t full_footprint = mps_texture_footprint(document.width, document.height, 3);
+    const std::uint64_t full_footprint = mps_texture_footprint(document.width, document.height, request.mode == GpuEffectMode::DepthOfField ? 4 : 3);
     const bool exceeds_texture_size = caps.max_texture_size > 0 &&
                                       (document.width > caps.max_texture_size || document.height > caps.max_texture_size);
     const bool exceeds_budget = caps.working_texture_budget > 0 && full_footprint > caps.working_texture_budget;
@@ -684,6 +736,10 @@ bool MpsEffectRenderer::render_active_cel(const Document& document, const GpuEff
         last_error_ = "MPS backend skipped: active cel pixel buffer has the wrong size";
         return false;
     }
+    if (request.mode == GpuEffectMode::DepthOfField && request.depth_pixels.size() != pixel_count) {
+        last_error_ = "MPS depth of field skipped: depth pixel buffer has the wrong size";
+        return false;
+    }
 
     const int halo = GpuEffectRenderer::effect_chunk_halo(request);
     const int chunk_extent = GpuEffectRenderer::choose_chunk_extent(document.width, document.height, halo, caps);
@@ -702,7 +758,11 @@ bool MpsEffectRenderer::render_active_cel(const Document& document, const GpuEff
             const int left = std::min(halo, x);
             const int top = std::min(halo, y);
             Document tile = extract_mps_tile_document(document, x, y, core_w, core_h, halo);
-            if (!render_full_active_cel(tile, request) || !read_output_pixels(tile_output)) {
+            GpuEffectRequest tile_request = request;
+            if (request.mode == GpuEffectMode::DepthOfField) {
+                tile_request.depth_pixels = extract_mps_tile_pixels(request.depth_pixels, document.width, document.height, x, y, core_w, core_h, halo);
+            }
+            if (!render_full_active_cel(tile, tile_request) || !read_output_pixels(tile_output)) {
                 if (last_error_.empty()) {
                     last_error_ = "MPS backend skipped: chunk render failed";
                 }

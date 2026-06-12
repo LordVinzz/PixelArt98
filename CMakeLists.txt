@@ -23,6 +23,23 @@ option(PIXELART_ENABLE_ANIMATION "Enable animation timeline features" ON)
 option(PIXELART_ENABLE_MODEL "Enable cuboid model texturing features" ON)
 option(PIXELART_BUILD_TESTS "Build unit tests" ON)
 option(PIXELART_USE_LINUX_PORTAL_FILE_DIALOGS "Use xdg-desktop-portal for native Linux file dialogs" ON)
+option(PIXELART_ENABLE_ONNXRUNTIME "Enable ONNX Runtime-backed depth map extraction when ONNX Runtime is installed" ON)
+option(PIXELART_ENABLE_OPENCV_DNN "Enable OpenCV DNN-backed depth map extraction when OpenCV is installed" OFF)
+set(ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime SDK root directory")
+
+if(PIXELART_ENABLE_ONNXRUNTIME)
+    find_path(ONNXRUNTIME_INCLUDE_DIR
+        NAMES onnxruntime_cxx_api.h
+        HINTS ${ONNXRUNTIME_ROOT} ENV ONNXRUNTIME_ROOT
+        PATH_SUFFIXES include include/onnxruntime/core/session)
+    find_library(ONNXRUNTIME_LIBRARY
+        NAMES onnxruntime
+        HINTS ${ONNXRUNTIME_ROOT} ENV ONNXRUNTIME_ROOT
+        PATH_SUFFIXES lib lib64)
+endif()
+if(PIXELART_ENABLE_OPENCV_DNN)
+    find_package(OpenCV QUIET COMPONENTS core dnn imgproc)
+endif()
 
 include(cmake/Dependencies.cmake)
 
@@ -105,6 +122,7 @@ pixelart_configure_project_target(pixelart_core)
 
 add_library(pixelart_app
     src/platform/NativeFileDialogProvider.cpp
+    src/depth/DepthMapExtractor.cpp
     src/render/GpuEffectRenderer.cpp
     src/render/GLCanvasTexture.cpp
     src/render/Renderer3D.cpp
@@ -123,6 +141,26 @@ else()
     target_sources(pixelart_app PRIVATE src/render/MpsEffectRenderer.cpp)
 endif()
 target_include_directories(pixelart_app PUBLIC src)
+if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
+    target_include_directories(pixelart_app SYSTEM PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+    target_link_libraries(pixelart_app PRIVATE ${ONNXRUNTIME_LIBRARY})
+    target_compile_definitions(pixelart_app PUBLIC PIXELART_HAS_ONNXRUNTIME=1)
+else()
+    target_compile_definitions(pixelart_app PUBLIC PIXELART_HAS_ONNXRUNTIME=0)
+    if(PIXELART_ENABLE_ONNXRUNTIME)
+        message(STATUS "ONNX Runtime not found; depth extraction will try other model backends or stay unavailable.")
+    endif()
+endif()
+if(OpenCV_FOUND)
+    target_include_directories(pixelart_app SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(pixelart_app PRIVATE ${OpenCV_LIBS})
+    target_compile_definitions(pixelart_app PUBLIC PIXELART_HAS_OPENCV_DNN=1)
+else()
+    target_compile_definitions(pixelart_app PUBLIC PIXELART_HAS_OPENCV_DNN=0)
+    if(PIXELART_ENABLE_OPENCV_DNN)
+        message(STATUS "OpenCV DNN not found; depth extraction will skip the OpenCV model backend.")
+    endif()
+endif()
 target_link_libraries(pixelart_app PUBLIC pixelart_core imgui_backend glad_gl_core_33 nfd::nfd OpenGL::GL PRIVATE stb_headers)
 if(APPLE)
     target_link_libraries(pixelart_app PUBLIC "-framework Foundation" "-framework Metal" "-framework MetalPerformanceShaders")

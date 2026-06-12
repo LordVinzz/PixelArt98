@@ -19,10 +19,15 @@ Legend: `✓` strong/native support, `~` partial or workflow-dependent support, 
 | Adjustment-style image controls | ✓ | ✓ | ✓ | ~ |
 | Non-destructive adjustment layers | ✗ | ✓ | ✓ | ✗ |
 | Per-channel histogram | ✓ | ✓ | ✓ | ~ |
+| Editable RGB curves | ✓ | ✓ | ✓ | ~ |
+| Tonal range/shadow-highlight controls | ✓ | ✓ | ✓ | ~ |
 | Rotate/zoom image transform preview | ✓ | ✓ | ✓ | ✓ |
 | Straighten tool | ✓ | ✓ | ✓ | ~ |
+| Undoable transform/history workflow | ✓ | ✓ | ~ | ✓ |
 | GPU path for heavy images/effects | ✓ | ✓ | ✓ | ✗ |
 | Metal/MPS backend on macOS | ✓ | ~ | ~ | ✗ |
+| Tiled processing for oversized effects | ✓ | ✓ | ✓ | ✗ |
+| Depth-map generation from a layer/photo | ✓ | ~ | ~ | ✗ |
 | Animation frames/timeline | ✓ | ~ | ✗ | ✓ |
 | Onion skinning | ✓ | ~ | ✗ | ✓ |
 | GIF export | ✓ | ✓ | ✗ | ✓ |
@@ -41,12 +46,15 @@ Legend: `✓` strong/native support, `~` partial or workflow-dependent support, 
 
 PixelArt98 is not trying to clone every professional Adobe feature. Photoshop and Lightroom are deeper for commercial photography, RAW processing, print workflows, and non-destructive production pipelines. Aseprite is more mature for pure sprite animation, tilemaps, scripting, and pixel-art production polish.
 
-PixelArt98 is aiming at a different balance: a free, native, understandable editor with pixel work, animation, layers, GPU-aware heavy image handling, and block-model texture editing in one place.
+PixelArt98 is aiming at a different balance: a free, native, understandable editor with pixel work, animation, layers, GPU-aware heavy image handling, depth-map generation when real model backends are available, and block-model texture editing in one place.
 
 ## Sources
 
 - Adobe lists Creative Cloud plans as paid subscriptions that include Photoshop, Lightroom, Acrobat, and related services: <https://www.adobe.com/creativecloud/plans.html>
 - Adobe describes Photoshop features such as layer-based adjustments, Generative Fill, Generative Expand, and the Remove tool: <https://blog.adobe.com/en/publish/2026/01/27/new-photoshop-innovations-provide-creative-pros-more-control-realism-precision>
+- Adobe documents Photoshop GPU usage and GPU-backed performance behavior: <https://helpx.adobe.com/photoshop/desktop/get-started/technical-requirements-installation/photoshop-and-graphics-processor-gpu-card-usage.html>
+- Adobe documents Photoshop depth-map use through Lens Blur and Depth Blur Neural Filters: <https://helpx.adobe.com/photoshop/desktop/effects-filters/blur-sharpen-filters/create-depth-of-field-with-lens-blur.html> and <https://helpx.adobe.com/photoshop/using/neural-filters-list-and-faq.html>
+- Adobe documents Lightroom Lens Blur depth-map behavior and refinement controls: <https://helpx.adobe.com/lightroom-classic/help/lens-blur.html>
 - Aseprite lists pixel-art and animation features including onion skinning, pixel-perfect freehand, and RotSprite: <https://www.aseprite.org/features/>
 - Aseprite documentation describes layers, frames, cels, and project files: <https://aseprite.com/docs/basics/>
 - Aseprite documentation describes tilemap support: <https://aseprite.com/docs/tilemap/>

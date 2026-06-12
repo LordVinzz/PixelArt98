@@ -8,6 +8,7 @@
 #include "core/Filters.hpp"
 #include "core/Model.hpp"
 #include "core/Tools.hpp"
+#include "depth/DepthMapExtractor.hpp"
 #include "render/GpuEffectRenderer.hpp"
 #include "render/GLCanvasTexture.hpp"
 #include "render/MpsEffectRenderer.hpp"
@@ -17,10 +18,14 @@
 
 #include <imgui.h>
 
+#include <atomic>
 #include <array>
 #include <deque>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace px {
@@ -73,7 +78,8 @@ enum class EffectPreviewKind {
     Turbulence,
     EdgeDetect,
     Emboss,
-    Relief
+    Relief,
+    DepthOfField
 };
 
 struct ErrorConsoleEntry {
@@ -157,6 +163,10 @@ private:
     bool rotate_zoom_popup_requested_ = false;
     bool rotate_zoom_open_ = false;
     bool rotate_zoom_preview_dirty_ = false;
+    bool depth_map_popup_requested_ = false;
+    bool depth_map_open_ = false;
+    bool depth_job_running_ = false;
+    bool depth_result_pending_ = false;
     bool error_console_open_ = false;
     bool error_console_scroll_to_bottom_ = false;
     bool model_render_error_reported_ = false;
@@ -174,6 +184,14 @@ private:
     int canvas_drag_button_ = ImGuiMouseButton_Left;
     int straighten_drag_point_ = -1;
     int image_transform_resampling_ = 2;
+    int depth_source_layer_ = 0;
+    int depth_tile_size_ = 1024;
+    int depth_tile_overlap_ = 128;
+    int depth_of_field_layer_ = 0;
+    int depth_of_field_focus_ = 128;
+    int depth_of_field_aperture_ = 45;
+    int depth_of_field_falloff_ = 35;
+    int depth_of_field_max_radius_ = 12;
     SelectionCombineMode selection_drag_mode_ = SelectionCombineMode::Replace;
     EffectPreviewKind effect_preview_kind_ = EffectPreviewKind::None;
     int drag_start_x_ = 0;
@@ -209,6 +227,12 @@ private:
     Document rotate_zoom_preview_document_;
     Document history_before_document_;
     ModelDocument history_before_model_;
+    std::thread depth_thread_;
+    std::atomic_bool depth_cancel_requested_ = false;
+    std::mutex depth_mutex_;
+    DepthExtractionProgress depth_progress_;
+    DepthExtractionResult depth_result_;
+    std::string depth_error_;
 
     char project_path_[512] = "untitled.pixart";
     char image_path_[512] = "import.png";
@@ -266,6 +290,7 @@ private:
     bool histogram_red_visible_ = true;
     bool histogram_green_visible_ = true;
     bool histogram_blue_visible_ = true;
+    bool depth_of_field_pick_focus_ = false;
 
     void update_playback();
     void refresh_texture();
@@ -311,6 +336,7 @@ private:
     void draw_tile_preview_window();
     void draw_effect_preview_popup();
     void draw_rotate_zoom_popup();
+    void draw_depth_map_popup();
     void draw_undo_tree_window();
     void draw_error_console();
     void draw_status_bar();
@@ -378,6 +404,12 @@ private:
     bool apply_effect_to_document(EffectPreviewKind kind);
     void rebuild_effect_preview();
     void rebuild_rotate_zoom_preview();
+    void start_depth_map_extraction();
+    void finish_depth_map_job_if_ready();
+    void insert_depth_map_layer(const DepthExtractionResult& result);
+    int default_depth_of_field_layer() const;
+    const std::vector<Pixel>* depth_of_field_pixels(const Document& document) const;
+    bool valid_depth_of_field_layer(const Document& document) const;
     void apply_effect_to(Document& target) const;
     void apply_effect_preview_to_document();
     void close_effect_preview(bool apply);

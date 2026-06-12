@@ -3,6 +3,7 @@
 // See LICENSE for details.
 
 #include "core/Document.hpp"
+#include "core/Filters.hpp"
 #include "render/MpsEffectRenderer.hpp"
 
 #include <algorithm>
@@ -188,6 +189,50 @@ int main() {
         std::cerr << "MPS smoke failed: blur output was invalid\n";
         return 1;
     }
+
+    std::vector<Pixel> depth(static_cast<std::size_t>(doc.width * doc.height), rgba(0, 0, 0, 255));
+    for (int y = 0; y < doc.height; ++y) {
+        for (int x = 0; x < doc.width; ++x) {
+            const std::uint8_t depth_value = static_cast<std::uint8_t>((x * 255) / std::max(1, doc.width - 1));
+            depth[static_cast<std::size_t>(y * doc.width + x)] = rgba(depth_value, depth_value, depth_value, 255);
+        }
+    }
+    Document cpu_dof = doc;
+    DepthOfFieldSettings dof_settings;
+    dof_settings.focus_depth = 128;
+    dof_settings.aperture = 100;
+    dof_settings.falloff = 32;
+    dof_settings.max_radius = 4;
+    apply_depth_of_field(cpu_dof, depth, dof_settings);
+
+    GpuEffectRequest dof;
+    dof.mode = GpuEffectMode::DepthOfField;
+    dof.params = {128.0f / 255.0f, 1.0f, 32.0f, 4.0f};
+    dof.depth_pixels = depth;
+    bool dof_matches = renderer.render_active_cel(doc, dof) && renderer.read_output_pixels(pixels) &&
+                       pixels.size() == cpu_dof.active_cel().pixels.size();
+    if (dof_matches) {
+        for (std::size_t i = 0; i < pixels.size(); ++i) {
+            if (!close_pixel(pixels[i], cpu_dof.active_cel().pixels[i])) {
+                std::cerr << "MPS smoke failed: Depth of Field pixel mismatch at " << i
+                          << " actual=(" << static_cast<int>(r(pixels[i])) << ","
+                          << static_cast<int>(g(pixels[i])) << ","
+                          << static_cast<int>(b(pixels[i])) << ","
+                          << static_cast<int>(a(pixels[i])) << ") expected=("
+                          << static_cast<int>(r(cpu_dof.active_cel().pixels[i])) << ","
+                          << static_cast<int>(g(cpu_dof.active_cel().pixels[i])) << ","
+                          << static_cast<int>(b(cpu_dof.active_cel().pixels[i])) << ","
+                          << static_cast<int>(a(cpu_dof.active_cel().pixels[i])) << ")\n";
+                dof_matches = false;
+                break;
+            }
+        }
+    }
+    if (!dof_matches) {
+        std::cerr << "MPS smoke failed: Depth of Field mismatch: " << renderer.last_error() << "\n";
+        return 1;
+    }
+    std::cout << "[PASS] MPS depth of field matches CPU reference\n";
 
     std::cout << "MPS smoke passed\n";
     return 0;

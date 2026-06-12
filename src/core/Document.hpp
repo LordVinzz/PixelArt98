@@ -187,6 +187,7 @@ public:
     void clear_recent_commit_names();
 
     void add_layer(const std::string& name);
+    void insert_layer(int index, const std::string& name, std::vector<Pixel> pixels, const std::string& undo_name);
     void duplicate_layer(int index);
     bool remove_layer(int index);
     void move_layer(int from, int to);

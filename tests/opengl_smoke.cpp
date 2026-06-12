@@ -209,6 +209,59 @@ int main() {
             }
             ok = report_step("OpenGL affine transform matches CPU nearest reference", transform_ok) && ok;
         }
+        {
+            Document dof_doc = Document::create(16, 12);
+            std::vector<Pixel> depth(static_cast<std::size_t>(dof_doc.width * dof_doc.height), rgba(0, 0, 0, 255));
+            for (int y = 0; y < dof_doc.height; ++y) {
+                for (int x = 0; x < dof_doc.width; ++x) {
+                    const std::size_t index = static_cast<std::size_t>(y * dof_doc.width + x);
+                    dof_doc.active_cel().pixels[index] =
+                        rgba(static_cast<std::uint8_t>((x * 17 + y * 9) & 0xff),
+                             static_cast<std::uint8_t>((x * 7 + y * 21) & 0xff),
+                             static_cast<std::uint8_t>((x * 3 + y * 13) & 0xff),
+                             255);
+                    const std::uint8_t depth_value = static_cast<std::uint8_t>((x * 255) / std::max(1, dof_doc.width - 1));
+                    depth[index] = rgba(depth_value, depth_value, depth_value, 255);
+                }
+            }
+            Document cpu_dof_doc = dof_doc;
+            DepthOfFieldSettings dof_settings;
+            dof_settings.focus_depth = 128;
+            dof_settings.aperture = 100;
+            dof_settings.falloff = 32;
+            dof_settings.max_radius = 4;
+            apply_depth_of_field(cpu_dof_doc, depth, dof_settings);
+
+            GpuEffectRequest dof_request;
+            dof_request.mode = GpuEffectMode::DepthOfField;
+            dof_request.params = {128.0f / 255.0f, 1.0f, 32.0f, 4.0f};
+            dof_request.depth_pixels = depth;
+
+            GpuEffectRenderer dof_renderer;
+            std::vector<Pixel> dof_pixels;
+            bool dof_ok = dof_renderer.render_active_cel(dof_doc, dof_request) &&
+                          dof_renderer.read_output_pixels(dof_pixels) &&
+                          outputs_match(dof_pixels, cpu_dof_doc.active_cel().pixels);
+            if (!dof_ok && !dof_renderer.last_error().empty()) {
+                std::cout << "       " << dof_renderer.last_error() << "\n";
+            }
+            ok = report_step("OpenGL depth of field matches CPU reference", dof_ok) && ok;
+
+            GpuBackendCapabilities dof_caps;
+            dof_caps.max_texture_size = 10;
+            dof_caps.working_texture_budget = 10ULL * 10ULL * sizeof(Pixel) * 4ULL;
+            dof_caps.supports_chunking = true;
+            GpuEffectRenderer chunked_dof_renderer;
+            std::vector<Pixel> chunked_dof_pixels;
+            bool chunked_dof_ok = chunked_dof_renderer.render_active_cel(dof_doc, dof_request, &dof_caps) &&
+                                  chunked_dof_renderer.read_output_pixels(chunked_dof_pixels) &&
+                                  chunked_dof_renderer.used_chunking() &&
+                                  outputs_match(dof_pixels, chunked_dof_pixels);
+            if (!chunked_dof_ok && !chunked_dof_renderer.last_error().empty()) {
+                std::cout << "       " << chunked_dof_renderer.last_error() << "\n";
+            }
+            ok = report_step("OpenGL chunked depth of field matches full output", chunked_dof_ok) && ok;
+        }
 #if defined(__APPLE__)
         {
             MpsEffectRenderer mps_renderer;

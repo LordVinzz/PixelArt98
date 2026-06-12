@@ -7,6 +7,7 @@
 #include "core/Document.hpp"
 
 #include <array>
+#include <vector>
 
 namespace px {
 
@@ -33,6 +34,13 @@ struct CurvesSettings {
     bool blue = true;
 };
 
+struct DepthOfFieldSettings {
+    int focus_depth = 128;
+    int aperture = 45;
+    int falloff = 35;
+    int max_radius = 12;
+};
+
 enum class ResamplingMode {
     Nearest,
     Bilinear,
@@ -45,6 +53,7 @@ void apply_temperature(Document& doc, int temperature);
 void apply_levels(Document& doc, const LevelsSettings& settings);
 void apply_tonal_range(Document& doc, int white_point, int highlights, int shadows, int black_point);
 void apply_curves(Document& doc, const CurvesSettings& settings);
+void apply_depth_of_field(Document& doc, const std::vector<Pixel>& depth_pixels, const DepthOfFieldSettings& settings);
 void apply_auto_level(Document& doc);
 void apply_posterize(Document& doc, int levels);
 void apply_invert(Document& doc, bool alpha);

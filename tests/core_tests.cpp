@@ -6,6 +6,7 @@
 #include "core/Filters.hpp"
 #include "core/Model.hpp"
 #include "core/Tools.hpp"
+#include "depth/DepthMapExtractor.hpp"
 #include "io/ProjectIO.hpp"
 #include "render/GpuEffectRenderer.hpp"
 #include "render/Renderer3D.hpp"
@@ -393,6 +394,7 @@ static void test_gpu_chunking_policy() {
         GpuEffectMode::RedEyeRemoval,
         GpuEffectMode::Sharpen,
         GpuEffectMode::SoftenPortrait,
+        GpuEffectMode::DepthOfField,
         GpuEffectMode::EdgeDetect,
         GpuEffectMode::Emboss,
         GpuEffectMode::Outline,
@@ -418,7 +420,7 @@ static void test_gpu_chunking_policy() {
         GpuEffectMode::AffineTransform
     };
 
-    bool covered[47] = {};
+    bool covered[48] = {};
     for (GpuEffectMode mode : chunk_safe) {
         GpuEffectRequest request;
         request.mode = mode;
@@ -439,6 +441,11 @@ static void test_gpu_chunking_policy() {
     blur.mode = GpuEffectMode::GaussianBlur;
     blur.params = {12.0f, 0.0f, 0.0f, 0.0f};
     assert(GpuEffectRenderer::effect_chunk_halo(blur) == 12);
+
+    GpuEffectRequest depth_of_field;
+    depth_of_field.mode = GpuEffectMode::DepthOfField;
+    depth_of_field.params = {128.0f / 255.0f, 1.0f, 32.0f, 9.0f};
+    assert(GpuEffectRenderer::effect_chunk_halo(depth_of_field) == 9);
 
     GpuEffectRequest motion;
     motion.mode = GpuEffectMode::MotionBlur;
@@ -464,6 +471,170 @@ static void test_gpu_chunking_policy() {
     const int modern_extent = GpuEffectRenderer::choose_chunk_extent(9921, 14031, 12, modern_gpu);
     assert(modern_extent >= older_extent);
     assert(modern_extent <= modern_gpu.max_texture_size - 24);
+}
+
+static void test_depth_map_chunking_and_normalization() {
+    const std::vector<DepthTile> tiles = build_depth_tiles(2500, 1300, 1024, 128);
+    assert(tiles.size() == 6);
+    std::vector<bool> covered(static_cast<std::size_t>(2500 * 1300), false);
+    for (const DepthTile& tile : tiles) {
+        assert(tile.width > 0);
+        assert(tile.height > 0);
+        assert(tile.expanded_x <= tile.x);
+        assert(tile.expanded_y <= tile.y);
+        assert(tile.expanded_x + tile.expanded_width >= tile.x + tile.width);
+        assert(tile.expanded_y + tile.expanded_height >= tile.y + tile.height);
+        for (int y = tile.y; y < tile.y + tile.height; ++y) {
+            for (int x = tile.x; x < tile.x + tile.width; ++x) {
+                covered[static_cast<std::size_t>(y * 2500 + x)] = true;
+            }
+        }
+    }
+    assert(std::all_of(covered.begin(), covered.end(), [](bool value) { return value; }));
+
+    std::vector<float> depth = {0.0f, 0.25f, 0.5f, 1.0f};
+    std::vector<Pixel> source = {
+        rgba(10, 10, 10, 255),
+        rgba(20, 20, 20, 255),
+        rgba(30, 30, 30, 255),
+        rgba(40, 40, 40, 0)
+    };
+    std::vector<Pixel> pixels = normalize_depth_to_pixels(depth, source, 2, 2);
+    assert(pixels.size() == 4);
+    assert(r(pixels[0]) == 0);
+    assert(r(pixels[1]) > r(pixels[0]));
+    assert(r(pixels[2]) > r(pixels[1]));
+    assert(r(pixels[2]) == 255);
+    assert(r(pixels[3]) == 0);
+    assert(a(pixels[3]) == 255);
+    assert(depth_pixels_have_full_range(pixels));
+
+    std::vector<float> flat_depth = {0.5f, 0.5f, 0.5f, 0.5f};
+    std::vector<Pixel> flat_pixels = normalize_depth_to_pixels(flat_depth, source, 2, 2);
+    assert(!depth_pixels_have_full_range(flat_pixels));
+}
+
+static void test_depth_map_stitching_aligns_overlapped_tiles() {
+    constexpr int width = 8;
+    constexpr int height = 4;
+    auto expected = [](int x, int y) {
+        return static_cast<float>(x) + static_cast<float>(y) * 0.25f;
+    };
+
+    DepthTile left;
+    left.x = 0;
+    left.y = 0;
+    left.width = 4;
+    left.height = height;
+    left.expanded_x = 0;
+    left.expanded_y = 0;
+    left.expanded_width = 5;
+    left.expanded_height = height;
+
+    DepthTile right;
+    right.x = 4;
+    right.y = 0;
+    right.width = 4;
+    right.height = height;
+    right.expanded_x = 3;
+    right.expanded_y = 0;
+    right.expanded_width = 5;
+    right.expanded_height = height;
+
+    DepthTilePrediction left_prediction;
+    left_prediction.tile = left;
+    left_prediction.depth.resize(static_cast<std::size_t>(left.expanded_width * left.expanded_height));
+    for (int y = 0; y < left.expanded_height; ++y) {
+        for (int x = 0; x < left.expanded_width; ++x) {
+            left_prediction.depth[static_cast<std::size_t>(y * left.expanded_width + x)] =
+                expected(left.expanded_x + x, left.expanded_y + y);
+        }
+    }
+
+    DepthTilePrediction right_prediction;
+    right_prediction.tile = right;
+    right_prediction.depth.resize(static_cast<std::size_t>(right.expanded_width * right.expanded_height));
+    for (int y = 0; y < right.expanded_height; ++y) {
+        for (int x = 0; x < right.expanded_width; ++x) {
+            const float true_depth = expected(right.expanded_x + x, right.expanded_y + y);
+            right_prediction.depth[static_cast<std::size_t>(y * right.expanded_width + x)] = true_depth * 2.0f + 7.0f;
+        }
+    }
+
+    const std::vector<float> stitched = stitch_depth_tiles({left_prediction, right_prediction}, width, height);
+    assert(stitched.size() == static_cast<std::size_t>(width * height));
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const float actual = stitched[static_cast<std::size_t>(y * width + x)];
+            assert(std::abs(actual - expected(x, y)) < 0.05f);
+        }
+    }
+}
+
+static void test_depth_map_layer_insert_is_undoable() {
+    auto doc = Document::create(3, 2);
+    doc.layers[0].name = "Photo";
+    std::vector<Pixel> depth(static_cast<std::size_t>(doc.width * doc.height), rgba(128, 128, 128, 255));
+    doc.insert_layer(1, "Photo Depth Map", depth, "Generate Depth Map");
+    assert(doc.layers.size() == 2);
+    assert(doc.active_layer == 1);
+    assert(doc.layers[1].name == "Photo Depth Map");
+    assert(r(doc.active_cel().pixels[0]) == 128);
+    assert(doc.undo());
+    assert(doc.layers.size() == 1);
+    assert(doc.layers[0].name == "Photo");
+    assert(doc.redo());
+    assert(doc.layers.size() == 2);
+    assert(r(doc.active_cel().pixels[0]) == 128);
+}
+
+static void test_depth_of_field_filter() {
+    auto doc = Document::create(5, 1);
+    for (int x = 0; x < doc.width; ++x) {
+        doc.active_cel().pixels[static_cast<std::size_t>(x)] =
+            rgba(static_cast<std::uint8_t>(x * 50), 0, 0, static_cast<std::uint8_t>(220 - x * 10));
+    }
+    const std::vector<Pixel> before = doc.active_cel().pixels;
+    std::vector<Pixel> depth = {
+        rgba(0, 0, 0, 255),
+        rgba(64, 64, 64, 255),
+        rgba(128, 128, 128, 255),
+        rgba(192, 192, 192, 255),
+        rgba(255, 255, 255, 255)
+    };
+    DepthOfFieldSettings settings;
+    settings.focus_depth = 128;
+    settings.aperture = 100;
+    settings.falloff = 32;
+    settings.max_radius = 2;
+    apply_depth_of_field(doc, depth, settings);
+    const auto& pixels = doc.active_cel().pixels;
+    assert(pixels[2] == before[2]);
+    assert(pixels[0] != before[0]);
+    assert(a(pixels[0]) < a(before[0]));
+    assert(a(pixels[0]) > 0);
+
+    auto selected = Document::create(3, 1);
+    selected.active_cel().pixels[0] = rgba(0, 0, 0, 255);
+    selected.active_cel().pixels[1] = rgba(128, 0, 0, 255);
+    selected.active_cel().pixels[2] = rgba(255, 0, 0, 255);
+    std::vector<Pixel> selected_depth = {
+        rgba(0, 0, 0, 255),
+        rgba(0, 0, 0, 255),
+        rgba(0, 0, 0, 255)
+    };
+    selected.selection.resize(3, 1);
+    selected.selection.active = true;
+    selected.selection.mask = {0, 255, 0};
+    apply_depth_of_field(selected, selected_depth, settings);
+    assert(r(selected.active_cel().pixels[0]) == 0);
+    assert(r(selected.active_cel().pixels[1]) != 128);
+    assert(r(selected.active_cel().pixels[2]) == 255);
+
+    auto mismatch = Document::create(2, 1);
+    const auto mismatch_before = mismatch.active_cel().pixels;
+    apply_depth_of_field(mismatch, {}, settings);
+    assert(mismatch.active_cel().pixels == mismatch_before);
 }
 
 static Pixel composite_blend_sample(LayerBlendMode mode) {
@@ -597,6 +768,9 @@ static void test_app_settings_roundtrip() {
     settings.auto_open_error_console = false;
     settings.heavy_gpu_optimization = false;
     settings.mps_backend = true;
+    settings.depth_allow_cpu_fallback = false;
+    settings.depth_tile_size = 768;
+    settings.depth_tile_overlap = 96;
     settings.show_tools_panel = false;
     settings.show_colors_panel = false;
     settings.show_layers_panel = false;
@@ -613,6 +787,9 @@ static void test_app_settings_roundtrip() {
     assert(!loaded.auto_open_error_console);
     assert(!loaded.heavy_gpu_optimization);
     assert(!loaded.mps_backend);
+    assert(!loaded.depth_allow_cpu_fallback);
+    assert(loaded.depth_tile_size == 768);
+    assert(loaded.depth_tile_overlap == 96);
     assert(!loaded.show_tools_panel);
     assert(!loaded.show_colors_panel);
     assert(!loaded.show_layers_panel);
@@ -625,6 +802,9 @@ static void test_app_settings_roundtrip() {
     const AppSettings defaults = load_app_settings(settings_path.parent_path() / "pixelart98_missing_settings_test.json", &error);
     assert(defaults.heavy_gpu_optimization);
     assert(!defaults.mps_backend);
+    assert(defaults.depth_allow_cpu_fallback);
+    assert(defaults.depth_tile_size == 1024);
+    assert(defaults.depth_tile_overlap == 128);
     assert(defaults.show_tools_panel);
     assert(defaults.show_colors_panel);
     assert(defaults.show_layers_panel);
@@ -746,6 +926,10 @@ int main() {
     test_v2_tools_and_undo();
     test_v2_layers_frames_tags();
     test_gpu_chunking_policy();
+    test_depth_map_chunking_and_normalization();
+    test_depth_map_stitching_aligns_overlapped_tiles();
+    test_depth_map_layer_insert_is_undoable();
+    test_depth_of_field_filter();
     test_layer_blend_modes();
     test_model_json();
     test_model_transform_helpers();

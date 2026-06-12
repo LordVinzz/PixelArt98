@@ -19,13 +19,18 @@ The app is built as a portable desktop executable for Windows, macOS, and Linux.
 
 ## Features
 
+- New document dialog for starting custom canvases without editing a project file by hand.
 - Pixel canvas with pencil, brush, eraser, line, rectangle, ellipse, fill, gradient, clone stamp, text, selection, lasso, and magic wand tools.
 - Live pixel previews while dragging shape and selection tools.
 - Ctrl-constrained drawing for 1:1 rectangles/ellipses and 45-degree line snapping.
 - Layers with opacity and Paint.NET-style blend modes.
+- Adjustment previews for tonal range, editable RGB curves, histogram-aware edits, and common image filters.
+- Undoable rotate/zoom and straighten transform previews with workspace and history controls.
 - Animation frames, durations, playback, onion-skin preview, spritesheet export, GIF export, and APNG export.
 - Native `.pixart` project files.
 - Minecraft/block-model texture editing with cuboids, UV overlays, wireframes, transparent-face hints, and 3D preview.
+- GPU-accelerated effect previews and heavy-image processing through OpenGL, with capability-based chunking and optional Metal/MPS acceleration on macOS.
+- Optional depth-map layer generation from an existing layer using real depth models through ONNX Runtime or OpenCV DNN when those backends are configured.
 - Pixel-perfect startup splash screen that can be disabled from `Options > Show Splash Screen`.
 
 ## Download
@@ -47,6 +52,12 @@ Requirements:
 - A C++23 compiler: Clang, GCC, or MSVC
 - Git
 - Platform OpenGL development libraries
+
+Optional depth-map extraction support:
+
+- ONNX Runtime SDK, discoverable with `ONNXRUNTIME_ROOT` or standard include/library paths
+- OpenCV with `core`, `dnn`, and `imgproc`, enabled with `-DPIXELART_ENABLE_OPENCV_DNN=ON`
+- `curl` for first-run model downloads when model files are not already cached
 
 Configure, build, and test:
 

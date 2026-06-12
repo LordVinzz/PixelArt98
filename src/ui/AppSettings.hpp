@@ -14,6 +14,9 @@ struct AppSettings {
     bool auto_open_error_console = true;
     bool heavy_gpu_optimization = true;
     bool mps_backend = false;
+    bool depth_allow_cpu_fallback = true;
+    int depth_tile_size = 1024;
+    int depth_tile_overlap = 128;
     bool show_tools_panel = true;
     bool show_colors_panel = true;
     bool show_layers_panel = true;

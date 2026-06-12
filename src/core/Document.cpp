@@ -595,6 +595,44 @@ void Document::add_layer(const std::string& name) {
     commit_structure_edit("Add Layer", std::move(before_layers), std::move(before_frames), std::move(before_tags), before_active_layer, before_active_frame);
 }
 
+void Document::insert_layer(int index, const std::string& name, std::vector<Pixel> pixels, const std::string& undo_name) {
+    if (frames.empty()) {
+        return;
+    }
+    const std::size_t expected_size = static_cast<std::size_t>(std::max(0, width)) * static_cast<std::size_t>(std::max(0, height));
+    if (pixels.size() != expected_size) {
+        return;
+    }
+    auto before_layers = layers;
+    auto before_frames = frames;
+    auto before_tags = tags;
+    int before_active_layer = active_layer;
+    int before_active_frame = active_frame;
+    const int clamped_index = std::clamp(index, 0, static_cast<int>(layers.size()));
+
+    Layer layer;
+    layer.name = name.empty() ? "Layer" : name;
+    layers.insert(layers.begin() + clamped_index, std::move(layer));
+
+    for (int frame_index = 0; frame_index < static_cast<int>(frames.size()); ++frame_index) {
+        Cel cel;
+        cel.pixels.assign(expected_size, 0);
+        if (frame_index == active_frame) {
+            cel.pixels = pixels;
+        }
+        frames[static_cast<std::size_t>(frame_index)].cels.insert(
+            frames[static_cast<std::size_t>(frame_index)].cels.begin() + clamped_index,
+            std::move(cel));
+    }
+    active_layer = clamped_index;
+    commit_structure_edit(undo_name.empty() ? "Insert Layer" : undo_name,
+                          std::move(before_layers),
+                          std::move(before_frames),
+                          std::move(before_tags),
+                          before_active_layer,
+                          before_active_frame);
+}
+
 void Document::duplicate_layer(int index) {
     if (index < 0 || index >= static_cast<int>(layers.size())) {
         return;

@@ -10,6 +10,7 @@
 #include <stb_image.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -640,6 +641,7 @@ const char* effect_preview_name(EffectPreviewKind kind) {
         case EffectPreviewKind::EdgeDetect: return "Edge Detect";
         case EffectPreviewKind::Emboss: return "Emboss";
         case EffectPreviewKind::Relief: return "Relief";
+        case EffectPreviewKind::DepthOfField: return "Depth of Field";
         case EffectPreviewKind::None: return "Effect";
     }
     return "Effect";
@@ -1144,12 +1146,18 @@ EditorApp::EditorApp(FileDialogProvider* dialogs, AppSettings settings)
     if (!settings_.heavy_gpu_optimization) {
         settings_.mps_backend = false;
     }
+    depth_tile_size_ = std::clamp(settings_.depth_tile_size, 64, 4096);
+    depth_tile_overlap_ = std::clamp(settings_.depth_tile_overlap, 0, depth_tile_size_ / 2);
     tool_.primary = rgba(0, 0, 0);
     tool_.secondary = rgba(255, 255, 255);
     reset_history_tree();
 }
 
 EditorApp::~EditorApp() {
+    depth_cancel_requested_.store(true);
+    if (depth_thread_.joinable()) {
+        depth_thread_.join();
+    }
     save_settings();
 }
 
@@ -1182,6 +1190,7 @@ void EditorApp::render() {
     draw_tile_preview_window();
     draw_effect_preview_popup();
     draw_rotate_zoom_popup();
+    draw_depth_map_popup();
     draw_undo_tree_window();
     draw_error_console();
     draw_status_bar();
@@ -1848,6 +1857,7 @@ void EditorApp::draw_main_menu() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Blurs")) {
+            effect_item("Depth of Field", EffectPreviewKind::DepthOfField);
             effect_item("Gaussian Blur", EffectPreviewKind::GaussianBlur);
             effect_item("Motion Blur", EffectPreviewKind::MotionBlur);
             effect_item("Radial Blur", EffectPreviewKind::RadialBlur);
@@ -2724,6 +2734,24 @@ void EditorApp::handle_canvas_input(const ImVec2& origin,
             lasso_points_.push_back({px_i, py_i});
             lasso_active_ = true;
         }
+    }
+
+    if (over_pixel &&
+        effect_preview_active_ &&
+        effect_preview_kind_ == EffectPreviewKind::DepthOfField &&
+        depth_of_field_pick_focus_ &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (const std::vector<Pixel>* depth = depth_of_field_pixels(document_)) {
+            const std::size_t index = static_cast<std::size_t>(document_.pixel_index(px_i, py_i));
+            depth_of_field_focus_ = r((*depth)[index]);
+            depth_of_field_pick_focus_ = false;
+            effect_preview_dirty_ = true;
+            set_status("Sampled focus depth");
+        } else {
+            report_error("Depth of Field", "Select a depth-map layer before sampling focus.");
+        }
+        drag_active_ = false;
+        return;
     }
 
     if (over_pixel && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -3718,6 +3746,13 @@ void EditorApp::draw_layers_panel() {
         texture_dirty_ = document_.merge_layer_down(document_.active_layer) || texture_dirty_;
     }
     tooltip("Merge the selected layer into the layer below");
+    ImGui::SameLine();
+    if (guarded_button("Depth Map", depth_job_running_, ImVec2(92.0f, 0.0f))) {
+        depth_source_layer_ = document_.active_layer;
+        depth_map_popup_requested_ = true;
+        depth_map_open_ = true;
+    }
+    tooltip("Generate a depth map layer from the selected layer");
 
     ImGui::End();
 }
@@ -3866,6 +3901,7 @@ void EditorApp::draw_adjustments_panel() {
     if (ImGui::CollapsingHeader("Detail", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::BeginTable("DetailActions", 3, ImGuiTableFlags_SizingStretchSame)) {
             preview_cell("Blur", EffectPreviewKind::GaussianBlur);
+            preview_cell("Depth of Field", EffectPreviewKind::DepthOfField);
             preview_cell("Sharpen", EffectPreviewKind::Sharpen);
             preview_cell("Reduce Noise", EffectPreviewKind::ReduceNoise);
             preview_cell("Surface Blur", EffectPreviewKind::SurfaceBlur);
@@ -3919,6 +3955,9 @@ void EditorApp::start_effect_preview(EffectPreviewKind kind) {
     if (kind == EffectPreviewKind::None) {
         return;
     }
+    if (kind == EffectPreviewKind::DepthOfField && !valid_depth_of_field_layer(document_)) {
+        depth_of_field_layer_ = default_depth_of_field_layer();
+    }
     effect_preview_kind_ = kind;
     effect_preview_active_ = true;
     effect_preview_dirty_ = true;
@@ -3947,6 +3986,16 @@ GpuEffectRequest EditorApp::gpu_effect_request(EffectPreviewKind kind) const {
         case EffectPreviewKind::GaussianBlur:
             request.mode = GpuEffectMode::GaussianBlur;
             request.params = {static_cast<float>(effect_radius_), 0.0f, 0.0f, 0.0f};
+            break;
+        case EffectPreviewKind::DepthOfField:
+            request.mode = GpuEffectMode::DepthOfField;
+            request.params = {static_cast<float>(std::clamp(depth_of_field_focus_, 0, 255)) / 255.0f,
+                              static_cast<float>(std::clamp(depth_of_field_aperture_, 0, 100)) / 100.0f,
+                              static_cast<float>(std::clamp(depth_of_field_falloff_, 1, 100)),
+                              static_cast<float>(std::clamp(depth_of_field_max_radius_, 1, 32))};
+            if (const std::vector<Pixel>* depth = depth_of_field_pixels(document_)) {
+                request.depth_pixels = *depth;
+            }
             break;
         case EffectPreviewKind::MotionBlur:
             request.mode = GpuEffectMode::MotionBlur;
@@ -4138,6 +4187,9 @@ bool EditorApp::try_gpu_effect(EffectPreviewKind kind, std::vector<Pixel>& out_p
     if (!settings_.heavy_gpu_optimization || kind == EffectPreviewKind::None) {
         return false;
     }
+    if (kind == EffectPreviewKind::DepthOfField && !valid_depth_of_field_layer(document_)) {
+        return false;
+    }
     if (try_mps_effect(kind, out_pixels)) {
         return true;
     }
@@ -4236,6 +4288,10 @@ bool EditorApp::apply_effect_to_document(EffectPreviewKind kind) {
     if (kind == EffectPreviewKind::None) {
         return false;
     }
+    if (kind == EffectPreviewKind::DepthOfField && !valid_depth_of_field_layer(document_)) {
+        report_error("Depth of Field", "Select a depth-map layer that matches the current document.");
+        return false;
+    }
     std::vector<Pixel> gpu_pixels;
     if (try_gpu_effect(kind, gpu_pixels)) {
         auto before = document_.snapshot_active_cel();
@@ -4268,6 +4324,16 @@ void EditorApp::apply_effect_to(Document& target) const {
             break;
         case EffectPreviewKind::GaussianBlur:
             apply_gaussian_blur(target, effect_radius_);
+            break;
+        case EffectPreviewKind::DepthOfField:
+            if (const std::vector<Pixel>* depth = depth_of_field_pixels(target)) {
+                DepthOfFieldSettings settings;
+                settings.focus_depth = depth_of_field_focus_;
+                settings.aperture = depth_of_field_aperture_;
+                settings.falloff = depth_of_field_falloff_;
+                settings.max_radius = depth_of_field_max_radius_;
+                apply_depth_of_field(target, *depth, settings);
+            }
             break;
         case EffectPreviewKind::MotionBlur:
             apply_motion_blur(target, effect_radius_, static_cast<float>(effect_angle_));
@@ -4459,6 +4525,7 @@ void EditorApp::close_effect_preview(bool apply) {
     effect_preview_dirty_ = false;
     effect_preview_popup_requested_ = false;
     effect_preview_kind_ = EffectPreviewKind::None;
+    depth_of_field_pick_focus_ = false;
     texture_dirty_ = true;
     refresh_texture();
 }
@@ -4513,6 +4580,36 @@ void EditorApp::draw_effect_preview_parameters() {
         case EffectPreviewKind::ReduceNoise:
             radius_slider();
             break;
+        case EffectPreviewKind::DepthOfField: {
+            if (!document_.layers.empty()) {
+                depth_of_field_layer_ = std::clamp(depth_of_field_layer_, 0, static_cast<int>(document_.layers.size()) - 1);
+                const char* current_name = document_.layers[static_cast<std::size_t>(depth_of_field_layer_)].name.c_str();
+                if (ImGui::BeginCombo("Depth Layer", current_name)) {
+                    for (int i = static_cast<int>(document_.layers.size()) - 1; i >= 0; --i) {
+                        const bool selected = depth_of_field_layer_ == i;
+                        if (ImGui::Selectable(document_.layers[static_cast<std::size_t>(i)].name.c_str(), selected)) {
+                            depth_of_field_layer_ = i;
+                            changed = true;
+                        }
+                        if (selected) {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+            changed |= ImGui::SliderInt("Focus Depth", &depth_of_field_focus_, 0, 255);
+            changed |= ImGui::SliderInt("Aperture", &depth_of_field_aperture_, 0, 100);
+            changed |= ImGui::SliderInt("Falloff", &depth_of_field_falloff_, 1, 100);
+            changed |= ImGui::SliderInt("Max Radius", &depth_of_field_max_radius_, 1, 32);
+            if (ImGui::Checkbox("Focus Eyedropper", &depth_of_field_pick_focus_)) {
+                set_status(depth_of_field_pick_focus_ ? "Click the canvas to sample focus depth" : "Focus eyedropper disabled");
+            }
+            if (!valid_depth_of_field_layer(document_)) {
+                ImGui::TextWrapped("Select a depth-map layer with the same size as the document.");
+            }
+            break;
+        }
         case EffectPreviewKind::MotionBlur:
             radius_slider();
             angle_slider();
@@ -4725,6 +4822,265 @@ void EditorApp::draw_rotate_zoom_popup() {
     }
     ImGui::EndPopup();
     rotate_zoom_open_ = open && rotate_zoom_open_;
+}
+
+void EditorApp::start_depth_map_extraction() {
+    if (depth_job_running_ || document_.frames.empty() || document_.layers.empty()) {
+        return;
+    }
+    depth_source_layer_ = std::clamp(depth_source_layer_, 0, static_cast<int>(document_.layers.size()) - 1);
+    const int source_layer = depth_source_layer_;
+    const std::vector<Pixel> source_pixels = document_.cel(document_.active_frame, source_layer).pixels;
+    const int width = document_.width;
+    const int height = document_.height;
+
+    settings_.depth_tile_size = std::clamp(depth_tile_size_, 64, 4096);
+    settings_.depth_tile_overlap = std::clamp(depth_tile_overlap_, 0, settings_.depth_tile_size / 2);
+    depth_tile_size_ = settings_.depth_tile_size;
+    depth_tile_overlap_ = settings_.depth_tile_overlap;
+
+    DepthExtractionSettings request;
+    request.cache_dir = default_depth_model_cache_dir();
+    request.tile_size = depth_tile_size_;
+    request.overlap = depth_tile_overlap_;
+    request.allow_cpu_fallback = settings_.depth_allow_cpu_fallback;
+    if (settings_.heavy_gpu_optimization && settings_.mps_backend) {
+        request.acceleration = DepthAccelerationPreference::Metal;
+    } else if (settings_.heavy_gpu_optimization) {
+        request.acceleration = DepthAccelerationPreference::Gpu;
+    } else {
+        request.acceleration = DepthAccelerationPreference::Cpu;
+    }
+
+    if (depth_thread_.joinable()) {
+        depth_thread_.join();
+    }
+    depth_cancel_requested_.store(false);
+    {
+        std::lock_guard lock(depth_mutex_);
+        depth_progress_ = {0.0f, "Queued depth extraction"};
+        depth_result_ = {};
+        depth_error_.clear();
+        depth_result_pending_ = false;
+        depth_job_running_ = true;
+    }
+
+    depth_thread_ = std::thread([this, source_pixels, width, height, request]() {
+        DepthMapExtractor extractor;
+        DepthExtractionResult result;
+        DepthExtractionError error;
+        auto progress = [this](const DepthExtractionProgress& update) {
+            std::lock_guard lock(depth_mutex_);
+            depth_progress_ = update;
+        };
+        const bool ok = extractor.extract(source_pixels, width, height, request, depth_cancel_requested_, progress, result, error);
+        std::lock_guard lock(depth_mutex_);
+        if (ok) {
+            depth_result_ = std::move(result);
+            depth_result_pending_ = true;
+            depth_error_.clear();
+        } else {
+            depth_error_ = error.message.empty() ? "Depth extraction failed" : error.message;
+            depth_result_pending_ = false;
+        }
+        depth_job_running_ = false;
+    });
+}
+
+void EditorApp::finish_depth_map_job_if_ready() {
+    bool running = false;
+    bool pending = false;
+    DepthExtractionResult result;
+    std::string error;
+    {
+        std::lock_guard lock(depth_mutex_);
+        running = depth_job_running_;
+        pending = depth_result_pending_;
+        if (pending) {
+            result = depth_result_;
+        }
+        error = depth_error_;
+    }
+    if (!running && depth_thread_.joinable()) {
+        depth_thread_.join();
+    }
+    if (!running && pending) {
+        insert_depth_map_layer(result);
+        {
+            std::lock_guard lock(depth_mutex_);
+            depth_result_pending_ = false;
+        }
+        depth_map_open_ = false;
+        set_status(result.status.empty() ? "Depth map generated" : result.status);
+        return;
+    }
+    if (!running && !error.empty()) {
+        report_error("Depth Map", error);
+        std::lock_guard lock(depth_mutex_);
+        depth_error_.clear();
+    }
+}
+
+void EditorApp::insert_depth_map_layer(const DepthExtractionResult& result) {
+    if (result.pixels.size() != static_cast<std::size_t>(document_.width * document_.height)) {
+        report_error("Depth Map", "Depth result size does not match the document");
+        return;
+    }
+    const int source_layer = std::clamp(depth_source_layer_, 0, static_cast<int>(document_.layers.size()) - 1);
+    const std::string source_name = document_.layers.empty() ? std::string("Layer") : document_.layers[static_cast<std::size_t>(source_layer)].name;
+    const int insert_index = std::min(source_layer + 1, static_cast<int>(document_.layers.size()));
+    document_.insert_layer(insert_index, source_name + " Depth Map", result.pixels, "Generate Depth Map");
+    texture_dirty_ = true;
+}
+
+int EditorApp::default_depth_of_field_layer() const {
+    if (document_.layers.empty()) {
+        return 0;
+    }
+    auto contains_depth = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        return value.find("depth") != std::string::npos;
+    };
+    for (int i = 0; i < static_cast<int>(document_.layers.size()); ++i) {
+        if (i != document_.active_layer && contains_depth(document_.layers[static_cast<std::size_t>(i)].name)) {
+            return i;
+        }
+    }
+    const int above = document_.active_layer + 1;
+    if (above >= 0 && above < static_cast<int>(document_.layers.size())) {
+        return above;
+    }
+    const int below = document_.active_layer - 1;
+    if (below >= 0 && below < static_cast<int>(document_.layers.size())) {
+        return below;
+    }
+    return std::clamp(document_.active_layer, 0, static_cast<int>(document_.layers.size()) - 1);
+}
+
+const std::vector<Pixel>* EditorApp::depth_of_field_pixels(const Document& document) const {
+    if (document.layers.empty() || document.frames.empty()) {
+        return nullptr;
+    }
+    if (document.active_frame < 0 || document.active_frame >= static_cast<int>(document.frames.size())) {
+        return nullptr;
+    }
+    if (depth_of_field_layer_ < 0 || depth_of_field_layer_ >= static_cast<int>(document.layers.size())) {
+        return nullptr;
+    }
+    if (depth_of_field_layer_ >= static_cast<int>(document.frames[static_cast<std::size_t>(document.active_frame)].cels.size())) {
+        return nullptr;
+    }
+    const auto& pixels = document.cel(document.active_frame, depth_of_field_layer_).pixels;
+    if (pixels.size() != static_cast<std::size_t>(document.width * document.height)) {
+        return nullptr;
+    }
+    return &pixels;
+}
+
+bool EditorApp::valid_depth_of_field_layer(const Document& document) const {
+    return depth_of_field_pixels(document) != nullptr;
+}
+
+void EditorApp::draw_depth_map_popup() {
+    finish_depth_map_job_if_ready();
+    if (depth_map_popup_requested_) {
+        ImGui::OpenPopup("Generate Depth Map");
+        depth_map_popup_requested_ = false;
+        depth_map_open_ = true;
+    }
+
+    bool open = depth_map_open_;
+    if (!ImGui::BeginPopupModal("Generate Depth Map", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+        depth_map_open_ = open;
+        return;
+    }
+
+    bool running = false;
+    DepthExtractionProgress progress;
+    {
+        std::lock_guard lock(depth_mutex_);
+        running = depth_job_running_;
+        progress = depth_progress_;
+    }
+
+    ImGui::TextUnformatted("Depth Anything V2 Small");
+    ImGui::TextDisabled("Compiled backends: %s", depth_backend_build_description().c_str());
+    ImGui::Separator();
+
+    if (document_.layers.empty()) {
+        ImGui::TextDisabled("No layer available");
+    } else {
+        depth_source_layer_ = std::clamp(depth_source_layer_, 0, static_cast<int>(document_.layers.size()) - 1);
+        const char* current_name = document_.layers[static_cast<std::size_t>(depth_source_layer_)].name.c_str();
+        if (ImGui::BeginCombo("Source layer", current_name)) {
+            for (int i = static_cast<int>(document_.layers.size()) - 1; i >= 0; --i) {
+                const bool selected = depth_source_layer_ == i;
+                if (ImGui::Selectable(document_.layers[static_cast<std::size_t>(i)].name.c_str(), selected)) {
+                    depth_source_layer_ = i;
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    if (running) {
+        ImGui::BeginDisabled();
+    }
+    ImGui::InputInt("Tile size", &depth_tile_size_, 64, 256);
+    depth_tile_size_ = std::clamp(depth_tile_size_, 64, 4096);
+    ImGui::InputInt("Overlap", &depth_tile_overlap_, 16, 64);
+    depth_tile_overlap_ = std::clamp(depth_tile_overlap_, 0, depth_tile_size_ / 2);
+    ImGui::Checkbox("Allow real CPU model fallback", &settings_.depth_allow_cpu_fallback);
+    if (running) {
+        ImGui::EndDisabled();
+    }
+
+    const char* requested_backend = "CPU";
+    if (settings_.heavy_gpu_optimization && settings_.mps_backend) {
+        requested_backend = "Metal/CoreML if ONNX Runtime provides it";
+    } else if (settings_.heavy_gpu_optimization) {
+        requested_backend = "GPU provider if ONNX Runtime provides one";
+    }
+    ImGui::TextDisabled("Requested backend: %s", requested_backend);
+    if (!depth_backend_compiled()) {
+        ImGui::TextWrapped("No real depth backend was found when this build was configured. Install ONNX Runtime or OpenCV DNN support and reconfigure; fake grayscale depth generation is disabled.");
+    } else {
+        ImGui::TextWrapped("CPU fallback still runs the depth model. It is slower, but it is not a grayscale approximation.");
+    }
+
+    ImGui::Separator();
+    if (running) {
+        ImGui::ProgressBar(progress.fraction, ImVec2(360.0f, 0.0f));
+        ImGui::TextWrapped("%s", progress.status.c_str());
+        if (ImGui::Button("Cancel", ImVec2(96.0f, 0.0f))) {
+            depth_cancel_requested_.store(true);
+            set_status("Canceling depth extraction");
+        }
+    } else {
+        const bool can_generate = !document_.layers.empty();
+        if (!can_generate) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Generate", ImVec2(96.0f, 0.0f))) {
+            start_depth_map_extraction();
+        }
+        if (!can_generate) {
+            ImGui::EndDisabled();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(96.0f, 0.0f))) {
+            depth_map_open_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+    }
+
+    ImGui::EndPopup();
+    depth_map_open_ = open && depth_map_open_;
 }
 
 void EditorApp::draw_undo_tree_window() {

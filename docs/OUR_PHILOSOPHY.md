@@ -15,6 +15,7 @@ Our promise is simple:
 - Make non-commercial use free.
 - Avoid dark patterns, forced cloud workflows, and subscription pressure.
 - Optimize for real users, including people on older hardware.
+- Add advanced capabilities, including GPU acceleration and depth-map generation, only in ways that stay local, understandable, and optional.
 - Keep improving until PixelArt98 feels like a serious tool, not a compromise.
 
 Money is not the mission. The mission is to provide the best user experience we can to everyone who wants to create, learn, draw, animate, edit, or experiment without being treated like a revenue stream.

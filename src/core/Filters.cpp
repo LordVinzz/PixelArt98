@@ -240,6 +240,16 @@ static Pixel blur_at(const std::vector<Pixel>& source, int width, int height, in
     return rgba(to_u8_int(red / count), to_u8_int(green / count), to_u8_int(blue / count), to_u8_int(alpha / count));
 }
 
+static int depth_of_field_radius_for_depth(std::uint8_t depth, const DepthOfFieldSettings& settings) {
+    const int max_radius = std::clamp(settings.max_radius, 1, 32);
+    const float aperture = std::clamp(static_cast<float>(settings.aperture) / 100.0f, 0.0f, 1.0f);
+    const float falloff = std::max(1.0f, static_cast<float>(std::clamp(settings.falloff, 1, 100)));
+    const float focus = static_cast<float>(std::clamp(settings.focus_depth, 0, 255));
+    const float distance = std::abs(static_cast<float>(depth) - focus);
+    const float normalized = std::clamp(distance / falloff, 0.0f, 1.0f);
+    return static_cast<int>(std::round(normalized * aperture * static_cast<float>(max_radius)));
+}
+
 static Pixel convolve_at(const std::vector<Pixel>& source,
                          int width,
                          int height,
@@ -468,6 +478,21 @@ void apply_curves(Document& doc, const CurvesSettings& settings) {
                     to_u8(std::clamp(green, 0.0f, 1.0f) * 255.0f),
                     to_u8(std::clamp(blue, 0.0f, 1.0f) * 255.0f),
                     a(pixel));
+    });
+}
+
+void apply_depth_of_field(Document& doc, const std::vector<Pixel>& depth_pixels, const DepthOfFieldSettings& settings) {
+    const std::size_t expected = static_cast<std::size_t>(std::max(0, doc.width) * std::max(0, doc.height));
+    if (depth_pixels.size() != expected) {
+        return;
+    }
+    transform_from_source(doc, "Depth of Field", [&](int x, int y, const std::vector<Pixel>& source) {
+        const std::size_t index = static_cast<std::size_t>(doc.pixel_index(x, y));
+        const int radius = depth_of_field_radius_for_depth(r(depth_pixels[index]), settings);
+        if (radius <= 0) {
+            return source[index];
+        }
+        return blur_at(source, doc.width, doc.height, x, y, radius);
     });
 }
 

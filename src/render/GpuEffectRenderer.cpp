@@ -121,6 +121,32 @@ Document extract_tile_document(const Document& document,
     return tile;
 }
 
+std::vector<Pixel> extract_tile_pixels(const std::vector<Pixel>& pixels,
+                                       int width,
+                                       int height,
+                                       int core_x,
+                                       int core_y,
+                                       int core_w,
+                                       int core_h,
+                                       int halo) {
+    const int left = std::min(halo, core_x);
+    const int top = std::min(halo, core_y);
+    const int right = std::min(halo, width - (core_x + core_w));
+    const int bottom = std::min(halo, height - (core_y + core_h));
+    const int tile_x = core_x - left;
+    const int tile_y = core_y - top;
+    const int tile_w = core_w + left + right;
+    const int tile_h = core_h + top + bottom;
+    std::vector<Pixel> tile(static_cast<std::size_t>(tile_w * tile_h), 0);
+    for (int y = 0; y < tile_h; ++y) {
+        for (int x = 0; x < tile_w; ++x) {
+            tile[static_cast<std::size_t>(y * tile_w + x)] =
+                pixels[static_cast<std::size_t>((tile_y + y) * width + tile_x + x)];
+        }
+    }
+    return tile;
+}
+
 const char* shader_type_name(unsigned int type) {
     return type == GL_VERTEX_SHADER ? "vertex" : "fragment";
 }
@@ -158,6 +184,7 @@ in vec2 v_uv;
 out vec4 frag_color;
 
 uniform sampler2D u_source;
+uniform sampler2D u_depth;
 uniform sampler2D u_mask;
 uniform int u_mode;
 uniform vec4 u_size;
@@ -289,6 +316,16 @@ vec4 blur_box(vec2 uv, int radius) {
         }
     }
     return sum / max(1.0, count);
+}
+
+int depth_of_field_radius(vec2 uv) {
+    float depth = texture(u_depth, clamp(uv, vec2(0.0), vec2(1.0))).r * 255.0;
+    float focus = clamp(u_params.x, 0.0, 1.0) * 255.0;
+    float aperture = clamp(u_params.y, 0.0, 1.0);
+    float falloff = max(1.0, u_params.z);
+    float max_radius = clamp(u_params.w, 1.0, 32.0);
+    float amount = clamp(abs(depth - focus) / falloff, 0.0, 1.0) * aperture;
+    return int(floor(amount * max_radius + 0.5001));
 }
 
 vec4 motion_blur(vec2 uv, int radius, float angle) {
@@ -564,6 +601,11 @@ vec4 apply_effect(vec2 uv, vec4 src) {
                            -warm * 35.0 + cool * 45.0) / 255.0;
         return vec4(clamp(src.rgb + offset, 0.0, 1.0), src.a);
     }
+    if (mode == 47) {
+        int radius = depth_of_field_radius(uv);
+        if (radius <= 0) return src;
+        return blur_box(uv, radius);
+    }
     return src;
 }
 
@@ -612,6 +654,8 @@ int GpuEffectRenderer::effect_chunk_halo(const GpuEffectRequest& request) {
         case GpuEffectMode::Glow:
         case GpuEffectMode::SoftenPortrait:
             return clamped_radius(request.params[0], 1, 16);
+        case GpuEffectMode::DepthOfField:
+            return clamped_radius(request.params[3], 1, 32);
         case GpuEffectMode::MotionBlur:
             return clamped_radius(request.params[0], 1, 24);
         case GpuEffectMode::InkSketch:
@@ -645,7 +689,7 @@ int GpuEffectRenderer::choose_chunk_extent(int width,
         return std::min({max_core_by_texture, width, height});
     }
 
-    constexpr std::uint64_t textures_per_pass = 3;
+    constexpr std::uint64_t textures_per_pass = 4;
     const double max_pixels = static_cast<double>(caps.working_texture_budget) /
                               static_cast<double>(sizeof(Pixel) * textures_per_pass);
     int extent = static_cast<int>(std::floor(std::sqrt(std::max(1.0, max_pixels)))) - halo * 2;
@@ -779,7 +823,7 @@ bool GpuEffectRenderer::render_active_cel(const Document& document,
         return false;
     }
     const GpuBackendCapabilities caps = capability_override != nullptr ? *capability_override : capabilities();
-    const std::uint64_t full_footprint = texture_footprint(document.width, document.height, 3);
+    const std::uint64_t full_footprint = texture_footprint(document.width, document.height, request.mode == GpuEffectMode::DepthOfField ? 4 : 3);
     const bool exceeds_texture_size = caps.max_texture_size > 0 &&
                                       (document.width > caps.max_texture_size || document.height > caps.max_texture_size);
     const bool exceeds_budget = caps.working_texture_budget > 0 && full_footprint > caps.working_texture_budget;
@@ -805,7 +849,16 @@ bool GpuEffectRenderer::render_full_active_cel(const Document& document, const G
         set_error("GPU effect skipped: active cel pixel buffer has the wrong size");
         return false;
     }
+    const std::size_t pixel_count = static_cast<std::size_t>(document.width * document.height);
+    if (request.mode == GpuEffectMode::DepthOfField && request.depth_pixels.size() != pixel_count) {
+        set_error("GPU depth of field skipped: depth pixel buffer has the wrong size");
+        return false;
+    }
     if (!ensure_texture(source_texture_, document.width, document.height, pixels.data())) {
+        return false;
+    }
+    if (request.mode == GpuEffectMode::DepthOfField &&
+        !ensure_texture(depth_texture_, document.width, document.height, request.depth_pixels.data())) {
         return false;
     }
     upload_selection_mask(document);
@@ -824,8 +877,11 @@ bool GpuEffectRenderer::render_full_active_cel(const Document& document, const G
     glBindTexture(GL_TEXTURE_2D, source_texture_);
     glUniform1i(glGetUniformLocation(shader_program_, "u_source"), 0);
     glActiveTexture(GL_TEXTURE0 + 1);
+    glBindTexture(GL_TEXTURE_2D, depth_texture_ != 0 ? depth_texture_ : source_texture_);
+    glUniform1i(glGetUniformLocation(shader_program_, "u_depth"), 1);
+    glActiveTexture(GL_TEXTURE0 + 2);
     glBindTexture(GL_TEXTURE_2D, mask_texture_);
-    glUniform1i(glGetUniformLocation(shader_program_, "u_mask"), 1);
+    glUniform1i(glGetUniformLocation(shader_program_, "u_mask"), 2);
 
     const auto primary = pixel_to_float4(request.primary);
     const auto secondary = pixel_to_float4(request.secondary);
@@ -867,6 +923,10 @@ bool GpuEffectRenderer::render_chunked_active_cel(const Document& document,
         set_error("GPU effect skipped: active cel pixel buffer has the wrong size");
         return false;
     }
+    if (request.mode == GpuEffectMode::DepthOfField && request.depth_pixels.size() != pixel_count) {
+        set_error("GPU depth of field skipped: depth pixel buffer has the wrong size");
+        return false;
+    }
 
     const int halo = effect_chunk_halo(request);
     const int chunk_extent = choose_chunk_extent(document.width, document.height, halo, caps);
@@ -885,7 +945,11 @@ bool GpuEffectRenderer::render_chunked_active_cel(const Document& document,
             const int left = std::min(halo, x);
             const int top = std::min(halo, y);
             Document tile = extract_tile_document(document, x, y, core_w, core_h, halo);
-            if (!render_full_active_cel(tile, request) || !read_output_pixels(tile_output)) {
+            GpuEffectRequest tile_request = request;
+            if (request.mode == GpuEffectMode::DepthOfField) {
+                tile_request.depth_pixels = extract_tile_pixels(request.depth_pixels, document.width, document.height, x, y, core_w, core_h, halo);
+            }
+            if (!render_full_active_cel(tile, tile_request) || !read_output_pixels(tile_output)) {
                 if (last_error_.empty()) {
                     set_error("GPU effect skipped: chunk render failed");
                 }
@@ -928,6 +992,7 @@ void GpuEffectRenderer::destroy() {
     if (framebuffer_ != 0) glDeleteFramebuffers(1, &framebuffer_);
     if (output_texture_ != 0) glDeleteTextures(1, &output_texture_);
     if (source_texture_ != 0) glDeleteTextures(1, &source_texture_);
+    if (depth_texture_ != 0) glDeleteTextures(1, &depth_texture_);
     if (mask_texture_ != 0) glDeleteTextures(1, &mask_texture_);
     if (vertex_buffer_ != 0) glDeleteBuffers(1, &vertex_buffer_);
     if (vertex_array_ != 0) glDeleteVertexArrays(1, &vertex_array_);
@@ -935,6 +1000,7 @@ void GpuEffectRenderer::destroy() {
     framebuffer_ = 0;
     output_texture_ = 0;
     source_texture_ = 0;
+    depth_texture_ = 0;
     mask_texture_ = 0;
     vertex_buffer_ = 0;
     vertex_array_ = 0;
