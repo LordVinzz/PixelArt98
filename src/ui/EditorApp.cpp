@@ -799,6 +799,138 @@ bool document_state_equal(const Document& a_value, const Document& b_value) {
            a_value.playback_mode == b_value.playback_mode;
 }
 
+bool document_metadata_equal(const Document& a_value, const Document& b_value) {
+    if (a_value.width != b_value.width ||
+        a_value.height != b_value.height ||
+        a_value.active_layer != b_value.active_layer ||
+        a_value.active_frame != b_value.active_frame ||
+        a_value.palette.colors != b_value.palette.colors ||
+        a_value.palette.active != b_value.palette.active ||
+        a_value.layers.size() != b_value.layers.size() ||
+        a_value.frames.size() != b_value.frames.size() ||
+        !tags_equal(a_value.tags, b_value.tags) ||
+        a_value.playback_mode != b_value.playback_mode) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a_value.layers.size(); ++i) {
+        const Layer& a_layer = a_value.layers[i];
+        const Layer& b_layer = b_value.layers[i];
+        if (a_layer.name != b_layer.name ||
+            a_layer.visible != b_layer.visible ||
+            a_layer.opacity != b_layer.opacity ||
+            a_layer.blend_mode != b_layer.blend_mode ||
+            a_layer.mask_enabled != b_layer.mask_enabled ||
+            a_layer.clip_to_below != b_layer.clip_to_below ||
+            a_layer.mask.size() != b_layer.mask.size()) {
+            return false;
+        }
+    }
+    for (std::size_t frame_index = 0; frame_index < a_value.frames.size(); ++frame_index) {
+        const Frame& a_frame = a_value.frames[frame_index];
+        const Frame& b_frame = b_value.frames[frame_index];
+        if (a_frame.duration_ms != b_frame.duration_ms ||
+            a_frame.cels.size() != b_frame.cels.size()) {
+            return false;
+        }
+        for (std::size_t cel_index = 0; cel_index < a_frame.cels.size(); ++cel_index) {
+            const Cel& a_cel = a_frame.cels[cel_index];
+            const Cel& b_cel = b_frame.cels[cel_index];
+            if (a_cel.x != b_cel.x ||
+                a_cel.y != b_cel.y ||
+                a_cel.pixels.size() != b_cel.pixels.size()) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+struct HistogramBins {
+    std::array<int, 256> luma{};
+    std::array<int, 256> red{};
+    std::array<int, 256> green{};
+    std::array<int, 256> blue{};
+};
+
+void add_pixel_to_histogram(HistogramBins& bins, Pixel pixel) {
+    if (a(pixel) == 0) {
+        return;
+    }
+    const int red = r(pixel);
+    const int green = g(pixel);
+    const int blue = b(pixel);
+    const int luma = std::clamp(static_cast<int>(0.2126f * static_cast<float>(red) +
+                                                 0.7152f * static_cast<float>(green) +
+                                                 0.0722f * static_cast<float>(blue) +
+                                                 0.5f),
+                                0,
+                                255);
+    bins.luma[static_cast<std::size_t>(luma)] += 1;
+    bins.red[static_cast<std::size_t>(red)] += 1;
+    bins.green[static_cast<std::size_t>(green)] += 1;
+    bins.blue[static_cast<std::size_t>(blue)] += 1;
+}
+
+HistogramBins build_histogram_bins(const std::vector<Pixel>& pixels) {
+    constexpr std::size_t kMinPixelsPerWorker = 262144;
+    const std::size_t pixel_count = pixels.size();
+    const unsigned hardware_threads = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned max_workers = static_cast<unsigned>(std::max<std::size_t>(1, pixel_count / kMinPixelsPerWorker));
+    const unsigned worker_count = std::min({hardware_threads, max_workers, 8u});
+    if (worker_count <= 1 || pixel_count < kMinPixelsPerWorker * 2) {
+        HistogramBins bins;
+        for (Pixel pixel : pixels) {
+            add_pixel_to_histogram(bins, pixel);
+        }
+        return bins;
+    }
+
+    std::vector<HistogramBins> local_bins(worker_count);
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count - 1);
+    auto process_range = [&](unsigned worker_index) {
+        const std::size_t begin = pixel_count * static_cast<std::size_t>(worker_index) /
+                                  static_cast<std::size_t>(worker_count);
+        const std::size_t end = pixel_count * static_cast<std::size_t>(worker_index + 1) /
+                                static_cast<std::size_t>(worker_count);
+        HistogramBins& bins = local_bins[worker_index];
+        for (std::size_t i = begin; i < end; ++i) {
+            add_pixel_to_histogram(bins, pixels[i]);
+        }
+    };
+
+    for (unsigned worker_index = 1; worker_index < worker_count; ++worker_index) {
+        workers.emplace_back(process_range, worker_index);
+    }
+    process_range(0);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+
+    HistogramBins merged;
+    for (const HistogramBins& bins : local_bins) {
+        for (std::size_t i = 0; i < merged.luma.size(); ++i) {
+            merged.luma[i] += bins.luma[i];
+            merged.red[i] += bins.red[i];
+            merged.green[i] += bins.green[i];
+            merged.blue[i] += bins.blue[i];
+        }
+    }
+    return merged;
+}
+
+std::array<float, 256> normalize_histogram(const std::array<int, 256>& hist) {
+    std::array<float, 256> values{};
+    int max_value = 1;
+    for (int value : hist) {
+        max_value = std::max(max_value, value);
+    }
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        values[i] = static_cast<float>(hist[i]) / static_cast<float>(max_value);
+    }
+    return values;
+}
+
 bool uv_equal(const UvRect& a_value, const UvRect& b_value) {
     return a_value.x == b_value.x &&
            a_value.y == b_value.y &&
@@ -1218,6 +1350,13 @@ void EditorApp::update_playback() {
             document_.active_frame = (document_.active_frame + 1) % static_cast<int>(document_.frames.size());
         }
         texture_dirty_ = true;
+        history_playback_frame_change_ = true;
+        if (!history_pending_ &&
+            history_before_document_.frames.size() == document_.frames.size() &&
+            history_before_document_.width == document_.width &&
+            history_before_document_.height == document_.height) {
+            history_before_document_.active_frame = document_.active_frame;
+        }
     }
 }
 
@@ -1231,6 +1370,33 @@ void EditorApp::refresh_texture() {
     composite_ = document_.composite_active();
     canvas_texture_.update(document_.width, document_.height, composite_);
     texture_dirty_ = false;
+    history_playback_frame_change_ = false;
+    invalidate_histogram_cache();
+}
+
+void EditorApp::invalidate_histogram_cache() {
+    histogram_cache_valid_ = false;
+}
+
+void EditorApp::update_histogram_cache() {
+    if (histogram_cache_valid_ &&
+        histogram_cache_width_ == document_.width &&
+        histogram_cache_height_ == document_.height) {
+        return;
+    }
+
+    if (composite_.size() != static_cast<std::size_t>(document_.width * document_.height)) {
+        composite_ = document_.composite_active();
+    }
+
+    const HistogramBins bins = build_histogram_bins(composite_);
+    histogram_luma_values_ = normalize_histogram(bins.luma);
+    histogram_red_values_ = normalize_histogram(bins.red);
+    histogram_green_values_ = normalize_histogram(bins.green);
+    histogram_blue_values_ = normalize_histogram(bins.blue);
+    histogram_cache_width_ = document_.width;
+    histogram_cache_height_ = document_.height;
+    histogram_cache_valid_ = true;
 }
 
 void EditorApp::set_status(const std::string& status) {
@@ -1282,7 +1448,7 @@ void EditorApp::sync_model_texture_metadata() {
 }
 
 void EditorApp::begin_history_frame() {
-    if (!history_pending_) {
+    if (history_suppress_frame_ && !history_pending_) {
         history_before_document_ = document_;
         history_before_model_ = model_;
     }
@@ -1359,6 +1525,7 @@ void EditorApp::reset_history_tree() {
     history_before_model_ = model_;
     history_pending_ = false;
     history_suppress_frame_ = true;
+    history_playback_frame_change_ = false;
 }
 
 EditorHistoryNode* EditorApp::history_node_by_id(int id) {
@@ -1390,8 +1557,10 @@ void EditorApp::restore_history_node(int node_id) {
     history_current_node_ = node->id;
     sync_model_texture_metadata();
     texture_dirty_ = true;
+    invalidate_histogram_cache();
     history_pending_ = false;
     history_suppress_frame_ = true;
+    history_playback_frame_change_ = false;
 }
 
 void EditorApp::prune_history_tree() {
@@ -1458,15 +1627,33 @@ void EditorApp::end_history_frame() {
         history_before_document_ = document_;
         history_before_model_ = model_;
         history_suppress_frame_ = false;
+        history_playback_frame_change_ = false;
+        return;
+    }
+
+    const bool document_commit_changed = document_.has_recent_commit_names();
+    const bool visual_document_changed = texture_dirty_ && !history_playback_frame_change_;
+    const bool document_metadata_changed = !document_metadata_equal(history_before_document_, document_);
+    const bool model_changed = !model_state_equal(history_before_model_, model_);
+    if (!history_pending_ &&
+        !document_commit_changed &&
+        !visual_document_changed &&
+        !document_metadata_changed &&
+        !model_changed) {
+        history_playback_frame_change_ = false;
+        return;
+    }
+
+    if (history_interaction_in_progress()) {
+        history_pending_ = true;
+        history_playback_frame_change_ = false;
         return;
     }
 
     if (!editor_state_changed_from_history_baseline()) {
         history_pending_ = false;
-        return;
-    }
-    if (history_interaction_in_progress()) {
-        history_pending_ = true;
+        document_.clear_recent_commit_names();
+        history_playback_frame_change_ = false;
         return;
     }
     std::vector<std::string> document_labels = document_.consume_recent_commit_names();
@@ -1479,6 +1666,7 @@ void EditorApp::end_history_frame() {
     history_pending_ = false;
     history_before_document_ = document_;
     history_before_model_ = model_;
+    history_playback_frame_change_ = false;
 }
 
 bool EditorApp::undo_editor() {
@@ -5204,27 +5392,7 @@ void EditorApp::draw_histogram_plot() {
     ImGui::SameLine();
     curve_changed |= ImGui::Checkbox("Blue", &histogram_blue_visible_);
 
-    const auto luma_hist = document_.histogram_luma();
-    const auto red_hist = document_.histogram_channel(0);
-    const auto green_hist = document_.histogram_channel(1);
-    const auto blue_hist = document_.histogram_channel(2);
-
-    auto normalize = [](const std::array<int, 256>& hist) {
-        std::array<float, 256> values{};
-        int max_value = 1;
-        for (int value : hist) {
-            max_value = std::max(max_value, value);
-        }
-        for (std::size_t i = 0; i < values.size(); ++i) {
-            values[i] = static_cast<float>(hist[i]) / static_cast<float>(max_value);
-        }
-        return values;
-    };
-
-    const auto luma_values = normalize(luma_hist);
-    const auto red_values = normalize(red_hist);
-    const auto green_values = normalize(green_hist);
-    const auto blue_values = normalize(blue_hist);
+    update_histogram_cache();
 
     const float plot_height = 104.0f;
     const float plot_width = std::max(160.0f, ImGui::GetContentRegionAvail().x);
@@ -5254,16 +5422,16 @@ void EditorApp::draw_histogram_plot() {
     };
 
     if (histogram_luma_visible_) {
-        draw_curve(luma_values, IM_COL32(230, 230, 230, 235));
+        draw_curve(histogram_luma_values_, IM_COL32(230, 230, 230, 235));
     }
     if (histogram_red_visible_) {
-        draw_curve(red_values, IM_COL32(245, 78, 78, 225));
+        draw_curve(histogram_red_values_, IM_COL32(245, 78, 78, 225));
     }
     if (histogram_green_visible_) {
-        draw_curve(green_values, IM_COL32(80, 210, 116, 225));
+        draw_curve(histogram_green_values_, IM_COL32(80, 210, 116, 225));
     }
     if (histogram_blue_visible_) {
-        draw_curve(blue_values, IM_COL32(92, 145, 255, 225));
+        draw_curve(histogram_blue_values_, IM_COL32(92, 145, 255, 225));
     }
 
     if (!histogram_luma_visible_ && !histogram_red_visible_ && !histogram_green_visible_ && !histogram_blue_visible_) {
@@ -5290,27 +5458,7 @@ bool EditorApp::draw_curves_editor() {
     ImGui::SameLine();
     changed |= ImGui::Checkbox("Blue", &histogram_blue_visible_);
 
-    const auto luma_hist = document_.histogram_luma();
-    const auto red_hist = document_.histogram_channel(0);
-    const auto green_hist = document_.histogram_channel(1);
-    const auto blue_hist = document_.histogram_channel(2);
-
-    auto normalize = [](const std::array<int, 256>& hist) {
-        std::array<float, 256> values{};
-        int max_value = 1;
-        for (int value : hist) {
-            max_value = std::max(max_value, value);
-        }
-        for (std::size_t i = 0; i < values.size(); ++i) {
-            values[i] = static_cast<float>(hist[i]) / static_cast<float>(max_value);
-        }
-        return values;
-    };
-
-    const auto luma_values = normalize(luma_hist);
-    const auto red_values = normalize(red_hist);
-    const auto green_values = normalize(green_hist);
-    const auto blue_values = normalize(blue_hist);
+    update_histogram_cache();
 
     const float plot_height = 180.0f;
     const float plot_width = std::max(260.0f, ImGui::GetContentRegionAvail().x);
@@ -5340,16 +5488,16 @@ bool EditorApp::draw_curves_editor() {
     };
 
     if (histogram_luma_visible_) {
-        draw_histogram_curve(luma_values, IM_COL32(230, 230, 230, 145));
+        draw_histogram_curve(histogram_luma_values_, IM_COL32(230, 230, 230, 145));
     }
     if (histogram_red_visible_) {
-        draw_histogram_curve(red_values, IM_COL32(245, 78, 78, 150));
+        draw_histogram_curve(histogram_red_values_, IM_COL32(245, 78, 78, 150));
     }
     if (histogram_green_visible_) {
-        draw_histogram_curve(green_values, IM_COL32(80, 210, 116, 150));
+        draw_histogram_curve(histogram_green_values_, IM_COL32(80, 210, 116, 150));
     }
     if (histogram_blue_visible_) {
-        draw_histogram_curve(blue_values, IM_COL32(92, 145, 255, 150));
+        draw_histogram_curve(histogram_blue_values_, IM_COL32(92, 145, 255, 150));
     }
 
     curves_.point_count = std::clamp(curves_.point_count, 2, kMaxCurvePoints);

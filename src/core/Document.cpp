@@ -567,6 +567,10 @@ void Document::clear_history() {
     recent_commit_names_.clear();
 }
 
+bool Document::has_recent_commit_names() const {
+    return !recent_commit_names_.empty();
+}
+
 std::vector<std::string> Document::consume_recent_commit_names() {
     std::vector<std::string> names = std::move(recent_commit_names_);
     recent_commit_names_.clear();

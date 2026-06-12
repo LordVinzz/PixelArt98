@@ -175,6 +175,7 @@ private:
     bool new_document_popup_requested_ = false;
     bool history_pending_ = false;
     bool history_suppress_frame_ = false;
+    bool history_playback_frame_change_ = false;
     int uv_drag_mode_ = 0;
     int model_transform_mode_ = 0;
     int model_transform_axis_ = 0;
@@ -227,6 +228,13 @@ private:
     Document rotate_zoom_preview_document_;
     Document history_before_document_;
     ModelDocument history_before_model_;
+    std::array<float, 256> histogram_luma_values_ = {};
+    std::array<float, 256> histogram_red_values_ = {};
+    std::array<float, 256> histogram_green_values_ = {};
+    std::array<float, 256> histogram_blue_values_ = {};
+    bool histogram_cache_valid_ = false;
+    int histogram_cache_width_ = 0;
+    int histogram_cache_height_ = 0;
     std::thread depth_thread_;
     std::atomic_bool depth_cancel_requested_ = false;
     std::mutex depth_mutex_;
@@ -294,6 +302,8 @@ private:
 
     void update_playback();
     void refresh_texture();
+    void invalidate_histogram_cache();
+    void update_histogram_cache();
     void set_status(const std::string& status);
     void report_error(std::string_view context, std::string_view details);
     void save_settings();

@@ -183,6 +183,7 @@ public:
     bool undo();
     bool redo();
     void clear_history();
+    bool has_recent_commit_names() const;
     std::vector<std::string> consume_recent_commit_names();
     void clear_recent_commit_names();
 
