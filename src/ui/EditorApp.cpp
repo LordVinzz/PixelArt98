@@ -1138,6 +1138,8 @@ constexpr FileFilter kPngFilters[] = {{"PNG image", "png"}};
 constexpr FileFilter kGifFilters[] = {{"GIF animation", "gif"}};
 constexpr FileFilter kAsepriteFilters[] = {{"Aseprite sprite", "aseprite,ase"}};
 constexpr FileFilter kJsonFilters[] = {{"JSON", "json"}};
+constexpr FileFilter kGltfFilters[] = {{"glTF model", "gltf"}};
+constexpr FileFilter kThreeJSPackFilters[] = {{"ThreeJSPack", "threejspack"}};
 
 struct SkyboxOption {
     const char* name;
@@ -1210,6 +1212,13 @@ std::string replace_extension(const std::string& path, const char* extension) {
 }
 
 std::string minecraft_texture_path_for(const std::string& model_path) {
+    std::filesystem::path fs_path = path_from_utf8(model_path);
+    std::string texture_name = path_to_utf8(fs_path.stem()) + "_texture.png";
+    fs_path.replace_filename(path_from_utf8(texture_name));
+    return path_to_utf8(fs_path);
+}
+
+std::string gltf_texture_path_for(const std::string& model_path) {
     std::filesystem::path fs_path = path_from_utf8(model_path);
     std::string texture_name = path_to_utf8(fs_path.stem()) + "_texture.png";
     fs_path.replace_filename(path_from_utf8(texture_name));
@@ -1368,10 +1377,27 @@ void EditorApp::refresh_texture() {
         return;
     }
     composite_ = document_.composite_active();
-    canvas_texture_.update(document_.width, document_.height, composite_);
+    tiled_canvas_texture_.invalidate();
+    tiled_onion_texture_.invalidate();
+    full_canvas_texture_dirty_ = true;
     texture_dirty_ = false;
     history_playback_frame_change_ = false;
     invalidate_histogram_cache();
+}
+
+void EditorApp::ensure_full_canvas_texture() {
+    const std::size_t expected_size = static_cast<std::size_t>(document_.width) * static_cast<std::size_t>(document_.height);
+    if (composite_.size() != expected_size) {
+        composite_ = document_.composite_active();
+        tiled_canvas_texture_.invalidate();
+        full_canvas_texture_dirty_ = true;
+    }
+    if (full_canvas_texture_dirty_ ||
+        canvas_texture_.width() != document_.width ||
+        canvas_texture_.height() != document_.height) {
+        canvas_texture_.update(document_.width, document_.height, composite_);
+        full_canvas_texture_dirty_ = false;
+    }
 }
 
 void EditorApp::invalidate_histogram_cache() {
@@ -1944,6 +1970,33 @@ void EditorApp::draw_main_menu() {
                 std::string error;
                 if (export_model_json(path, model_, &error)) set_status(std::string("Exported ") + path);
                 else report_error("Export model JSON: " + path, error);
+            }
+        }
+        if (ImGui::MenuItem("Export glTF Model...")) {
+            std::string model_path;
+            if (accept_dialog_result(save_file_dialog(filter_list(kGltfFilters), gltf_model_path_), model_path)) {
+                model_path = with_default_extension(model_path, ".gltf");
+                std::string texture_path = gltf_texture_path_for(model_path);
+                std::string texture_reference = filename_for_reference(texture_path);
+                copy_path(gltf_model_path_, sizeof(gltf_model_path_), model_path);
+                copy_path(gltf_texture_path_, sizeof(gltf_texture_path_), texture_path);
+                std::string error;
+                bool ok = export_gltf_model(model_path, model_, texture_reference, &error);
+                if (ok) {
+                    ok = export_png(texture_path, document_, document_.active_frame, &error);
+                }
+                if (ok) set_status("Exported glTF model and texture");
+                else report_error("Export glTF model: " + model_path, error);
+            }
+        }
+        if (ImGui::MenuItem("Export ThreeJSPack...")) {
+            std::string path;
+            if (accept_dialog_result(save_file_dialog(filter_list(kThreeJSPackFilters), threejs_pack_path_), path)) {
+                path = with_default_extension(path, ".threejspack");
+                copy_path(threejs_pack_path_, sizeof(threejs_pack_path_), path);
+                std::string error;
+                if (export_threejs_pack(path, document_, model_, &error)) set_status(std::string("Exported ") + path);
+                else report_error("Export ThreeJSPack: " + path, error);
             }
         }
         if (ImGui::MenuItem("Import Minecraft Model...")) {
@@ -2655,15 +2708,26 @@ void EditorApp::draw_canvas() {
 
     if (onion_skin_ && document_.frames.size() > 1 && document_.active_frame > 0) {
         auto previous = document_.composite_frame(document_.active_frame - 1);
-        onion_texture_.update(document_.width, document_.height, previous);
-        onion_texture_.bind_nearest();
         push_nearest_sampler(draw_list);
-        draw_list->AddImage(gl_texture_id(onion_texture_.id()), origin, max,
-                            ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 160, 160, 90));
+        tiled_onion_texture_.draw_visible(draw_list,
+                                          document_.width,
+                                          document_.height,
+                                          previous,
+                                          origin,
+                                          zoom_,
+                                          viewport_origin,
+                                          ImVec2(viewport_origin.x + viewport_size.x, viewport_origin.y + viewport_size.y),
+                                          IM_COL32(255, 160, 160, 90));
     }
-    canvas_texture_.bind_nearest();
     push_nearest_sampler(draw_list);
-    draw_list->AddImage(gl_texture_id(canvas_texture_.id()), origin, max);
+    tiled_canvas_texture_.draw_visible(draw_list,
+                                       document_.width,
+                                       document_.height,
+                                       composite_,
+                                       origin,
+                                       zoom_,
+                                       viewport_origin,
+                                       ImVec2(viewport_origin.x + viewport_size.x, viewport_origin.y + viewport_size.y));
     push_linear_sampler(draw_list);
     draw_mask_overlay(draw_list, origin, canvas_size);
     draw_grid_overlay(draw_list, origin, canvas_size);
@@ -5031,7 +5095,9 @@ void EditorApp::rebuild_effect_preview() {
     }
     if (!document_.has_active_cel()) {
         composite_ = document_.composite_active();
+        tiled_canvas_texture_.invalidate();
         canvas_texture_.update(document_.width, document_.height, composite_);
+        full_canvas_texture_dirty_ = false;
         effect_preview_dirty_ = false;
         return;
     }
@@ -5043,7 +5109,9 @@ void EditorApp::rebuild_effect_preview() {
         apply_effect_to(effect_preview_document_);
     }
     composite_ = effect_preview_document_.composite_active();
+    tiled_canvas_texture_.invalidate();
     canvas_texture_.update(effect_preview_document_.width, effect_preview_document_.height, composite_);
+    full_canvas_texture_dirty_ = false;
     effect_preview_dirty_ = false;
 }
 
@@ -6058,6 +6126,7 @@ void EditorApp::draw_model_panel() {
     handle_uv_input(origin, uv_scale);
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(origin, ImVec2(origin.x + atlas_size.x, origin.y + atlas_size.y), IM_COL32(70, 70, 70, 255));
+    ensure_full_canvas_texture();
     canvas_texture_.bind_nearest();
     push_nearest_sampler(draw_list);
     draw_list->AddImage(gl_texture_id(canvas_texture_.id()), origin, ImVec2(origin.x + atlas_size.x, origin.y + atlas_size.y));
@@ -6099,6 +6168,7 @@ void EditorApp::draw_tile_preview_window() {
         draw_list->AddRectFilled(origin,
                                  ImVec2(origin.x + preview_size.x, origin.y + preview_size.y),
                                  IM_COL32(92, 92, 92, 255));
+        ensure_full_canvas_texture();
         canvas_texture_.bind_nearest();
         push_nearest_sampler(draw_list);
         for (int y = 0; y < 3; ++y) {
@@ -6446,6 +6516,7 @@ void EditorApp::draw_model_preview() {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(38, 42, 46, 255));
     draw_skybox_background(draw_list, origin, size);
+    ensure_full_canvas_texture();
     const bool rendered_model = renderer3d_.render_model_to_texture(model_,
                                                                     canvas_texture_.id(),
                                                                     document_.width,

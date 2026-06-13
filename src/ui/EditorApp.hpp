@@ -11,6 +11,7 @@
 #include "depth/DepthMapExtractor.hpp"
 #include "render/GpuEffectRenderer.hpp"
 #include "render/GLCanvasTexture.hpp"
+#include "render/GLTiledCanvasTexture.hpp"
 #include "render/MpsEffectRenderer.hpp"
 #include "render/Renderer3D.hpp"
 #include "ui/AppSettings.hpp"
@@ -121,8 +122,9 @@ private:
     ModelDocument model_;
     ToolContext tool_;
     GLCanvasTexture canvas_texture_;
-    GLCanvasTexture onion_texture_;
     GLCanvasTexture transform_preview_texture_;
+    GLTiledCanvasTexture tiled_canvas_texture_;
+    GLTiledCanvasTexture tiled_onion_texture_;
     GpuEffectRenderer gpu_effect_renderer_;
     MpsEffectRenderer mps_effect_renderer_;
     std::array<GLCanvasTexture, 4> transform_icon_textures_;
@@ -132,6 +134,7 @@ private:
     AppSettings settings_;
     std::vector<Pixel> composite_;
     bool texture_dirty_ = true;
+    bool full_canvas_texture_dirty_ = true;
     bool wants_quit_ = false;
 
     float zoom_ = 12.0f;
@@ -261,6 +264,9 @@ private:
     char apng_path_[512] = "animation.png";
     char aseprite_path_[512] = "sprite.aseprite";
     char model_path_[512] = "model.json";
+    char gltf_model_path_[512] = "model.gltf";
+    char gltf_texture_path_[512] = "texture.png";
+    char threejs_pack_path_[512] = "model.threejspack";
     char minecraft_model_path_[512] = "minecraft_model.json";
     char minecraft_texture_path_[512] = "texture.png";
     char text_buffer_[128] = "TEXT";
@@ -311,6 +317,7 @@ private:
 
     void update_playback();
     void refresh_texture();
+    void ensure_full_canvas_texture();
     void invalidate_histogram_cache();
     void update_histogram_cache();
     void set_status(const std::string& status);

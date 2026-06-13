@@ -5,6 +5,7 @@
 #include "io/ProjectIO.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -409,6 +410,337 @@ std::vector<unsigned char> chunk_with_header(std::uint16_t type, const std::vect
     write_le16(out, type);
     out.insert(out.end(), payload.begin(), payload.end());
     return out;
+}
+
+struct ExportVec2 {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+struct ExportVec3 {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+struct ExportFaceQuad {
+    std::array<ExportVec3, 4> p;
+    int cuboid = 0;
+    int face = 0;
+};
+
+constexpr float kPi = 3.14159265358979323846f;
+
+float export_radians(float degrees) {
+    return degrees * kPi / 180.0f;
+}
+
+ExportVec3 operator+(ExportVec3 a, ExportVec3 b) {
+    return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+ExportVec3 operator-(ExportVec3 a, ExportVec3 b) {
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+ExportVec3 rotate_export_point(ExportVec3 point, const Cuboid& cuboid) {
+    if (std::abs(cuboid.rotation_angle) <= 0.0001f) {
+        return point;
+    }
+
+    const ExportVec3 origin{cuboid.rotation_origin[0], cuboid.rotation_origin[1], cuboid.rotation_origin[2]};
+    const ExportVec3 p = point - origin;
+    const float angle = export_radians(cuboid.rotation_angle);
+    const float s = std::sin(angle);
+    const float c = std::cos(angle);
+    ExportVec3 rotated = p;
+    switch (std::clamp(cuboid.rotation_axis, 0, 2)) {
+        case 0:
+            rotated = {p.x, p.y * c - p.z * s, p.y * s + p.z * c};
+            break;
+        case 2:
+            rotated = {p.x * c - p.y * s, p.x * s + p.y * c, p.z};
+            break;
+        default:
+            rotated = {p.x * c + p.z * s, p.y, -p.x * s + p.z * c};
+            break;
+    }
+    return rotated + origin;
+}
+
+void add_export_face_quad(std::vector<ExportFaceQuad>& out, const Cuboid& cuboid, int cuboid_index, int face) {
+    const float x0 = std::min(cuboid.from[0], cuboid.to[0]);
+    const float y0 = std::min(cuboid.from[1], cuboid.to[1]);
+    const float z0 = std::min(cuboid.from[2], cuboid.to[2]);
+    const float x1 = std::max(cuboid.from[0], cuboid.to[0]);
+    const float y1 = std::max(cuboid.from[1], cuboid.to[1]);
+    const float z1 = std::max(cuboid.from[2], cuboid.to[2]);
+
+    ExportFaceQuad quad;
+    quad.cuboid = cuboid_index;
+    quad.face = face;
+    switch (face) {
+        case 0: quad.p = {{{x0, y0, z0}, {x1, y0, z0}, {x1, y1, z0}, {x0, y1, z0}}}; break;
+        case 1: quad.p = {{{x1, y0, z1}, {x0, y0, z1}, {x0, y1, z1}, {x1, y1, z1}}}; break;
+        case 2: quad.p = {{{x1, y0, z0}, {x1, y0, z1}, {x1, y1, z1}, {x1, y1, z0}}}; break;
+        case 3: quad.p = {{{x0, y0, z1}, {x0, y0, z0}, {x0, y1, z0}, {x0, y1, z1}}}; break;
+        case 4: quad.p = {{{x0, y1, z0}, {x1, y1, z0}, {x1, y1, z1}, {x0, y1, z1}}}; break;
+        default: quad.p = {{{x0, y0, z1}, {x1, y0, z1}, {x1, y0, z0}, {x0, y0, z0}}}; break;
+    }
+    for (ExportVec3& point : quad.p) {
+        point = rotate_export_point(point, cuboid);
+    }
+    out.push_back(quad);
+}
+
+std::vector<ExportFaceQuad> export_face_quads(const ModelDocument& model) {
+    std::vector<ExportFaceQuad> out;
+    out.reserve(model.cuboids.size() * 6U);
+    for (int ci = 0; ci < static_cast<int>(model.cuboids.size()); ++ci) {
+        for (int face = 0; face < 6; ++face) {
+            add_export_face_quad(out, model.cuboids[static_cast<std::size_t>(ci)], ci, face);
+        }
+    }
+    return out;
+}
+
+void align_bytes(std::vector<unsigned char>& bytes, std::size_t alignment) {
+    while (bytes.size() % alignment != 0U) {
+        bytes.push_back(0);
+    }
+}
+
+void append_u32_le(std::vector<unsigned char>& bytes, std::uint32_t value) {
+    bytes.push_back(static_cast<unsigned char>(value & 0xffU));
+    bytes.push_back(static_cast<unsigned char>((value >> 8U) & 0xffU));
+    bytes.push_back(static_cast<unsigned char>((value >> 16U) & 0xffU));
+    bytes.push_back(static_cast<unsigned char>((value >> 24U) & 0xffU));
+}
+
+void append_float_le(std::vector<unsigned char>& bytes, float value) {
+    std::uint32_t raw = 0;
+    static_assert(sizeof(raw) == sizeof(value));
+    std::memcpy(&raw, &value, sizeof(value));
+    append_u32_le(bytes, raw);
+}
+
+std::string base64_encode(const std::vector<unsigned char>& bytes) {
+    static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((bytes.size() + 2U) / 3U) * 4U);
+    for (std::size_t i = 0; i < bytes.size(); i += 3U) {
+        const std::uint32_t b0 = bytes[i];
+        const std::uint32_t b1 = i + 1U < bytes.size() ? bytes[i + 1U] : 0U;
+        const std::uint32_t b2 = i + 2U < bytes.size() ? bytes[i + 2U] : 0U;
+        const std::uint32_t triple = (b0 << 16U) | (b1 << 8U) | b2;
+        out.push_back(alphabet[(triple >> 18U) & 0x3fU]);
+        out.push_back(alphabet[(triple >> 12U) & 0x3fU]);
+        out.push_back(i + 1U < bytes.size() ? alphabet[(triple >> 6U) & 0x3fU] : '=');
+        out.push_back(i + 2U < bytes.size() ? alphabet[triple & 0x3fU] : '=');
+    }
+    return out;
+}
+
+nlohmann::json gltf_json_for_model(const ModelDocument& source_model, const std::string& texture_path) {
+    ModelDocument model = source_model;
+    clamp_model_uvs(model);
+
+    std::vector<float> positions;
+    std::vector<float> texcoords;
+    std::vector<std::uint32_t> indices;
+    std::array<float, 3> min_position = {
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max()
+    };
+    std::array<float, 3> max_position = {
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest()
+    };
+
+    const int texture_width = std::max(1, model.texture_width);
+    const int texture_height = std::max(1, model.texture_height);
+    for (const ExportFaceQuad& quad : export_face_quads(model)) {
+        const auto& uv = model.cuboids[static_cast<std::size_t>(quad.cuboid)].uv[static_cast<std::size_t>(quad.face)];
+        const float u0 = static_cast<float>(uv.x) / static_cast<float>(texture_width);
+        const float v0 = static_cast<float>(uv.y) / static_cast<float>(texture_height);
+        const float u1 = static_cast<float>(uv.x + uv.w) / static_cast<float>(texture_width);
+        const float v1 = static_cast<float>(uv.y + uv.h) / static_cast<float>(texture_height);
+        const std::array<ExportVec2, 4> uvp = {{{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}}};
+        const auto base_index = static_cast<std::uint32_t>(positions.size() / 3U);
+        for (int i = 0; i < 4; ++i) {
+            const ExportVec3 p = quad.p[static_cast<std::size_t>(i)];
+            positions.push_back(p.x);
+            positions.push_back(p.y);
+            positions.push_back(p.z);
+            texcoords.push_back(uvp[static_cast<std::size_t>(i)].x);
+            texcoords.push_back(uvp[static_cast<std::size_t>(i)].y);
+            min_position[0] = std::min(min_position[0], p.x);
+            min_position[1] = std::min(min_position[1], p.y);
+            min_position[2] = std::min(min_position[2], p.z);
+            max_position[0] = std::max(max_position[0], p.x);
+            max_position[1] = std::max(max_position[1], p.y);
+            max_position[2] = std::max(max_position[2], p.z);
+        }
+        indices.insert(indices.end(), {
+            base_index + 0U,
+            base_index + 1U,
+            base_index + 2U,
+            base_index + 0U,
+            base_index + 2U,
+            base_index + 3U
+        });
+    }
+
+    std::vector<unsigned char> buffer;
+    const std::size_t position_offset = buffer.size();
+    for (float value : positions) {
+        append_float_le(buffer, value);
+    }
+    align_bytes(buffer, 4U);
+    const std::size_t texcoord_offset = buffer.size();
+    for (float value : texcoords) {
+        append_float_le(buffer, value);
+    }
+    align_bytes(buffer, 4U);
+    const std::size_t index_offset = buffer.size();
+    for (std::uint32_t value : indices) {
+        append_u32_le(buffer, value);
+    }
+
+    nlohmann::json root;
+    root["asset"] = {{"version", "2.0"}, {"generator", "PixelArt98"}};
+    root["extensionsUsed"] = {"KHR_materials_unlit"};
+    root["scene"] = 0;
+    root["scenes"] = {{{"nodes", {0}}}};
+    root["nodes"] = {{{"name", "PixelArt98 Model"}, {"mesh", 0}}};
+    root["meshes"] = {{
+        {"name", "PixelArt98 Cuboids"},
+        {"primitives", {{
+            {"attributes", {{"POSITION", 0}, {"TEXCOORD_0", 1}}},
+            {"indices", 2},
+            {"material", 0},
+            {"mode", 4}
+        }}}
+    }};
+    root["materials"] = {{
+        {"name", "PixelArt98 Texture"},
+        {"pbrMetallicRoughness", {
+            {"baseColorTexture", {{"index", 0}}},
+            {"metallicFactor", 0.0},
+            {"roughnessFactor", 1.0}
+        }},
+        {"alphaMode", "BLEND"},
+        {"doubleSided", true},
+        {"extensions", {{"KHR_materials_unlit", nlohmann::json::object()}}}
+    }};
+    root["textures"] = {{{"sampler", 0}, {"source", 0}}};
+    root["samplers"] = {{
+        {"magFilter", 9728},
+        {"minFilter", 9728},
+        {"wrapS", 33071},
+        {"wrapT", 33071}
+    }};
+    root["images"] = {{{"uri", texture_path}, {"mimeType", "image/png"}}};
+    root["buffers"] = {{
+        {"uri", "data:application/octet-stream;base64," + base64_encode(buffer)},
+        {"byteLength", buffer.size()}
+    }};
+    root["bufferViews"] = {
+        {
+            {"buffer", 0},
+            {"byteOffset", position_offset},
+            {"byteLength", positions.size() * sizeof(float)},
+            {"target", 34962}
+        },
+        {
+            {"buffer", 0},
+            {"byteOffset", texcoord_offset},
+            {"byteLength", texcoords.size() * sizeof(float)},
+            {"target", 34962}
+        },
+        {
+            {"buffer", 0},
+            {"byteOffset", index_offset},
+            {"byteLength", indices.size() * sizeof(std::uint32_t)},
+            {"target", 34963}
+        }
+    };
+    root["accessors"] = {
+        {
+            {"bufferView", 0},
+            {"componentType", 5126},
+            {"count", positions.size() / 3U},
+            {"type", "VEC3"},
+            {"min", min_position},
+            {"max", max_position}
+        },
+        {
+            {"bufferView", 1},
+            {"componentType", 5126},
+            {"count", texcoords.size() / 2U},
+            {"type", "VEC2"}
+        },
+        {
+            {"bufferView", 2},
+            {"componentType", 5125},
+            {"count", indices.size()},
+            {"type", "SCALAR"}
+        }
+    };
+    root["extras"] = {
+        {"pixelart98", {
+            {"texture_size", {texture_width, texture_height}},
+            {"source_model", nlohmann::json::parse(model_to_json(model))}
+        }}
+    };
+    return root;
+}
+
+std::string threejs_pack_loader_js() {
+    return R"(import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+export const PixelArt98ThreeJSPack = {
+  model: 'model.gltf',
+  texture: 'texture.png',
+  generator: 'PixelArt98'
+};
+
+export function configurePixelArt98Model(root) {
+  root.traverse((object) => {
+    if (!object.isMesh) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      if (!material) continue;
+      if (material.map) {
+        material.map.magFilter = THREE.NearestFilter;
+        material.map.minFilter = THREE.NearestFilter;
+        material.map.needsUpdate = true;
+      }
+      material.transparent = true;
+      material.needsUpdate = true;
+    }
+  });
+  return root;
+}
+
+export async function loadPixelArt98Model(options = {}) {
+  const { manager, onProgress, path = new URL('./', import.meta.url).href } = options;
+  const loader = new GLTFLoader(manager);
+  loader.setPath(path.endsWith('/') ? path : `${path}/`);
+  const gltf = await loader.loadAsync(PixelArt98ThreeJSPack.model, onProgress);
+  configurePixelArt98Model(gltf.scene);
+  return gltf;
+}
+
+export async function addPixelArt98Model(scene, options = {}) {
+  const gltf = await loadPixelArt98Model(options);
+  scene.add(gltf.scene);
+  return gltf;
+}
+)";
 }
 
 } // namespace
@@ -1151,6 +1483,71 @@ bool import_model_json(const std::string& path, ModelDocument& out_model, std::s
     std::stringstream buffer;
     buffer << file.rdbuf();
     return model_from_json(buffer.str(), out_model, error);
+}
+
+bool export_gltf_model(const std::string& path, const ModelDocument& model, const std::string& texture_path, std::string* error) {
+    if (model.cuboids.empty()) {
+        set_error(error, "Cannot export an empty model as glTF");
+        return false;
+    }
+
+    std::ofstream file(path);
+    if (!file) {
+        set_error(error, "Could not write glTF model: " + path);
+        return false;
+    }
+    file << gltf_json_for_model(model, texture_path).dump(2);
+    return true;
+}
+
+bool export_threejs_pack(const std::string& path, const Document& document, const ModelDocument& model, std::string* error) {
+    if (model.cuboids.empty()) {
+        set_error(error, "Cannot export an empty model as ThreeJSPack");
+        return false;
+    }
+    if (document.frames.empty()) {
+        set_error(error, "Cannot export ThreeJSPack without a texture frame");
+        return false;
+    }
+
+    const int frame = std::clamp(document.active_frame, 0, static_cast<int>(document.frames.size()) - 1);
+    std::vector<unsigned char> texture_png;
+    if (!encode_png_rgba(document.width, document.height, document.composite_frame(frame), texture_png)) {
+        set_error(error, "Could not encode ThreeJSPack texture");
+        return false;
+    }
+
+    const std::string gltf = gltf_json_for_model(model, "texture.png").dump(2);
+    const std::string loader = threejs_pack_loader_js();
+    const nlohmann::json manifest = {
+        {"format", "pixelart98-threejspack"},
+        {"version", 1},
+        {"generator", "PixelArt98"},
+        {"model", "model.gltf"},
+        {"texture", "texture.png"},
+        {"loader", "PixelArt98ThreeJSPack.js"},
+        {"texture_size", {document.width, document.height}},
+        {"active_frame", frame}
+    };
+    const std::string manifest_text = manifest.dump(2);
+
+    mz_zip_archive zip{};
+    if (!mz_zip_writer_init_file(&zip, path.c_str(), 0)) {
+        set_error(error, "Could not create ThreeJSPack archive: " + path);
+        return false;
+    }
+
+    bool ok = true;
+    ok = ok && mz_zip_writer_add_mem(&zip, "model.gltf", gltf.data(), gltf.size(), MZ_BEST_COMPRESSION);
+    ok = ok && mz_zip_writer_add_mem(&zip, "texture.png", texture_png.data(), texture_png.size(), MZ_BEST_COMPRESSION);
+    ok = ok && mz_zip_writer_add_mem(&zip, "PixelArt98ThreeJSPack.js", loader.data(), loader.size(), MZ_BEST_COMPRESSION);
+    ok = ok && mz_zip_writer_add_mem(&zip, "manifest.json", manifest_text.data(), manifest_text.size(), MZ_BEST_COMPRESSION);
+    ok = ok && mz_zip_writer_finalize_archive(&zip);
+    mz_zip_writer_end(&zip);
+    if (!ok) {
+        set_error(error, "Could not finish ThreeJSPack archive");
+    }
+    return ok;
 }
 
 bool export_minecraft_model(const std::string& path, const ModelDocument& model, const std::string& texture_path, std::string* error) {

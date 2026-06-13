@@ -6,6 +6,7 @@
 #include "core/Model.hpp"
 #include "io/ProjectIO.hpp"
 
+#include <miniz.h>
 #include <nlohmann/json.hpp>
 #include <stb_image_write.h>
 
@@ -85,6 +86,23 @@ bool bytes_start_with(const std::vector<unsigned char>& bytes, std::string_view 
 bool file_contains(const std::filesystem::path& path, std::string_view needle) {
     const auto bytes = read_bytes(path);
     return std::search(bytes.begin(), bytes.end(), needle.begin(), needle.end()) != bytes.end();
+}
+
+std::vector<unsigned char> read_zip_entry(const std::filesystem::path& path, const char* name) {
+    mz_zip_archive zip{};
+    assert(mz_zip_reader_init_file(&zip, path.string().c_str(), 0));
+    std::size_t size = 0;
+    void* mem = mz_zip_reader_extract_file_to_heap(&zip, name, &size, 0);
+    assert(mem != nullptr);
+    std::vector<unsigned char> bytes(static_cast<unsigned char*>(mem), static_cast<unsigned char*>(mem) + size);
+    mz_free(mem);
+    mz_zip_reader_end(&zip);
+    return bytes;
+}
+
+std::string read_zip_text(const std::filesystem::path& path, const char* name) {
+    const auto bytes = read_zip_entry(path, name);
+    return {bytes.begin(), bytes.end()};
 }
 
 Pixel expected_pixel(int frame, int layer, int x, int y) {
@@ -394,6 +412,45 @@ void test_minecraft_model_roundtrip(const std::filesystem::path& root) {
     assert(imported.cuboids[0].uv[0].w == 5);
 }
 
+void test_gltf_model_export(const std::filesystem::path& root) {
+    const ModelDocument source = make_model();
+    const auto path = root / "classic model.gltf";
+    std::string error;
+    assert(export_gltf_model(path.string(), source, "classic model_texture.png", &error));
+
+    const auto gltf = read_json(path);
+    assert(gltf.at("asset").at("version").get<std::string>() == "2.0");
+    assert(gltf.at("extensionsUsed").at(0).get<std::string>() == "KHR_materials_unlit");
+    assert(gltf.at("images").at(0).at("uri").get<std::string>() == "classic model_texture.png");
+    assert(gltf.at("samplers").at(0).at("magFilter").get<int>() == 9728);
+    assert(gltf.at("accessors").at(0).at("count").get<std::size_t>() == 24U);
+    assert(gltf.at("accessors").at(2).at("count").get<std::size_t>() == 36U);
+    assert(gltf.at("buffers").at(0).at("uri").get<std::string>().starts_with("data:application/octet-stream;base64,"));
+    assert(gltf.at("extras").at("pixelart98").at("source_model").at("cuboids").at(0).at("name").get<std::string>() == "Panel");
+}
+
+void test_threejs_pack_export(const std::filesystem::path& root) {
+    const Document document = make_document();
+    const ModelDocument model = make_model();
+    const auto path = root / "packed model.threejspack";
+    std::string error;
+    assert(export_threejs_pack(path.string(), document, model, &error));
+
+    const auto manifest = nlohmann::json::parse(read_zip_text(path, "manifest.json"));
+    assert(manifest.at("format").get<std::string>() == "pixelart98-threejspack");
+    assert(manifest.at("model").get<std::string>() == "model.gltf");
+    assert(manifest.at("texture").get<std::string>() == "texture.png");
+
+    const auto gltf = nlohmann::json::parse(read_zip_text(path, "model.gltf"));
+    assert(gltf.at("images").at(0).at("uri").get<std::string>() == "texture.png");
+    assert(bytes_start_with(read_zip_entry(path, "texture.png"), "\x89PNG\r\n\x1A\n"));
+
+    const std::string loader = read_zip_text(path, "PixelArt98ThreeJSPack.js");
+    assert(loader.find("three/addons/loaders/GLTFLoader.js") != std::string::npos);
+    assert(loader.find("loadAsync") != std::string::npos);
+    assert(loader.find("NearestFilter") != std::string::npos);
+}
+
 void test_import_failures_are_reported(const std::filesystem::path& root) {
     std::string error;
     Document document;
@@ -425,6 +482,8 @@ int main() {
     test_aseprite_roundtrip(root);
     test_model_json_roundtrip(root);
     test_minecraft_model_roundtrip(root);
+    test_gltf_model_export(root);
+    test_threejs_pack_export(root);
     test_import_failures_are_reported(root);
     std::filesystem::remove_all(root);
     std::cout << "pixelart import/export tests passed\n";

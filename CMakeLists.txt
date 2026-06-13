@@ -125,6 +125,7 @@ add_library(pixelart_app
     src/depth/DepthMapExtractor.cpp
     src/render/GpuEffectRenderer.cpp
     src/render/GLCanvasTexture.cpp
+    src/render/GLTiledCanvasTexture.cpp
     src/render/Renderer3D.cpp
     src/ui/AppSettings.cpp
     src/ui/EmbeddedAssets.cpp
@@ -229,7 +230,7 @@ if(PIXELART_BUILD_TESTS)
     add_test(NAME pixelart_core_tests COMMAND pixelart_tests)
 
     add_executable(pixelart_io_tests tests/io_roundtrip_tests.cpp)
-    target_link_libraries(pixelart_io_tests PRIVATE pixelart_core stb_headers)
+    target_link_libraries(pixelart_io_tests PRIVATE pixelart_core miniz_lib stb_headers)
     pixelart_configure_project_target(pixelart_io_tests)
     add_test(NAME pixelart_io_tests COMMAND pixelart_io_tests)
 
