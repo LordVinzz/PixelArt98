@@ -60,6 +60,8 @@ public:
     int width() const { return width_; }
     int height() const { return height_; }
     [[nodiscard]] const std::string& last_error() const noexcept { return last_error_; }
+    [[nodiscard]] static const char* vertex_shader_source();
+    [[nodiscard]] static const char* fragment_shader_source();
 
 private:
     bool ensure_target(int width, int height);

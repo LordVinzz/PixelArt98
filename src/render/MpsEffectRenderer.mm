@@ -176,8 +176,8 @@ float evaluate_point_curve(float value, constant Uniforms& u) {
                 float y0 = clamp(curve_y_at(i - 1, u), 0.0, 1.0);
                 float y1 = clamp(curve_y_at(i, u), 0.0, 1.0);
                 float t = clamp((target - x0) / max(0.001, x1 - x0), 0.0, 1.0);
-                float smooth = t * t * (3.0 - 2.0 * t);
-                return mix(y0, y1, smooth);
+                float smooth_t = t * t * (3.0 - 2.0 * t);
+                return mix(y0, y1, smooth_t);
             }
         }
     }
@@ -387,6 +387,10 @@ MpsEffectRenderer::MpsEffectRenderer()
     : impl_(std::make_unique<Impl>()) {}
 
 MpsEffectRenderer::~MpsEffectRenderer() = default;
+
+const char* MpsEffectRenderer::metal_shader_source() {
+    return kMetalSource;
+}
 
 bool MpsEffectRenderer::available() const {
     return impl_ != nullptr && impl_->device != nil;

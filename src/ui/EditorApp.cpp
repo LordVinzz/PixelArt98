@@ -4,22 +4,26 @@
 
 #include "ui/EditorApp.hpp"
 
+#include "core/MemoryTrace.hpp"
 #include "io/ProjectIO.hpp"
 #include "ui/EmbeddedTransformIcons.h"
 
 #include <stb_image.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
 #include <unordered_map>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace px {
@@ -845,6 +849,108 @@ bool document_metadata_equal(const Document& a_value, const Document& b_value) {
     return true;
 }
 
+bool can_use_active_cel_as_composite(const Document& document) {
+    if (document.layers.size() != 1U || document.frames.empty() ||
+        document.active_frame < 0 || document.active_frame >= static_cast<int>(document.frames.size())) {
+        return false;
+    }
+    const Layer& layer = document.layers.front();
+    if (!layer.visible || layer.opacity < 0.999f || layer.blend_mode != LayerBlendMode::Normal ||
+        layer.mask_enabled || layer.clip_to_below) {
+        return false;
+    }
+    const Frame& frame = document.frames[static_cast<std::size_t>(document.active_frame)];
+    if (frame.cels.size() != 1U) {
+        return false;
+    }
+    const Cel& cel = frame.cels.front();
+    return cel.x == 0 && cel.y == 0 &&
+           cel.pixels.size() == static_cast<std::size_t>(document.width) * static_cast<std::size_t>(document.height);
+}
+
+bool full_canvas_texture_fits_budget(int width, int height) {
+    constexpr std::size_t kMaxFullCanvasTexturePixels = 8192U * 8192U;
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+    return static_cast<std::size_t>(width) * static_cast<std::size_t>(height) <= kMaxFullCanvasTexturePixels;
+}
+
+std::size_t huge_document_pixel_threshold() {
+    constexpr std::size_t kDefaultHugeDocumentPixels = (256U * 1024U * 1024U) / sizeof(Pixel);
+    const char* threshold = std::getenv("PIXELART_HUGE_DOCUMENT_PIXEL_THRESHOLD");
+    if (threshold == nullptr || threshold[0] == '\0') {
+        return kDefaultHugeDocumentPixels;
+    }
+    const char* end = threshold + std::strlen(threshold);
+    std::size_t parsed = 0;
+    const auto result = std::from_chars(threshold, end, parsed);
+    if (result.ec == std::errc{} && result.ptr == end && parsed > 0U) {
+        return parsed;
+    }
+    return kDefaultHugeDocumentPixels;
+}
+
+std::size_t env_size_or_default(const char* name, std::size_t fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    const char* end = value + std::strlen(value);
+    std::size_t parsed = 0;
+    const auto result = std::from_chars(value, end, parsed);
+    if (result.ec == std::errc{} && result.ptr == end && parsed > 0U) {
+        return parsed;
+    }
+    return fallback;
+}
+
+bool is_huge_document_dimensions(int width, int height) {
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+    return static_cast<std::size_t>(width) * static_cast<std::size_t>(height) >= huge_document_pixel_threshold();
+}
+
+bool is_huge_document(const Document& document) {
+    return is_huge_document_dimensions(document.width, document.height);
+}
+
+void trace_document_pixel_buffers(std::string_view label, const Document& document) {
+    if (!memory_trace_enabled()) {
+        return;
+    }
+    const std::size_t expected_pixels = document.width > 0 && document.height > 0
+                                            ? static_cast<std::size_t>(document.width) * static_cast<std::size_t>(document.height)
+                                            : 0U;
+    memory_trace_event("document",
+                       {},
+                       label,
+                       nullptr,
+                       expected_pixels,
+                       expected_pixels,
+                       sizeof(Pixel),
+                       "frames=" + std::to_string(document.frames.size()) + ";layers=" + std::to_string(document.layers.size()));
+    for (std::size_t frame_index = 0; frame_index < document.frames.size(); ++frame_index) {
+        const Frame& frame = document.frames[frame_index];
+        for (std::size_t cel_index = 0; cel_index < frame.cels.size(); ++cel_index) {
+            memory_trace_vector(std::string(label) + ".frame" + std::to_string(frame_index) +
+                                    ".cel" + std::to_string(cel_index),
+                                frame.cels[cel_index].pixels);
+        }
+    }
+}
+
+std::size_t document_pixel_capacity(const Document& document) {
+    std::size_t total = 0;
+    for (const Frame& frame : document.frames) {
+        for (const Cel& cel : frame.cels) {
+            total += cel.pixels.capacity();
+        }
+    }
+    return total;
+}
+
 struct HistogramBins {
     std::array<int, 256> luma{};
     std::array<int, 256> red{};
@@ -917,6 +1023,18 @@ HistogramBins build_histogram_bins(const std::vector<Pixel>& pixels) {
         }
     }
     return merged;
+}
+
+HistogramBins build_histogram_bins_sampled(const std::vector<Pixel>& pixels, std::size_t max_samples) {
+    if (pixels.size() <= max_samples || max_samples == 0U) {
+        return build_histogram_bins(pixels);
+    }
+    HistogramBins bins;
+    const std::size_t stride = std::max<std::size_t>(1U, pixels.size() / max_samples);
+    for (std::size_t i = 0; i < pixels.size(); i += stride) {
+        add_pixel_to_histogram(bins, pixels[i]);
+    }
+    return bins;
 }
 
 std::array<float, 256> normalize_histogram(const std::array<int, 256>& hist) {
@@ -1299,10 +1417,53 @@ EditorApp::~EditorApp() {
     if (depth_thread_.joinable()) {
         depth_thread_.join();
     }
+    if (image_import_thread_.joinable()) {
+        image_import_thread_.join();
+    }
     save_settings();
 }
 
+void EditorApp::debug_replace_document_for_memory_test(Document document) {
+    document_ = std::move(document);
+    sync_model_texture_metadata();
+    reset_history_tree();
+    texture_dirty_ = true;
+    full_canvas_texture_dirty_ = true;
+    refresh_texture();
+}
+
+bool EditorApp::debug_huge_document_history_mode() const {
+    return huge_document_history_mode();
+}
+
+bool EditorApp::debug_canvas_uses_active_cel() const {
+    return composite_uses_active_cel_;
+}
+
+std::size_t EditorApp::debug_composite_pixel_capacity() const {
+    return composite_.capacity();
+}
+
+std::size_t EditorApp::debug_history_document_pixel_capacity() const {
+    std::size_t total = document_pixel_capacity(history_before_document_);
+    for (const EditorHistoryNode& node : history_nodes_) {
+        total += document_pixel_capacity(node.before_document);
+        total += document_pixel_capacity(node.after_document);
+    }
+    return total;
+}
+
+void EditorApp::debug_update_histogram_cache_for_memory_test() {
+    invalidate_histogram_cache();
+    update_histogram_cache();
+}
+
+bool EditorApp::debug_histogram_cache_approximate() const {
+    return histogram_cache_approximate_;
+}
+
 void EditorApp::render() {
+    finish_image_import_job_if_ready();
     update_playback();
     refresh_texture();
     begin_history_frame();
@@ -1332,10 +1493,19 @@ void EditorApp::render() {
     draw_effect_preview_popup();
     draw_rotate_zoom_popup();
     draw_depth_map_popup();
+    draw_image_import_popup();
     draw_undo_tree_window();
     draw_error_console();
     draw_status_bar();
     end_history_frame();
+}
+
+void EditorApp::import_image_document(const std::string& path) {
+    if (path.empty()) {
+        return;
+    }
+    copy_path(image_path_, sizeof(image_path_), path);
+    start_image_document_import(path);
 }
 
 void EditorApp::update_playback() {
@@ -1370,13 +1540,28 @@ void EditorApp::update_playback() {
 }
 
 void EditorApp::refresh_texture() {
+    MemoryTraceScope trace("refresh_texture");
     if (effect_preview_active_) {
         return;
     }
     if (!texture_dirty_) {
         return;
     }
-    composite_ = document_.composite_active();
+    trace_document_pixel_buffers("refresh_texture.document_before", document_);
+    memory_trace_vector("refresh_texture.composite_before", composite_);
+    composite_uses_active_cel_ = can_use_active_cel_as_composite(document_);
+    if (composite_uses_active_cel_) {
+        composite_.clear();
+        composite_.shrink_to_fit();
+        memory_trace_note("refresh_texture.using_active_cel");
+    } else {
+        composite_ = document_.composite_active();
+    }
+    memory_trace_vector("refresh_texture.composite_after", composite_);
+    if (is_huge_document(document_) && tiled_canvas_texture_.has_prepared_pyramid()) {
+        memory_trace_note("refresh_texture.clear_stale_pyramid", "huge_document_edit");
+        tiled_canvas_texture_.clear_prepared_pyramid();
+    }
     tiled_canvas_texture_.invalidate();
     tiled_onion_texture_.invalidate();
     full_canvas_texture_dirty_ = true;
@@ -1385,43 +1570,77 @@ void EditorApp::refresh_texture() {
     invalidate_histogram_cache();
 }
 
-void EditorApp::ensure_full_canvas_texture() {
+const std::vector<Pixel>& EditorApp::canvas_pixels() const {
+    if (composite_uses_active_cel_ && document_.has_active_cel()) {
+        return document_.active_cel().pixels;
+    }
+    return composite_;
+}
+
+bool EditorApp::ensure_full_canvas_texture() {
+    MemoryTraceScope trace("ensure_full_canvas_texture");
     const std::size_t expected_size = static_cast<std::size_t>(document_.width) * static_cast<std::size_t>(document_.height);
-    if (composite_.size() != expected_size) {
+    if (!full_canvas_texture_fits_budget(document_.width, document_.height)) {
+        canvas_texture_.destroy();
+        full_canvas_texture_dirty_ = true;
+        return false;
+    }
+    const std::vector<Pixel>* source = &canvas_pixels();
+    memory_trace_vector("ensure_full_canvas_texture.source", *source);
+    if (source->size() != expected_size) {
         composite_ = document_.composite_active();
+        composite_uses_active_cel_ = false;
+        source = &composite_;
+        memory_trace_vector("ensure_full_canvas_texture.composite_fallback", composite_);
         tiled_canvas_texture_.invalidate();
         full_canvas_texture_dirty_ = true;
     }
     if (full_canvas_texture_dirty_ ||
         canvas_texture_.width() != document_.width ||
         canvas_texture_.height() != document_.height) {
-        canvas_texture_.update(document_.width, document_.height, composite_);
+        canvas_texture_.update(document_.width, document_.height, *source);
         full_canvas_texture_dirty_ = false;
     }
+    return canvas_texture_.id() != 0;
 }
 
 void EditorApp::invalidate_histogram_cache() {
     histogram_cache_valid_ = false;
+    histogram_cache_approximate_ = false;
 }
 
 void EditorApp::update_histogram_cache() {
+    MemoryTraceScope trace("update_histogram_cache");
     if (histogram_cache_valid_ &&
         histogram_cache_width_ == document_.width &&
         histogram_cache_height_ == document_.height) {
         return;
     }
 
-    if (composite_.size() != static_cast<std::size_t>(document_.width * document_.height)) {
+    const std::vector<Pixel>* source = &canvas_pixels();
+    memory_trace_vector("update_histogram_cache.source_initial", *source);
+    const std::size_t expected_size = static_cast<std::size_t>(document_.width) * static_cast<std::size_t>(document_.height);
+    if (source->size() != expected_size) {
         composite_ = document_.composite_active();
+        composite_uses_active_cel_ = false;
+        source = &composite_;
+        memory_trace_vector("update_histogram_cache.composite_fallback", composite_);
     }
 
-    const HistogramBins bins = build_histogram_bins(composite_);
+    const std::size_t max_huge_display_histogram_samples =
+        env_size_or_default("PIXELART_HISTOGRAM_SAMPLE_LIMIT", 1024U * 1024U);
+    const bool approximate_display = is_huge_document(document_) && source->size() > max_huge_display_histogram_samples;
+    const HistogramBins bins = approximate_display
+                                   ? build_histogram_bins_sampled(*source, max_huge_display_histogram_samples)
+                                   : build_histogram_bins(*source);
+    memory_trace_note("update_histogram_cache.mode", approximate_display ? "sampled" : "full");
     histogram_luma_values_ = normalize_histogram(bins.luma);
     histogram_red_values_ = normalize_histogram(bins.red);
     histogram_green_values_ = normalize_histogram(bins.green);
     histogram_blue_values_ = normalize_histogram(bins.blue);
     histogram_cache_width_ = document_.width;
     histogram_cache_height_ = document_.height;
+    histogram_cache_approximate_ = approximate_display;
     histogram_cache_valid_ = true;
 }
 
@@ -1474,13 +1693,23 @@ void EditorApp::sync_model_texture_metadata() {
 }
 
 void EditorApp::begin_history_frame() {
+    if (huge_document_history_mode()) {
+        return;
+    }
     if (history_suppress_frame_ && !history_pending_) {
         history_before_document_ = document_;
         history_before_model_ = model_;
     }
 }
 
+bool EditorApp::huge_document_history_mode() const {
+    return history_lightweight_mode_ || is_huge_document(document_);
+}
+
 bool EditorApp::editor_state_changed_from_history_baseline() const {
+    if (huge_document_history_mode()) {
+        return !model_state_equal(history_before_model_, model_);
+    }
     return !document_state_equal(history_before_document_, document_) ||
            !model_state_equal(history_before_model_, model_);
 }
@@ -1534,20 +1763,31 @@ std::string EditorApp::history_label_from_changes(const Document& before_documen
 }
 
 void EditorApp::reset_history_tree() {
+    MemoryTraceScope trace("reset_history_tree");
+    trace_document_pixel_buffers("reset_history_tree.document", document_);
     document_.clear_recent_commit_names();
     history_nodes_.clear();
+    history_lightweight_mode_ = is_huge_document(document_);
+    memory_trace_note("reset_history_tree.mode", history_lightweight_mode_ ? "lightweight" : "full");
     EditorHistoryNode root;
     root.id = 0;
     root.parent = -1;
-    root.name = "Initial State";
-    root.before_document = document_;
-    root.after_document = document_;
+    root.name = history_lightweight_mode_ ? "Initial State (lightweight)" : "Initial State";
+    if (!history_lightweight_mode_) {
+        root.before_document = document_;
+        root.after_document = document_;
+    }
     root.before_model = model_;
     root.after_model = model_;
     history_nodes_.push_back(std::move(root));
     history_current_node_ = 0;
     next_history_node_id_ = 1;
-    history_before_document_ = document_;
+    history_before_document_ = history_lightweight_mode_ ? Document{} : document_;
+    trace_document_pixel_buffers("reset_history_tree.history_before_document", history_before_document_);
+    if (!history_nodes_.empty()) {
+        trace_document_pixel_buffers("reset_history_tree.root_before_document", history_nodes_.front().before_document);
+        trace_document_pixel_buffers("reset_history_tree.root_after_document", history_nodes_.front().after_document);
+    }
     history_before_model_ = model_;
     history_pending_ = false;
     history_suppress_frame_ = true;
@@ -1577,7 +1817,9 @@ void EditorApp::restore_history_node(int node_id) {
     if (node == nullptr) {
         return;
     }
-    document_ = node->after_document;
+    if (!huge_document_history_mode()) {
+        document_ = node->after_document;
+    }
     model_ = node->after_model;
     document_.clear_recent_commit_names();
     history_current_node_ = node->id;
@@ -1623,10 +1865,18 @@ void EditorApp::prune_history_tree() {
 }
 
 void EditorApp::push_history_entry(const std::string& name,
-                                   Document before_document,
-                                   ModelDocument before_model,
-                                   Document after_document,
-                                   ModelDocument after_model) {
+                                   const Document& before_document,
+                                   const ModelDocument& before_model,
+                                   const Document& after_document,
+                                   const ModelDocument& after_model) {
+    MemoryTraceScope trace("push_history_entry", name);
+    trace_document_pixel_buffers("push_history_entry.before_document", before_document);
+    trace_document_pixel_buffers("push_history_entry.after_document", after_document);
+    if (is_huge_document(before_document) || is_huge_document(after_document)) {
+        memory_trace_note("push_history_entry.skipped", "huge_document");
+        history_before_model_ = after_model;
+        return;
+    }
     if (document_state_equal(before_document, after_document) && model_state_equal(before_model, after_model)) {
         return;
     }
@@ -1634,10 +1884,10 @@ void EditorApp::push_history_entry(const std::string& name,
     node.id = next_history_node_id_++;
     node.parent = history_current_node_;
     node.name = name;
-    node.before_document = std::move(before_document);
-    node.before_model = std::move(before_model);
-    node.after_document = std::move(after_document);
-    node.after_model = std::move(after_model);
+    node.before_document = before_document;
+    node.before_model = before_model;
+    node.after_document = after_document;
+    node.after_model = after_model;
     history_nodes_.push_back(std::move(node));
     if (EditorHistoryNode* parent = history_node_by_id(history_current_node_)) {
         parent->children.push_back(history_nodes_.back().id);
@@ -1648,6 +1898,14 @@ void EditorApp::push_history_entry(const std::string& name,
 }
 
 void EditorApp::end_history_frame() {
+    if (huge_document_history_mode()) {
+        document_.clear_recent_commit_names();
+        history_pending_ = false;
+        history_suppress_frame_ = false;
+        history_playback_frame_change_ = false;
+        history_before_model_ = model_;
+        return;
+    }
     if (history_suppress_frame_) {
         history_pending_ = false;
         history_before_document_ = document_;
@@ -1696,6 +1954,17 @@ void EditorApp::end_history_frame() {
 }
 
 bool EditorApp::undo_editor() {
+    if (huge_document_history_mode()) {
+        const bool changed = document_.undo();
+        if (changed) {
+            sync_model_texture_metadata();
+            texture_dirty_ = true;
+            history_pending_ = false;
+            history_suppress_frame_ = true;
+            set_status("Undo");
+        }
+        return changed;
+    }
     const EditorHistoryNode* current = history_node_by_id(history_current_node_);
     if (current != nullptr && current->parent >= 0) {
         restore_history_node(current->parent);
@@ -1714,6 +1983,17 @@ bool EditorApp::undo_editor() {
 }
 
 bool EditorApp::redo_editor() {
+    if (huge_document_history_mode()) {
+        const bool changed = document_.redo();
+        if (changed) {
+            sync_model_texture_metadata();
+            texture_dirty_ = true;
+            history_pending_ = false;
+            history_suppress_frame_ = true;
+            set_status("Redo");
+        }
+        return changed;
+    }
     const EditorHistoryNode* current = history_node_by_id(history_current_node_);
     if (current != nullptr && !current->children.empty()) {
         int next_id = current->preferred_child;
@@ -1803,6 +2083,7 @@ void EditorApp::draw_dockspace() {
 }
 
 void EditorApp::draw_main_menu() {
+    MemoryTraceScope trace("draw_main_menu");
     if (!ImGui::BeginMainMenuBar()) {
         return;
     }
@@ -1855,17 +2136,7 @@ void EditorApp::draw_main_menu() {
             std::string path;
             if (accept_dialog_result(open_file_dialog(filter_list(kImageFilters), image_path_), path)) {
                 copy_path(image_path_, sizeof(image_path_), path);
-                std::string error;
-                Document imported;
-                if (import_image(path, imported, &error)) {
-                    document_ = std::move(imported);
-                    sync_model_texture_metadata();
-                    reset_history_tree();
-                    texture_dirty_ = true;
-                    set_status(std::string("Imported ") + path);
-                } else {
-                    report_error("Import image as document: " + path, error);
-                }
+                start_image_document_import(path);
             }
         }
         if (ImGui::MenuItem("Import Image as Layer...")) {
@@ -2610,6 +2881,7 @@ void EditorApp::draw_tool_options_bar() {
 }
 
 void EditorApp::draw_canvas() {
+    MemoryTraceScope trace("draw_canvas");
     ImGui::Begin("Canvas");
     bool zoom_out_requested = false;
     bool zoom_in_requested = false;
@@ -2691,7 +2963,11 @@ void EditorApp::draw_canvas() {
     draw_list->Flags &= ~(ImDrawListFlags_AntiAliasedLines | ImDrawListFlags_AntiAliasedFill);
     ImVec2 max(origin.x + canvas_size.x, origin.y + canvas_size.y);
 
-    if (show_checker_) {
+    const bool draw_checkerboard = show_checker_ && !is_huge_document(document_);
+    if (show_checker_ && !draw_checkerboard) {
+        draw_list->AddRectFilled(origin, max, IM_COL32(178, 178, 178, 255));
+        memory_trace_note("draw_canvas.checkerboard_disabled", "huge_document");
+    } else if (draw_checkerboard) {
         const float tile = std::max(4.0f, zoom_ * 2.0f);
         const int rows = std::max(0, static_cast<int>(std::ceil(canvas_size.y / tile)));
         const int columns = std::max(0, static_cast<int>(std::ceil(canvas_size.x / tile)));
@@ -2720,14 +2996,26 @@ void EditorApp::draw_canvas() {
                                           IM_COL32(255, 160, 160, 90));
     }
     push_nearest_sampler(draw_list);
+    memory_trace_vector("draw_canvas.canvas_pixels_before_draw", canvas_pixels());
     tiled_canvas_texture_.draw_visible(draw_list,
                                        document_.width,
                                        document_.height,
-                                       composite_,
+                                       canvas_pixels(),
                                        origin,
                                        zoom_,
                                        viewport_origin,
                                        ImVec2(viewport_origin.x + viewport_size.x, viewport_origin.y + viewport_size.y));
+    const GLTiledCanvasTexture::DrawStats& tiled_stats = tiled_canvas_texture_.last_draw_stats();
+    memory_trace_event("draw_stats",
+                       {},
+                       "draw_canvas.tiled_canvas",
+                       nullptr,
+                       static_cast<std::size_t>(std::max(0, tiled_stats.visible_tiles)),
+                       static_cast<std::size_t>(std::max(0, tiled_stats.pending_tiles)),
+                       static_cast<std::size_t>(std::max(0, tiled_stats.tiles_uploaded)),
+                       "level=" + std::to_string(tiled_stats.selected_level) +
+                           ";drew_lod=" + (tiled_stats.drew_lod ? std::string("1") : std::string("0")) +
+                           ";lod_uploaded=" + (tiled_stats.lod_uploaded ? std::string("1") : std::string("0")));
     push_linear_sampler(draw_list);
     draw_mask_overlay(draw_list, origin, canvas_size);
     draw_grid_overlay(draw_list, origin, canvas_size);
@@ -4877,9 +5165,7 @@ bool EditorApp::apply_affine_transform_to_document(const char* undo_name,
     }
     std::vector<Pixel> gpu_pixels;
     if (try_gpu_affine_transform(angle_degrees, zoom, pan_x, pan_y, resampling, gpu_pixels)) {
-        auto before = document_.snapshot_active_cel();
-        document_.active_cel().pixels = std::move(gpu_pixels);
-        document_.commit_active_cel_edit(undo_name, std::move(before));
+        document_.replace_active_pixels(std::move(gpu_pixels), undo_name);
         texture_dirty_ = true;
         set_status(std::string("Applied ") + undo_name + " using Heavy GPU Optimization");
         return true;
@@ -4908,9 +5194,7 @@ bool EditorApp::apply_effect_to_document(EffectPreviewKind kind) {
     }
     std::vector<Pixel> gpu_pixels;
     if (try_gpu_effect(kind, gpu_pixels)) {
-        auto before = document_.snapshot_active_cel();
-        document_.active_cel().pixels = std::move(gpu_pixels);
-        document_.commit_active_cel_edit(effect_preview_name(kind), std::move(before));
+        document_.replace_active_pixels(std::move(gpu_pixels), effect_preview_name(kind));
         texture_dirty_ = true;
         set_status(std::string("Applied ") + effect_preview_name(kind) + " using Heavy GPU Optimization");
         return true;
@@ -5095,6 +5379,7 @@ void EditorApp::rebuild_effect_preview() {
     }
     if (!document_.has_active_cel()) {
         composite_ = document_.composite_active();
+        composite_uses_active_cel_ = false;
         tiled_canvas_texture_.invalidate();
         canvas_texture_.update(document_.width, document_.height, composite_);
         full_canvas_texture_dirty_ = false;
@@ -5109,6 +5394,7 @@ void EditorApp::rebuild_effect_preview() {
         apply_effect_to(effect_preview_document_);
     }
     composite_ = effect_preview_document_.composite_active();
+    composite_uses_active_cel_ = false;
     tiled_canvas_texture_.invalidate();
     canvas_texture_.update(effect_preview_document_.width, effect_preview_document_.height, composite_);
     full_canvas_texture_dirty_ = false;
@@ -5565,6 +5851,227 @@ void EditorApp::insert_depth_map_layer(const DepthExtractionResult& result) {
     texture_dirty_ = true;
 }
 
+void EditorApp::start_image_document_import(const std::string& path) {
+    MemoryTraceScope trace("start_image_document_import", path);
+    {
+        std::lock_guard lock(image_import_mutex_);
+        if (image_import_job_running_) {
+            set_status("Image import is already running");
+            return;
+        }
+    }
+    if (image_import_thread_.joinable()) {
+        image_import_thread_.join();
+    }
+    {
+        std::lock_guard lock(image_import_mutex_);
+        image_import_progress_ = {0.0f, 0, 0, true, "Queued", "Queued image import"};
+        image_import_result_ = {};
+        image_import_pyramid_ = {};
+        image_import_error_.clear();
+        image_import_path_ = path;
+        image_import_result_pending_ = false;
+        image_import_job_running_ = true;
+    }
+    set_status("Importing image in background");
+
+    image_import_thread_ = std::thread([this, path]() {
+        MemoryTraceScope worker_trace("start_image_document_import.worker", path);
+        Document imported;
+        GLTiledCanvasTexture::CpuPyramid pyramid;
+        std::string error;
+        auto progress = [this](const ImageImportProgress& update) {
+            std::lock_guard lock(image_import_mutex_);
+            image_import_progress_ = {0.02f + update.fraction * 0.68f,
+                                      update.done,
+                                      update.total,
+                                      update.indeterminate,
+                                      update.phase.empty() ? std::string("Decoding image") : update.phase,
+                                      update.status};
+        };
+        const bool ok = import_image(path, imported, &error, progress);
+        trace_document_pixel_buffers("image_import_worker.imported_after_decode", imported);
+        if (ok && imported.has_active_cel() &&
+            GLTiledCanvasTexture::should_use_pyramid(imported.width, imported.height)) {
+            const auto pyramid_progress = [this](int done, int total, const char* status) {
+                const float fraction = total > 0 ? static_cast<float>(done) / static_cast<float>(total) : 0.0f;
+                std::lock_guard lock(image_import_mutex_);
+                image_import_progress_ = {0.72f + fraction * 0.22f,
+                                          done,
+                                          total,
+                                          total <= 0,
+                                          "Building pyramid",
+                                          status == nullptr ? std::string("Building image pyramid") : std::string(status)};
+            };
+            pyramid = GLTiledCanvasTexture::build_cpu_pyramid(imported.width,
+                                                              imported.height,
+                                                              imported.active_cel().pixels,
+                                                              pyramid_progress);
+            memory_trace_event("counter",
+                               {},
+                               "image_import_worker.pyramid_pixels",
+                               nullptr,
+                               pyramid.pixel_count(),
+                               pyramid.pixel_count(),
+                               sizeof(Pixel));
+        }
+        {
+            std::lock_guard lock(image_import_mutex_);
+            image_import_progress_ = {ok ? 0.96f : 1.0f,
+                                      0,
+                                      0,
+                                      ok,
+                                      ok ? std::string("Preparing document") : std::string("Import failed"),
+                                      ok ? std::string("Preparing document for display") : error};
+        }
+        std::lock_guard lock(image_import_mutex_);
+        if (ok) {
+            image_import_result_ = std::move(imported);
+            image_import_pyramid_ = std::move(pyramid);
+            trace_document_pixel_buffers("image_import_worker.result_buffer", image_import_result_);
+            memory_trace_event("counter",
+                               {},
+                               "image_import_worker.result_pyramid_pixels",
+                               nullptr,
+                               image_import_pyramid_.pixel_count(),
+                               image_import_pyramid_.pixel_count(),
+                               sizeof(Pixel));
+            image_import_result_pending_ = true;
+            image_import_error_.clear();
+        } else {
+            image_import_error_ = error.empty() ? "Image import failed" : error;
+            image_import_result_pending_ = false;
+        }
+        image_import_job_running_ = false;
+    });
+}
+
+void EditorApp::finish_image_import_job_if_ready() {
+    MemoryTraceScope trace("finish_image_import_job_if_ready");
+    bool running = false;
+    bool pending = false;
+    ImageImportJobProgress progress;
+    std::string error;
+    std::string path;
+    {
+        std::lock_guard lock(image_import_mutex_);
+        running = image_import_job_running_;
+        pending = image_import_result_pending_;
+        progress = image_import_progress_;
+        error = image_import_error_;
+        path = image_import_path_;
+    }
+    if (running) {
+        if (!progress.status.empty()) {
+            set_status(progress.status + " (" + std::to_string(static_cast<int>(progress.fraction * 100.0f)) + "%)");
+        }
+        return;
+    }
+    if (image_import_thread_.joinable()) {
+        image_import_thread_.join();
+    }
+    if (pending) {
+        Document imported;
+        GLTiledCanvasTexture::CpuPyramid pyramid;
+        {
+            std::lock_guard lock(image_import_mutex_);
+            imported = std::move(image_import_result_);
+            pyramid = std::move(image_import_pyramid_);
+            image_import_result_pending_ = false;
+        }
+        trace_document_pixel_buffers("finish_image_import_job_if_ready.imported_local", imported);
+        memory_trace_event("counter",
+                           {},
+                           "finish_image_import_job_if_ready.pyramid_local_pixels",
+                           nullptr,
+                           pyramid.pixel_count(),
+                           pyramid.pixel_count(),
+                           sizeof(Pixel));
+        document_ = std::move(imported);
+        trace_document_pixel_buffers("finish_image_import_job_if_ready.document_after_move", document_);
+        sync_model_texture_metadata();
+        reset_history_tree();
+        texture_dirty_ = true;
+        full_canvas_texture_dirty_ = true;
+        tiled_canvas_texture_.invalidate();
+        tiled_onion_texture_.invalidate();
+        refresh_texture();
+        if (!pyramid.empty()) {
+            tiled_canvas_texture_.set_prepared_pyramid(std::move(pyramid));
+        } else {
+            tiled_canvas_texture_.clear_prepared_pyramid();
+        }
+        set_status(std::string("Imported ") + path);
+        return;
+    }
+    if (!error.empty()) {
+        report_error("Import image as document: " + path, error);
+        std::lock_guard lock(image_import_mutex_);
+        image_import_error_.clear();
+    }
+}
+
+void EditorApp::draw_image_import_popup() {
+    bool running = false;
+    ImageImportJobProgress progress;
+    std::string path;
+    {
+        std::lock_guard lock(image_import_mutex_);
+        running = image_import_job_running_;
+        progress = image_import_progress_;
+        path = image_import_path_;
+    }
+
+    constexpr const char* kPopupName = "Importing Image";
+    if (running) {
+        ImGui::OpenPopup(kPopupName);
+    }
+    if (!ImGui::BeginPopupModal(kPopupName, nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+        return;
+    }
+    if (!running) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+
+    const float fraction = std::clamp(progress.fraction, 0.0f, 1.0f);
+    std::string filename = path;
+    if (!path.empty()) {
+        filename = std::filesystem::path(path).filename().string();
+        if (filename.empty()) {
+            filename = path;
+        }
+    }
+
+    ImGui::TextUnformatted("Import image as document");
+    ImGui::TextDisabled("%s", filename.c_str());
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", progress.phase.empty() ? "Loading image" : progress.phase.c_str());
+    if (progress.indeterminate || progress.total <= 0) {
+        const ImVec2 bar_size(420.0f, ImGui::GetFrameHeight());
+        const ImVec2 min_pos = ImGui::GetCursorScreenPos();
+        const ImVec2 max_pos(min_pos.x + bar_size.x, min_pos.y + bar_size.y);
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        draw_list->AddRectFilled(min_pos, max_pos, IM_COL32(55, 58, 65, 255), 3.0f);
+        const float segment_width = bar_size.x * 0.28f;
+        const float phase = std::fmod(static_cast<float>(ImGui::GetTime()) * 0.85f, 1.0f);
+        const float x = min_pos.x - segment_width + phase * (bar_size.x + segment_width * 2.0f);
+        draw_list->PushClipRect(min_pos, max_pos, true);
+        draw_list->AddRectFilled(ImVec2(x, min_pos.y),
+                                 ImVec2(x + segment_width, max_pos.y),
+                                 IM_COL32(105, 190, 255, 220),
+                                 3.0f);
+        draw_list->PopClipRect();
+        ImGui::Dummy(bar_size);
+    } else {
+        ImGui::ProgressBar(fraction, ImVec2(420.0f, 0.0f));
+        ImGui::TextDisabled("%d / %d", progress.done, progress.total);
+    }
+    ImGui::TextWrapped("%s", progress.status.empty() ? "Loading image" : progress.status.c_str());
+    ImGui::EndPopup();
+}
+
 int EditorApp::default_depth_of_field_layer() const {
     if (document_.layers.empty()) {
         return 0;
@@ -5726,6 +6233,15 @@ void EditorApp::draw_undo_tree_window() {
         return;
     }
 
+    if (huge_document_history_mode()) {
+        ImGui::TextUnformatted("Lightweight history");
+        ImGui::Separator();
+        ImGui::TextWrapped("Huge image documents use tile-diff undo to avoid multi-gigabyte history snapshots.");
+        ImGui::TextDisabled("Undo and redo still work for pixel edits.");
+        ImGui::End();
+        return;
+    }
+
     ImGui::Text("Actions: %d", std::max(0, static_cast<int>(history_nodes_.size()) - 1));
     ImGui::Separator();
 
@@ -5826,6 +6342,7 @@ void EditorApp::draw_undo_tree_window() {
 }
 
 void EditorApp::draw_histogram_plot() {
+    MemoryTraceScope trace("draw_histogram_plot");
     ImGui::TextUnformatted("Histogram");
     bool curve_changed = false;
     curve_changed |= ImGui::Checkbox("Luma", &histogram_luma_visible_);
@@ -5837,6 +6354,9 @@ void EditorApp::draw_histogram_plot() {
     curve_changed |= ImGui::Checkbox("Blue", &histogram_blue_visible_);
 
     update_histogram_cache();
+    if (histogram_cache_approximate_) {
+        ImGui::TextDisabled("Display histogram is sampled for this huge image.");
+    }
 
     const float plot_height = 104.0f;
     const float plot_width = std::max(160.0f, ImGui::GetContentRegionAvail().x);
@@ -5893,6 +6413,7 @@ void EditorApp::draw_histogram_plot() {
 }
 
 bool EditorApp::draw_curves_editor() {
+    MemoryTraceScope trace("draw_curves_editor");
     bool changed = false;
     changed |= ImGui::Checkbox("Luma", &histogram_luma_visible_);
     ImGui::SameLine();
@@ -5903,6 +6424,9 @@ bool EditorApp::draw_curves_editor() {
     changed |= ImGui::Checkbox("Blue", &histogram_blue_visible_);
 
     update_histogram_cache();
+    if (histogram_cache_approximate_) {
+        ImGui::TextDisabled("Display histogram is sampled for this huge image; curve math remains exact.");
+    }
 
     const float plot_height = 180.0f;
     const float plot_width = std::max(260.0f, ImGui::GetContentRegionAvail().x);
@@ -6126,12 +6650,15 @@ void EditorApp::draw_model_panel() {
     handle_uv_input(origin, uv_scale);
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(origin, ImVec2(origin.x + atlas_size.x, origin.y + atlas_size.y), IM_COL32(70, 70, 70, 255));
-    ensure_full_canvas_texture();
-    canvas_texture_.bind_nearest();
-    push_nearest_sampler(draw_list);
-    draw_list->AddImage(gl_texture_id(canvas_texture_.id()), origin, ImVec2(origin.x + atlas_size.x, origin.y + atlas_size.y));
-    push_linear_sampler(draw_list);
-    draw_uv_overlay(draw_list, origin, uv_scale);
+    if (ensure_full_canvas_texture()) {
+        canvas_texture_.bind_nearest();
+        push_nearest_sampler(draw_list);
+        draw_list->AddImage(gl_texture_id(canvas_texture_.id()), origin, ImVec2(origin.x + atlas_size.x, origin.y + atlas_size.y));
+        push_linear_sampler(draw_list);
+        draw_uv_overlay(draw_list, origin, uv_scale);
+    } else {
+        draw_list->AddText(origin, IM_COL32(230, 230, 230, 220), "Texture too large for atlas preview");
+    }
     ImGui::End();
 }
 
@@ -6168,18 +6695,21 @@ void EditorApp::draw_tile_preview_window() {
         draw_list->AddRectFilled(origin,
                                  ImVec2(origin.x + preview_size.x, origin.y + preview_size.y),
                                  IM_COL32(92, 92, 92, 255));
-        ensure_full_canvas_texture();
-        canvas_texture_.bind_nearest();
-        push_nearest_sampler(draw_list);
-        for (int y = 0; y < 3; ++y) {
-            for (int x = 0; x < 3; ++x) {
-                const ImVec2 min_pos(origin.x + static_cast<float>(x) * cell,
-                                     origin.y + static_cast<float>(y) * cell);
-                const ImVec2 max_pos(min_pos.x + cell, min_pos.y + cell);
-                draw_list->AddImage(gl_texture_id(canvas_texture_.id()), min_pos, max_pos);
+        if (ensure_full_canvas_texture()) {
+            canvas_texture_.bind_nearest();
+            push_nearest_sampler(draw_list);
+            for (int y = 0; y < 3; ++y) {
+                for (int x = 0; x < 3; ++x) {
+                    const ImVec2 min_pos(origin.x + static_cast<float>(x) * cell,
+                                         origin.y + static_cast<float>(y) * cell);
+                    const ImVec2 max_pos(min_pos.x + cell, min_pos.y + cell);
+                    draw_list->AddImage(gl_texture_id(canvas_texture_.id()), min_pos, max_pos);
+                }
             }
+            push_linear_sampler(draw_list);
+        } else {
+            draw_list->AddText(origin, IM_COL32(230, 230, 230, 220), "Texture too large for tile preview");
         }
-        push_linear_sampler(draw_list);
         draw_list->AddRect(origin,
                            ImVec2(origin.x + preview_size.x, origin.y + preview_size.y),
                            IM_COL32(20, 20, 20, 160));
@@ -6516,7 +7046,11 @@ void EditorApp::draw_model_preview() {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(38, 42, 46, 255));
     draw_skybox_background(draw_list, origin, size);
-    ensure_full_canvas_texture();
+    if (!ensure_full_canvas_texture()) {
+        draw_list->AddText(origin, IM_COL32(230, 230, 230, 220), "Texture too large for 3D preview");
+        draw_model_transform_toolbar(draw_list, origin);
+        return;
+    }
     const bool rendered_model = renderer3d_.render_model_to_texture(model_,
                                                                     canvas_texture_.id(),
                                                                     document_.width,
@@ -6524,7 +7058,7 @@ void EditorApp::draw_model_preview() {
                                                                     model_viewport_,
                                                                     static_cast<int>(size.x),
                                                                     static_cast<int>(size.y),
-                                                                    composite_);
+                                                                    canvas_pixels());
     if (rendered_model) {
         model_render_error_reported_ = false;
         draw_list->AddImage(gl_texture_id(renderer3d_.texture_id()),

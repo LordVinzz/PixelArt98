@@ -23,6 +23,7 @@
 #include <nfd_glfw3.h>
 
 #include <cstdio>
+#include <string>
 
 namespace {
 
@@ -52,8 +53,15 @@ void apply_style() {
 
 } // namespace
 
-int main(int, char** argv) {
-    static_cast<void>(argv);
+int main(int argc, char** argv) {
+    std::string import_image_path;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i] == nullptr ? std::string{} : std::string(argv[i]);
+        if (arg == "--import-image" && i + 1 < argc && argv[i + 1] != nullptr) {
+            import_image_path = argv[++i];
+        }
+    }
+
     const px::AppSettings settings = px::load_app_settings();
     if (settings.show_splash_screen) {
         px::show_startup_splash();
@@ -108,6 +116,9 @@ int main(int, char** argv) {
 
     {
         px::EditorApp app(nfd_ready ? &dialogs : nullptr, settings);
+        if (!import_image_path.empty()) {
+            app.import_image_document(import_image_path);
+        }
         while (!glfwWindowShouldClose(window) && !app.wants_quit()) {
             glfwPollEvents();
             ImGui_ImplOpenGL3_NewFrame();

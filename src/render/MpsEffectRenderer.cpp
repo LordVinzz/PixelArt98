@@ -33,6 +33,10 @@ bool MpsEffectRenderer::used_chunking() const {
     return false;
 }
 
+const char* MpsEffectRenderer::metal_shader_source() {
+    return "";
+}
+
 void MpsEffectRenderer::destroy() {}
 
 } // namespace px

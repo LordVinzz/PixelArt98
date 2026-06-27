@@ -106,6 +106,8 @@ public:
                                                  int height,
                                                  int halo,
                                                  const GpuBackendCapabilities& capabilities);
+    [[nodiscard]] static const char* vertex_shader_source();
+    [[nodiscard]] static const char* fragment_shader_source();
 
     unsigned int texture_id() const { return output_texture_; }
     int width() const { return width_; }

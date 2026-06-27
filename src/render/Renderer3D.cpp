@@ -51,6 +51,46 @@ struct RenderVertex {
     float selected;
 };
 
+constexpr const char* kRenderer3DVertexShader = R"GLSL(
+    #version 330 core
+    layout(location = 0) in vec3 in_pos;
+    layout(location = 1) in vec2 in_uv;
+    layout(location = 2) in float in_selected;
+    uniform mat4 u_mvp;
+    out vec2 v_uv;
+    flat out float v_selected;
+    void main() {
+        v_uv = in_uv;
+        v_selected = in_selected;
+        gl_Position = u_mvp * vec4(in_pos, 1.0);
+    }
+)GLSL";
+
+constexpr const char* kRenderer3DFragmentShader = R"GLSL(
+    #version 330 core
+    in vec2 v_uv;
+    flat in float v_selected;
+    uniform sampler2D u_texture;
+    uniform bool u_wireframe;
+    uniform vec4 u_wire_color;
+    out vec4 out_color;
+    void main() {
+        if (u_wireframe) {
+            out_color = v_selected > 0.5 ? vec4(1.0, 0.86, 0.08, 1.0) : u_wire_color;
+            return;
+        }
+        vec4 color = texture(u_texture, v_uv);
+        if (color.a <= 0.001) {
+            discard;
+        }
+        if (v_selected > 0.5) {
+            color.rgb = mix(color.rgb, vec3(1.0, 0.86, 0.08), 0.38);
+            color.a = max(color.a, 0.95);
+        }
+        out_color = color;
+    }
+)GLSL";
+
 struct FaceQuad {
     std::array<Vec3, 4> p;
     int cuboid = 0;
@@ -449,6 +489,14 @@ Renderer3D::~Renderer3D() {
     destroy();
 }
 
+const char* Renderer3D::vertex_shader_source() {
+    return kRenderer3DVertexShader;
+}
+
+const char* Renderer3D::fragment_shader_source() {
+    return kRenderer3DFragmentShader;
+}
+
 bool Renderer3D::init() {
     if (initialized_) {
         return true;
@@ -494,46 +542,8 @@ bool Renderer3D::ensure_program() {
         return true;
     }
     last_error_.clear();
-    const char* vertex_source = R"GLSL(
-        #version 330 core
-        layout(location = 0) in vec3 in_pos;
-        layout(location = 1) in vec2 in_uv;
-        layout(location = 2) in float in_selected;
-        uniform mat4 u_mvp;
-        out vec2 v_uv;
-        flat out float v_selected;
-        void main() {
-            v_uv = in_uv;
-            v_selected = in_selected;
-            gl_Position = u_mvp * vec4(in_pos, 1.0);
-        }
-    )GLSL";
-    const char* fragment_source = R"GLSL(
-        #version 330 core
-        in vec2 v_uv;
-        flat in float v_selected;
-        uniform sampler2D u_texture;
-        uniform bool u_wireframe;
-        uniform vec4 u_wire_color;
-        out vec4 out_color;
-        void main() {
-            if (u_wireframe) {
-                out_color = v_selected > 0.5 ? vec4(1.0, 0.86, 0.08, 1.0) : u_wire_color;
-                return;
-            }
-            vec4 color = texture(u_texture, v_uv);
-            if (color.a <= 0.001) {
-                discard;
-            }
-            if (v_selected > 0.5) {
-                color.rgb = mix(color.rgb, vec3(1.0, 0.86, 0.08), 0.38);
-                color.a = max(color.a, 0.95);
-            }
-            out_color = color;
-        }
-    )GLSL";
-    unsigned int vs = compile_shader(GL_VERTEX_SHADER, vertex_source, last_error_);
-    unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, fragment_source, last_error_);
+    unsigned int vs = compile_shader(GL_VERTEX_SHADER, kRenderer3DVertexShader, last_error_);
+    unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, kRenderer3DFragmentShader, last_error_);
     if (vs == 0 || fs == 0) {
         if (vs) glDeleteShader(vs);
         if (fs) glDeleteShader(fs);

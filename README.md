@@ -67,6 +67,15 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+The root Makefile wraps the same regular workflow:
+
+```sh
+make all
+make test
+```
+
+`make all` configures, builds, and runs the full regular test pass. `make test` builds first, then runs the same tests.
+
 Run either launcher:
 
 ```sh

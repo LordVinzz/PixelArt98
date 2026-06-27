@@ -4,6 +4,8 @@
 
 #include "io/ProjectIO.hpp"
 
+#include "core/MemoryTrace.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -412,6 +414,437 @@ std::vector<unsigned char> chunk_with_header(std::uint16_t type, const std::vect
     return out;
 }
 
+void publish_image_progress(const ImageImportProgressCallback& progress,
+                            float fraction,
+                            std::string status,
+                            std::string phase = {},
+                            int done = 0,
+                            int total = 0,
+                            bool indeterminate = false) {
+    if (progress) {
+        progress({std::clamp(fraction, 0.0f, 1.0f),
+                  done,
+                  total,
+                  indeterminate,
+                  std::move(phase),
+                  std::move(status)});
+    }
+}
+
+Document document_from_pixels_impl(int width, int height, std::vector<Pixel> pixels) {
+    Document document;
+    document.width = std::max(1, width);
+    document.height = std::max(1, height);
+    Layer background;
+    background.name = "Background";
+    document.layers.push_back(std::move(background));
+    Frame frame;
+    Cel cel;
+    cel.pixels = std::move(pixels);
+    frame.cels.push_back(std::move(cel));
+    document.frames.push_back(std::move(frame));
+    document.palette.colors = default_palette();
+    document.selection.resize(document.width, document.height);
+    document.clear_history();
+    return document;
+}
+
+std::uint32_t read_be32_bytes(const std::array<unsigned char, 4>& bytes) {
+    return (static_cast<std::uint32_t>(bytes[0]) << 24U) |
+           (static_cast<std::uint32_t>(bytes[1]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[2]) << 8U) |
+           static_cast<std::uint32_t>(bytes[3]);
+}
+
+bool read_exact(std::ifstream& file, unsigned char* data, std::size_t size) {
+    file.read(reinterpret_cast<char*>(data), static_cast<std::streamsize>(size));
+    return file.good() || (size == 0U && !file.bad());
+}
+
+bool skip_exact(std::ifstream& file, std::uint32_t size) {
+    constexpr std::streamoff kSkipChunk = 1024 * 1024;
+    std::uint32_t remaining = size;
+    while (remaining > 0U) {
+        const std::streamoff step = std::min<std::streamoff>(kSkipChunk, static_cast<std::streamoff>(remaining));
+        file.seekg(step, std::ios::cur);
+        if (!file) {
+            return false;
+        }
+        remaining -= static_cast<std::uint32_t>(step);
+    }
+    return true;
+}
+
+int png_channel_count(int color_type) {
+    switch (color_type) {
+        case 0: return 1;
+        case 2: return 3;
+        case 3: return 1;
+        case 4: return 2;
+        case 6: return 4;
+        default: return 0;
+    }
+}
+
+unsigned char png_paeth(unsigned char a_value, unsigned char b_value, unsigned char c_value) {
+    const int a_int = static_cast<int>(a_value);
+    const int b_int = static_cast<int>(b_value);
+    const int c_int = static_cast<int>(c_value);
+    const int p = a_int + b_int - c_int;
+    const int pa = std::abs(p - a_int);
+    const int pb = std::abs(p - b_int);
+    const int pc = std::abs(p - c_int);
+    if (pa <= pb && pa <= pc) {
+        return a_value;
+    }
+    return pb <= pc ? b_value : c_value;
+}
+
+struct StreamingPngState {
+    int width = 0;
+    int height = 0;
+    int bit_depth = 0;
+    int color_type = 0;
+    int channels = 0;
+    std::size_t row_bytes = 0;
+    std::size_t scanline_bytes = 0;
+    std::size_t scanline_offset = 0;
+    int row = 0;
+    std::vector<unsigned char> scanline;
+    std::vector<unsigned char> previous;
+    std::vector<unsigned char> current;
+    std::vector<Pixel> pixels;
+    std::array<Pixel, 256> palette = {};
+    std::array<std::uint8_t, 256> palette_alpha = {};
+    int palette_size = 0;
+};
+
+bool process_png_scanline(StreamingPngState& state, std::string& error) {
+    MemoryTraceScope trace("process_png_scanline");
+    if (state.scanline.empty() || state.row >= state.height) {
+        error = "PNG scanline overflow";
+        return false;
+    }
+    const unsigned char filter = state.scanline[0];
+    if (filter > 4U) {
+        error = "Unsupported PNG filter";
+        return false;
+    }
+    for (std::size_t i = 0; i < state.row_bytes; ++i) {
+        const unsigned char raw = state.scanline[i + 1U];
+        const unsigned char left = i >= static_cast<std::size_t>(state.channels) ? state.current[i - static_cast<std::size_t>(state.channels)] : 0U;
+        const unsigned char up = state.previous.empty() ? 0U : state.previous[i];
+        const unsigned char up_left = (!state.previous.empty() && i >= static_cast<std::size_t>(state.channels))
+                                          ? state.previous[i - static_cast<std::size_t>(state.channels)]
+                                          : 0U;
+        unsigned int value = raw;
+        switch (filter) {
+            case 1: value += left; break;
+            case 2: value += up; break;
+            case 3: value += (static_cast<unsigned int>(left) + static_cast<unsigned int>(up)) / 2U; break;
+            case 4: value += png_paeth(left, up, up_left); break;
+            default: break;
+        }
+        state.current[i] = static_cast<unsigned char>(value & 0xffU);
+    }
+
+    for (int x = 0; x < state.width; ++x) {
+        const std::size_t src = static_cast<std::size_t>(x) * static_cast<std::size_t>(state.channels);
+        Pixel pixel = 0;
+        switch (state.color_type) {
+            case 0: {
+                const std::uint8_t value = state.current[src];
+                pixel = rgba(value, value, value, 255);
+                break;
+            }
+            case 2:
+                pixel = rgba(state.current[src], state.current[src + 1U], state.current[src + 2U], 255);
+                break;
+            case 3: {
+                const int index = state.current[src];
+                pixel = index >= 0 && index < state.palette_size ? state.palette[static_cast<std::size_t>(index)] : rgba(0, 0, 0, 0);
+                break;
+            }
+            case 4: {
+                const std::uint8_t value = state.current[src];
+                pixel = rgba(value, value, value, state.current[src + 1U]);
+                break;
+            }
+            case 6:
+                pixel = rgba(state.current[src], state.current[src + 1U], state.current[src + 2U], state.current[src + 3U]);
+                break;
+            default:
+                error = "Unsupported PNG color type";
+                return false;
+        }
+        state.pixels[static_cast<std::size_t>(state.row) * static_cast<std::size_t>(state.width) + static_cast<std::size_t>(x)] = pixel;
+    }
+
+    state.previous = state.current;
+    ++state.row;
+    return true;
+}
+
+bool process_png_output_bytes(StreamingPngState& state,
+                              const unsigned char* bytes,
+                              std::size_t size,
+                              const ImageImportProgressCallback& progress,
+                              std::string& error) {
+    MemoryTraceScope trace("process_png_output_bytes");
+    memory_trace_event("buffer", {}, "process_png_output_bytes.input", bytes, size, size, 1U);
+    std::size_t offset = 0;
+    while (offset < size) {
+        const std::size_t copy_size = std::min(size - offset, state.scanline_bytes - state.scanline_offset);
+        std::copy_n(bytes + offset, copy_size, state.scanline.data() + state.scanline_offset);
+        offset += copy_size;
+        state.scanline_offset += copy_size;
+        if (state.scanline_offset == state.scanline_bytes) {
+            if (!process_png_scanline(state, error)) {
+                return false;
+            }
+            state.scanline_offset = 0;
+            if ((state.row & 255) == 0 || state.row == state.height) {
+                const float fraction = 0.10f + 0.85f * (static_cast<float>(state.row) / static_cast<float>(std::max(1, state.height)));
+                publish_image_progress(progress,
+                                       fraction,
+                                       "Decoding PNG rows " + std::to_string(state.row) + " / " + std::to_string(state.height),
+                                       "Decoding PNG",
+                                       state.row,
+                                       state.height);
+            }
+        }
+    }
+    return true;
+}
+
+bool decode_png_streaming_rgba_impl(const std::string& path,
+                                    int& width,
+                                    int& height,
+                                    std::vector<Pixel>& pixels,
+                                    std::string* error,
+                                    const ImageImportProgressCallback& progress) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        set_error(error, "Could not open PNG: " + path);
+        return false;
+    }
+
+    constexpr std::array<unsigned char, 8> kPngSignature = {137, 80, 78, 71, 13, 10, 26, 10};
+    std::array<unsigned char, 8> signature{};
+    if (!read_exact(file, signature.data(), signature.size()) || signature != kPngSignature) {
+        set_error(error, "File is not a PNG: " + path);
+        return false;
+    }
+
+    StreamingPngState state;
+    std::fill(state.palette_alpha.begin(), state.palette_alpha.end(), 255);
+    mz_stream stream{};
+    bool inflate_started = false;
+    bool inflate_finished = false;
+    std::vector<unsigned char> input_buffer(1024U * 1024U);
+    std::vector<unsigned char> output_buffer(1024U * 1024U);
+    memory_trace_vector("decode_png_streaming_rgba.input_buffer", input_buffer);
+    memory_trace_vector("decode_png_streaming_rgba.output_buffer", output_buffer);
+    publish_image_progress(progress, 0.02f, "Reading PNG header", "Reading header", 0, 0, true);
+
+    auto finish_with_error = [&](const std::string& message) {
+        if (inflate_started) {
+            mz_inflateEnd(&stream);
+        }
+        set_error(error, message);
+        return false;
+    };
+
+    for (;;) {
+        std::array<unsigned char, 4> length_bytes{};
+        std::array<unsigned char, 4> type_bytes{};
+        if (!read_exact(file, length_bytes.data(), length_bytes.size()) ||
+            !read_exact(file, type_bytes.data(), type_bytes.size())) {
+            return finish_with_error("Unexpected end of PNG");
+        }
+        const std::uint32_t chunk_length = read_be32_bytes(length_bytes);
+        const std::string chunk_type(reinterpret_cast<const char*>(type_bytes.data()), type_bytes.size());
+
+        if (chunk_type == "IHDR") {
+            if (chunk_length != 13U) {
+                return finish_with_error("Invalid PNG IHDR length");
+            }
+            std::array<unsigned char, 13> ihdr{};
+            if (!read_exact(file, ihdr.data(), ihdr.size())) {
+                return finish_with_error("Could not read PNG IHDR");
+            }
+            state.width = static_cast<int>((static_cast<std::uint32_t>(ihdr[0]) << 24U) |
+                                           (static_cast<std::uint32_t>(ihdr[1]) << 16U) |
+                                           (static_cast<std::uint32_t>(ihdr[2]) << 8U) |
+                                           static_cast<std::uint32_t>(ihdr[3]));
+            state.height = static_cast<int>((static_cast<std::uint32_t>(ihdr[4]) << 24U) |
+                                            (static_cast<std::uint32_t>(ihdr[5]) << 16U) |
+                                            (static_cast<std::uint32_t>(ihdr[6]) << 8U) |
+                                            static_cast<std::uint32_t>(ihdr[7]));
+            state.bit_depth = ihdr[8];
+            state.color_type = ihdr[9];
+            const int compression = ihdr[10];
+            const int filter = ihdr[11];
+            const int interlace = ihdr[12];
+            std::array<unsigned char, 4> crc{};
+            if (!read_exact(file, crc.data(), crc.size())) {
+                return finish_with_error("Could not read PNG IHDR CRC");
+            }
+            if (state.width <= 0 || state.height <= 0 || state.bit_depth != 8 || compression != 0 || filter != 0 || interlace != 0) {
+                return finish_with_error("Streaming PNG import supports non-interlaced 8-bit PNG images");
+            }
+            state.channels = png_channel_count(state.color_type);
+            if (state.channels == 0) {
+                return finish_with_error("Unsupported PNG color type");
+            }
+            const std::size_t pixel_count = static_cast<std::size_t>(state.width) * static_cast<std::size_t>(state.height);
+            if (pixel_count == 0U || pixel_count > std::numeric_limits<std::size_t>::max() / sizeof(Pixel)) {
+                return finish_with_error("PNG dimensions are too large");
+            }
+            state.row_bytes = static_cast<std::size_t>(state.width) * static_cast<std::size_t>(state.channels);
+            state.scanline_bytes = state.row_bytes + 1U;
+            state.scanline.assign(state.scanline_bytes, 0);
+            state.previous.assign(state.row_bytes, 0);
+            state.current.assign(state.row_bytes, 0);
+            state.pixels.resize(pixel_count);
+            memory_trace_vector("decode_png_streaming_rgba.scanline", state.scanline);
+            memory_trace_vector("decode_png_streaming_rgba.previous_row", state.previous);
+            memory_trace_vector("decode_png_streaming_rgba.current_row", state.current);
+            memory_trace_vector("decode_png_streaming_rgba.pixels", state.pixels);
+            width = state.width;
+            height = state.height;
+            publish_image_progress(progress,
+                                   0.05f,
+                                   "Allocating " + std::to_string(state.width) + " x " + std::to_string(state.height) + " image",
+                                   "Allocating image",
+                                   0,
+                                   0,
+                                   true);
+            continue;
+        }
+
+        if (chunk_type == "PLTE") {
+            if (chunk_length % 3U != 0U || chunk_length > 256U * 3U) {
+                return finish_with_error("Invalid PNG palette");
+            }
+            std::vector<unsigned char> palette_bytes(chunk_length);
+            if (!read_exact(file, palette_bytes.data(), palette_bytes.size())) {
+                return finish_with_error("Could not read PNG palette");
+            }
+            state.palette_size = static_cast<int>(chunk_length / 3U);
+            for (int i = 0; i < state.palette_size; ++i) {
+                const std::size_t src = static_cast<std::size_t>(i) * 3U;
+                state.palette[static_cast<std::size_t>(i)] =
+                    rgba(palette_bytes[src], palette_bytes[src + 1U], palette_bytes[src + 2U], state.palette_alpha[static_cast<std::size_t>(i)]);
+            }
+            std::array<unsigned char, 4> crc{};
+            if (!read_exact(file, crc.data(), crc.size())) {
+                return finish_with_error("Could not read PNG palette CRC");
+            }
+            continue;
+        }
+
+        if (chunk_type == "tRNS") {
+            std::vector<unsigned char> alpha_bytes(chunk_length);
+            if (!read_exact(file, alpha_bytes.data(), alpha_bytes.size())) {
+                return finish_with_error("Could not read PNG transparency");
+            }
+            if (state.color_type == 3) {
+                const std::size_t alpha_count = std::min<std::size_t>(alpha_bytes.size(), state.palette_alpha.size());
+                for (std::size_t i = 0; i < alpha_count; ++i) {
+                    state.palette_alpha[i] = alpha_bytes[i];
+                    if (i < static_cast<std::size_t>(state.palette_size)) {
+                        state.palette[i] = with_alpha(state.palette[i], alpha_bytes[i]);
+                    }
+                }
+            }
+            std::array<unsigned char, 4> crc{};
+            if (!read_exact(file, crc.data(), crc.size())) {
+                return finish_with_error("Could not read PNG transparency CRC");
+            }
+            continue;
+        }
+
+        if (chunk_type == "IDAT") {
+            if (state.width <= 0 || state.height <= 0) {
+                return finish_with_error("PNG IDAT arrived before IHDR");
+            }
+            if (!inflate_started) {
+                if (mz_inflateInit(&stream) != MZ_OK) {
+                    return finish_with_error("Could not initialize PNG inflater");
+                }
+                inflate_started = true;
+                publish_image_progress(progress, 0.08f, "Decoding PNG", "Decoding PNG", 0, state.height);
+            }
+            std::uint32_t remaining = chunk_length;
+            while (remaining > 0U) {
+                const std::size_t step = std::min<std::size_t>(input_buffer.size(), remaining);
+                if (!read_exact(file, input_buffer.data(), step)) {
+                    return finish_with_error("Could not read PNG image data");
+                }
+                remaining -= static_cast<std::uint32_t>(step);
+                stream.next_in = input_buffer.data();
+                stream.avail_in = static_cast<unsigned int>(step);
+                do {
+                    stream.next_out = output_buffer.data();
+                    stream.avail_out = static_cast<unsigned int>(output_buffer.size());
+                    const int result = mz_inflate(&stream, MZ_NO_FLUSH);
+                    const std::size_t produced = output_buffer.size() - static_cast<std::size_t>(stream.avail_out);
+                    std::string process_error;
+                    if (produced > 0U && !process_png_output_bytes(state, output_buffer.data(), produced, progress, process_error)) {
+                        return finish_with_error(process_error);
+                    }
+                    if (result == MZ_STREAM_END) {
+                        inflate_finished = true;
+                        break;
+                    }
+                    if (result != MZ_OK) {
+                        return finish_with_error("PNG inflate failed");
+                    }
+                } while (stream.avail_in > 0U || stream.avail_out == 0U);
+            }
+            std::array<unsigned char, 4> crc{};
+            if (!read_exact(file, crc.data(), crc.size())) {
+                return finish_with_error("Could not read PNG image data CRC");
+            }
+            continue;
+        }
+
+        if (chunk_type == "IEND") {
+            if (!skip_exact(file, chunk_length)) {
+                return finish_with_error("Could not read PNG end chunk");
+            }
+            std::array<unsigned char, 4> crc{};
+            if (!read_exact(file, crc.data(), crc.size())) {
+                return finish_with_error("Could not read PNG end chunk CRC");
+            }
+            break;
+        }
+
+        if (!skip_exact(file, chunk_length)) {
+            return finish_with_error("Could not skip PNG chunk");
+        }
+        std::array<unsigned char, 4> crc{};
+        if (!read_exact(file, crc.data(), crc.size())) {
+            return finish_with_error("Could not read PNG chunk CRC");
+        }
+    }
+
+    if (inflate_started) {
+        mz_inflateEnd(&stream);
+    }
+    if (!inflate_finished || state.row != state.height || state.scanline_offset != 0U) {
+        set_error(error, "PNG ended before all image rows were decoded");
+        return false;
+    }
+    memory_trace_vector("decode_png_streaming_rgba.state_pixels_before_move", state.pixels);
+    pixels = std::move(state.pixels);
+    memory_trace_vector("decode_png_streaming_rgba.output_pixels_after_move", pixels);
+    memory_trace_vector("decode_png_streaming_rgba.state_pixels_after_move", state.pixels);
+    publish_image_progress(progress, 0.96f, "Publishing decoded pixels", "Publishing image", 0, 0, true);
+    return true;
+}
+
 struct ExportVec2 {
     float x = 0.0f;
     float y = 0.0f;
@@ -745,6 +1178,29 @@ export async function addPixelArt98Model(scene, options = {}) {
 
 } // namespace
 
+Document document_from_pixels(int width, int height, std::vector<Pixel> pixels) {
+    MemoryTraceScope trace("document_from_pixels");
+    memory_trace_vector("document_from_pixels.input_pixels", pixels);
+    Document document = document_from_pixels_impl(width, height, std::move(pixels));
+    if (document.has_active_cel()) {
+        memory_trace_vector("document_from_pixels.document_pixels", document.active_cel().pixels);
+    }
+    memory_trace_vector("document_from_pixels.source_after_move", pixels);
+    return document;
+}
+
+bool decode_png_streaming_rgba(const std::string& path,
+                               int& width,
+                               int& height,
+                               std::vector<Pixel>& pixels,
+                               std::string* error,
+                               const ImageImportProgressCallback& progress) {
+    MemoryTraceScope trace("decode_png_streaming_rgba", path);
+    const bool ok = decode_png_streaming_rgba_impl(path, width, height, pixels, error, progress);
+    memory_trace_vector("decode_png_streaming_rgba.output", pixels);
+    return ok;
+}
+
 bool save_project(const std::string& path, const Document& document, const ModelDocument& model, std::string* error) {
     mz_zip_archive zip{};
     if (!mz_zip_writer_init_file(&zip, path.c_str(), 0)) {
@@ -872,21 +1328,69 @@ bool load_project(const std::string& path, ProjectBundle& out_bundle, std::strin
     return true;
 }
 
-bool import_image(const std::string& path, Document& out_document, std::string* error) {
+bool import_image(const std::string& path,
+                  Document& out_document,
+                  std::string* error,
+                  const ImageImportProgressCallback& progress) {
+    MemoryTraceScope trace("import_image", path);
+    publish_image_progress(progress, 0.01f, "Opening image", "Opening file", 0, 0, true);
     int width = 0;
     int height = 0;
     int channels = 0;
-    unsigned char* pixels = stbi_load(path.c_str(), &width, &height, &channels, 4);
+    unsigned char* pixels = nullptr;
+    {
+        MemoryTraceScope stbi_trace("stbi_load", path);
+        pixels = stbi_load(path.c_str(), &width, &height, &channels, 4);
+        if (pixels != nullptr && width > 0 && height > 0) {
+            const std::size_t pixel_count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+            memory_trace_event("buffer",
+                               {},
+                               "stbi_load.result",
+                               pixels,
+                               pixel_count,
+                               pixel_count,
+                               sizeof(Pixel),
+                               "channels=" + std::to_string(channels));
+        }
+    }
     if (!pixels) {
-        set_error(error, "Could not import image: " + path);
+        const char* reason = stbi_failure_reason();
+        const std::string failure = reason == nullptr ? std::string("unknown decoder failure") : std::string(reason);
+        std::vector<Pixel> streaming_pixels;
+        std::string streaming_error;
+        if (decode_png_streaming_rgba(path, width, height, streaming_pixels, &streaming_error, progress)) {
+            memory_trace_vector("import_image.streaming_pixels_before_document", streaming_pixels);
+            out_document = document_from_pixels(width, height, std::move(streaming_pixels));
+            if (out_document.has_active_cel()) {
+                memory_trace_vector("import_image.out_document_pixels", out_document.active_cel().pixels);
+            }
+            publish_image_progress(progress,
+                                   1.0f,
+                                   "Decoded " + std::to_string(width) + " x " + std::to_string(height) + " PNG",
+                                   "Decoded image",
+                                   1,
+                                   1);
+            return true;
+        }
+        set_error(error, "Could not import image: " + path + " (" + failure + "; streaming PNG fallback: " + streaming_error + ")");
         return false;
     }
-    Document document = Document::create(width, height);
-    document.active_cel().pixels.assign(reinterpret_cast<Pixel*>(pixels),
-                                        reinterpret_cast<Pixel*>(pixels + static_cast<std::size_t>(width * height * 4)));
+    const std::size_t pixel_count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    std::vector<Pixel> imported_pixels(reinterpret_cast<Pixel*>(pixels),
+                                       reinterpret_cast<Pixel*>(pixels + pixel_count * sizeof(Pixel)));
+    memory_trace_vector("import_image.imported_pixels", imported_pixels);
     stbi_image_free(pixels);
-    document.clear_history();
-    out_document = std::move(document);
+    memory_trace_note("import_image.stbi_buffer_freed");
+    out_document = document_from_pixels(width, height, std::move(imported_pixels));
+    if (out_document.has_active_cel()) {
+        memory_trace_vector("import_image.out_document_pixels", out_document.active_cel().pixels);
+    }
+    publish_image_progress(progress,
+                           1.0f,
+                           "Decoded " + std::to_string(width) + " x " + std::to_string(height) + " image",
+                           "Decoded image",
+                           1,
+                           1);
     return true;
 }
 

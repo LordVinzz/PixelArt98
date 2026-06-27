@@ -22,6 +22,8 @@ set_property(CACHE PIXELART_BACKEND PROPERTY STRINGS SDL2 GLFW)
 option(PIXELART_ENABLE_ANIMATION "Enable animation timeline features" ON)
 option(PIXELART_ENABLE_MODEL "Enable cuboid model texturing features" ON)
 option(PIXELART_BUILD_TESTS "Build unit tests" ON)
+option(PIXELART_ENABLE_SANITIZERS "Enable ASan/UBSan for Debug builds with supported compilers" ON)
+option(PIXELART_MEMORY_PROFILE_BUILD "Build with debug symbols, -O1, and frame pointers for allocation profiling" OFF)
 option(PIXELART_USE_LINUX_PORTAL_FILE_DIALOGS "Use xdg-desktop-portal for native Linux file dialogs" ON)
 option(PIXELART_ENABLE_ONNXRUNTIME "Enable ONNX Runtime-backed depth map extraction when ONNX Runtime is installed" ON)
 option(PIXELART_ENABLE_OPENCV_DNN "Enable OpenCV DNN-backed depth map extraction when OpenCV is installed" OFF)
@@ -87,6 +89,9 @@ function(pixelart_enable_project_warnings target)
 endfunction()
 
 function(pixelart_enable_debug_sanitizers target)
+    if(NOT PIXELART_ENABLE_SANITIZERS)
+        return()
+    endif()
     target_compile_options(${target} PRIVATE
         $<$<AND:$<CONFIG:Debug>,$<CXX_COMPILER_ID:GNU,Clang,AppleClang>>:
             -fsanitize=address,undefined
@@ -99,14 +104,38 @@ function(pixelart_enable_debug_sanitizers target)
         >)
 endfunction()
 
+function(pixelart_enable_memory_profile_flags target)
+    if(NOT PIXELART_MEMORY_PROFILE_BUILD)
+        return()
+    endif()
+    target_compile_options(${target} PRIVATE
+        $<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:
+            -g
+            -O1
+            -fno-omit-frame-pointer
+        >
+        $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:
+            -g
+            -O1
+            -fno-omit-frame-pointer
+        >)
+    target_link_options(${target} PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:
+            -g
+            -fno-omit-frame-pointer
+        >)
+endfunction()
+
 function(pixelart_configure_project_target target)
     pixelart_enable_project_warnings(${target})
     pixelart_enable_debug_sanitizers(${target})
+    pixelart_enable_memory_profile_flags(${target})
 endfunction()
 
 add_library(pixelart_core
     src/core/Document.cpp
     src/core/Filters.cpp
+    src/core/MemoryTrace.cpp
     src/core/Model.cpp
     src/core/Tools.cpp
     src/io/ProjectIO.cpp
@@ -233,6 +262,26 @@ if(PIXELART_BUILD_TESTS)
     target_link_libraries(pixelart_io_tests PRIVATE pixelart_core miniz_lib stb_headers)
     pixelart_configure_project_target(pixelart_io_tests)
     add_test(NAME pixelart_io_tests COMMAND pixelart_io_tests)
+
+    add_executable(pixelart_huge_image_memory_tests tests/huge_image_memory_tests.cpp)
+    target_link_libraries(pixelart_huge_image_memory_tests PRIVATE pixelart_app)
+    pixelart_configure_project_target(pixelart_huge_image_memory_tests)
+    add_test(NAME pixelart_huge_image_memory_tests COMMAND pixelart_huge_image_memory_tests)
+
+    add_executable(pixelart_shader_compile_tests tests/shader_compile_tests.cpp)
+    if(APPLE)
+        target_sources(pixelart_shader_compile_tests PRIVATE tests/metal_shader_compile_tests.mm)
+        set_source_files_properties(tests/metal_shader_compile_tests.mm PROPERTIES
+            LANGUAGE CXX
+            COMPILE_FLAGS "-x objective-c++ -fobjc-arc")
+    endif()
+    target_link_libraries(pixelart_shader_compile_tests PRIVATE pixelart_app)
+    target_include_directories(pixelart_shader_compile_tests SYSTEM PRIVATE
+        ${glfw_SOURCE_DIR}/include)
+    target_compile_definitions(pixelart_shader_compile_tests PRIVATE GL_SILENCE_DEPRECATION)
+    pixelart_configure_project_target(pixelart_shader_compile_tests)
+    add_test(NAME pixelart_shader_compile_tests COMMAND pixelart_shader_compile_tests)
+    set_tests_properties(pixelart_shader_compile_tests PROPERTIES TIMEOUT 15)
 
     add_executable(pixelart_opengl_smoke tests/opengl_smoke.cpp)
     target_link_libraries(pixelart_opengl_smoke PRIVATE pixelart_app)

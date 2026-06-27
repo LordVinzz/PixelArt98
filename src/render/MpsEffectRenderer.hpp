@@ -28,6 +28,7 @@ public:
     [[nodiscard]] GpuBackendCapabilities capabilities() const;
     [[nodiscard]] bool used_chunking() const;
     [[nodiscard]] const std::string& last_error() const noexcept { return last_error_; }
+    [[nodiscard]] static const char* metal_shader_source();
 
 private:
     struct Impl;

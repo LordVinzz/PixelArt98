@@ -7,6 +7,8 @@
 #include "core/Pixel.hpp"
 
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <optional>
 #include <string>
@@ -98,6 +100,36 @@ struct TileDiff {
     std::vector<Pixel> after;
 };
 
+struct HistoryPayloadRef {
+    std::string journal_path;
+    std::uint64_t data_offset = 0;
+    std::uint64_t pixel_count = 0;
+    std::uint64_t checksum = 0;
+
+    bool valid() const {
+        return !journal_path.empty() && pixel_count > 0;
+    }
+};
+
+struct HistoryPixelPayload {
+    std::vector<Pixel> pixels;
+    HistoryPayloadRef ref;
+    std::uint64_t pixel_count = 0;
+
+    bool empty() const {
+        return pixel_count == 0 && pixels.empty() && !ref.valid();
+    }
+};
+
+struct DensePixelDiff {
+    int frame = 0;
+    int layer = 0;
+    int width = 0;
+    int height = 0;
+    HistoryPixelPayload before;
+    HistoryPixelPayload after;
+};
+
 struct AnimationTag {
     std::string name = "Tag";
     int from = 0;
@@ -129,6 +161,7 @@ struct UndoCommand {
     int frame = 0;
     int layer = 0;
     std::vector<TileDiff> pixel_diffs;
+    std::optional<DensePixelDiff> dense_pixel_diff;
     std::optional<SelectionMask> before_selection;
     std::optional<SelectionMask> after_selection;
     std::optional<Palette> before_palette;
@@ -187,6 +220,9 @@ public:
     bool has_recent_commit_names() const;
     std::vector<std::string> consume_recent_commit_names();
     void clear_recent_commit_names();
+    std::size_t undo_stack_pixel_diff_capacity() const;
+    std::size_t undo_stack_full_frame_pixel_capacity() const;
+    std::size_t undo_stack_disk_history_pixel_count() const;
 
     void add_layer(const std::string& name);
     void insert_layer(int index, const std::string& name, std::vector<Pixel> pixels, const std::string& undo_name);
@@ -227,7 +263,8 @@ std::vector<TileDiff> make_tile_diffs(const std::vector<Pixel>& before,
                                       int height,
                                       int frame,
                                       int layer,
-                                      int tile_size = 16);
+                                      int tile_size = 16,
+                                      bool store_after_pixels = false);
 const char* playback_mode_name(PlaybackMode mode);
 const char* layer_blend_mode_name(LayerBlendMode mode);
 

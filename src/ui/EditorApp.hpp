@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <array>
+#include <cstddef>
 #include <deque>
 #include <mutex>
 #include <optional>
@@ -89,6 +90,15 @@ struct ErrorConsoleEntry {
     std::string details;
 };
 
+struct ImageImportJobProgress {
+    float fraction = 0.0f;
+    int done = 0;
+    int total = 0;
+    bool indeterminate = false;
+    std::string phase;
+    std::string status;
+};
+
 struct EditorHistoryEntry {
     std::string name;
     Document before_document;
@@ -116,6 +126,14 @@ public:
 
     void render();
     bool wants_quit() const { return wants_quit_; }
+    void import_image_document(const std::string& path);
+    void debug_replace_document_for_memory_test(Document document);
+    bool debug_huge_document_history_mode() const;
+    bool debug_canvas_uses_active_cel() const;
+    std::size_t debug_composite_pixel_capacity() const;
+    std::size_t debug_history_document_pixel_capacity() const;
+    void debug_update_histogram_cache_for_memory_test();
+    bool debug_histogram_cache_approximate() const;
 
 private:
     Document document_;
@@ -133,6 +151,7 @@ private:
     FileDialogProvider* dialogs_ = nullptr;
     AppSettings settings_;
     std::vector<Pixel> composite_;
+    bool composite_uses_active_cel_ = false;
     bool texture_dirty_ = true;
     bool full_canvas_texture_dirty_ = true;
     bool wants_quit_ = false;
@@ -180,6 +199,8 @@ private:
     bool depth_map_open_ = false;
     bool depth_job_running_ = false;
     bool depth_result_pending_ = false;
+    bool image_import_job_running_ = false;
+    bool image_import_result_pending_ = false;
     bool error_console_open_ = false;
     bool error_console_scroll_to_bottom_ = false;
     bool model_render_error_reported_ = false;
@@ -189,6 +210,7 @@ private:
     bool history_pending_ = false;
     bool history_suppress_frame_ = false;
     bool history_playback_frame_change_ = false;
+    bool history_lightweight_mode_ = false;
     int uv_drag_mode_ = 0;
     int model_transform_mode_ = 0;
     int model_transform_axis_ = 0;
@@ -246,6 +268,7 @@ private:
     std::array<float, 256> histogram_green_values_ = {};
     std::array<float, 256> histogram_blue_values_ = {};
     bool histogram_cache_valid_ = false;
+    bool histogram_cache_approximate_ = false;
     int histogram_cache_width_ = 0;
     int histogram_cache_height_ = 0;
     std::thread depth_thread_;
@@ -254,6 +277,13 @@ private:
     DepthExtractionProgress depth_progress_;
     DepthExtractionResult depth_result_;
     std::string depth_error_;
+    std::thread image_import_thread_;
+    std::mutex image_import_mutex_;
+    ImageImportJobProgress image_import_progress_;
+    Document image_import_result_;
+    GLTiledCanvasTexture::CpuPyramid image_import_pyramid_;
+    std::string image_import_error_;
+    std::string image_import_path_;
 
     char project_path_[512] = "untitled.pixart";
     char image_path_[512] = "import.png";
@@ -317,7 +347,8 @@ private:
 
     void update_playback();
     void refresh_texture();
-    void ensure_full_canvas_texture();
+    const std::vector<Pixel>& canvas_pixels() const;
+    bool ensure_full_canvas_texture();
     void invalidate_histogram_cache();
     void update_histogram_cache();
     void set_status(const std::string& status);
@@ -326,6 +357,7 @@ private:
     void handle_global_shortcuts();
     void begin_history_frame();
     void end_history_frame();
+    bool huge_document_history_mode() const;
     bool editor_state_changed_from_history_baseline() const;
     bool history_interaction_in_progress() const;
     std::string history_label_from_changes(const Document& before_document,
@@ -339,10 +371,10 @@ private:
     void restore_history_node(int node_id);
     void prune_history_tree();
     void push_history_entry(const std::string& name,
-                            Document before_document,
-                            ModelDocument before_model,
-                            Document after_document,
-                            ModelDocument after_model);
+                            const Document& before_document,
+                            const ModelDocument& before_model,
+                            const Document& after_document,
+                            const ModelDocument& after_model);
     bool undo_editor();
     bool redo_editor();
     void sync_model_texture_metadata();
@@ -363,6 +395,7 @@ private:
     void draw_effect_preview_popup();
     void draw_rotate_zoom_popup();
     void draw_depth_map_popup();
+    void draw_image_import_popup();
     void draw_undo_tree_window();
     void draw_error_console();
     void draw_status_bar();
@@ -433,6 +466,8 @@ private:
     void start_depth_map_extraction();
     void finish_depth_map_job_if_ready();
     void insert_depth_map_layer(const DepthExtractionResult& result);
+    void start_image_document_import(const std::string& path);
+    void finish_image_import_job_if_ready();
     int default_depth_of_field_layer() const;
     const std::vector<Pixel>* depth_of_field_pixels(const Document& document) const;
     bool valid_depth_of_field_layer(const Document& document) const;
