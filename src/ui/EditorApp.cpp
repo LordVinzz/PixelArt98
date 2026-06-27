@@ -3610,8 +3610,13 @@ void EditorApp::finish_drag(int x, int y) {
             texture_dirty_ = true;
             break;
         case ToolType::RectSelect:
-            document_.selection.select_rect(drag_start_x_, drag_start_y_, end_x, end_y, selection_drag_mode_);
-            document_.commit_selection_edit(selection_undo_name("Rectangle Selection", selection_drag_mode_), selection_before_);
+            if (drag_start_x_ == end_x && drag_start_y_ == end_y) {
+                document_.selection.clear();
+                document_.commit_selection_edit("Deselect", selection_before_);
+            } else {
+                document_.selection.select_rect(drag_start_x_, drag_start_y_, end_x, end_y, selection_drag_mode_);
+                document_.commit_selection_edit(selection_undo_name("Rectangle Selection", selection_drag_mode_), selection_before_);
+            }
             break;
         default:
             break;
