@@ -223,11 +223,9 @@ Mat4 look_at(Vec3 eye, Vec3 center, Vec3 up) {
 }
 
 Vec3 model_center(const ModelDocument& model) {
-    if (model.cuboids.empty()) {
-        return {8.0f, 8.0f, 8.0f};
-    }
     Vec3 minp{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
     Vec3 maxp{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+    bool found = false;
     for (const auto& c : model.cuboids) {
         float x0 = std::min(c.from[0], c.to[0]);
         float y0 = std::min(c.from[1], c.to[1]);
@@ -247,7 +245,23 @@ Vec3 model_center(const ModelDocument& model) {
             maxp.x = std::max(maxp.x, point.x);
             maxp.y = std::max(maxp.y, point.y);
             maxp.z = std::max(maxp.z, point.z);
+            found = true;
         }
+    }
+    for (const MeshObject& mesh : model.meshes) {
+        for (const MeshVertex& vertex : mesh.vertices) {
+            const auto& point = vertex.position;
+            minp.x = std::min(minp.x, point[0]);
+            minp.y = std::min(minp.y, point[1]);
+            minp.z = std::min(minp.z, point[2]);
+            maxp.x = std::max(maxp.x, point[0]);
+            maxp.y = std::max(maxp.y, point[1]);
+            maxp.z = std::max(maxp.z, point[2]);
+            found = true;
+        }
+    }
+    if (!found) {
+        return {8.0f, 8.0f, 8.0f};
     }
     return {(minp.x + maxp.x) * 0.5f, (minp.y + maxp.y) * 0.5f, (minp.z + maxp.z) * 0.5f};
 }
@@ -328,6 +342,30 @@ std::vector<RenderVertex> make_vertices(const ModelDocument& model, int texture_
                                 uvp[static_cast<std::size_t>(i)].x,
                                 uvp[static_cast<std::size_t>(i)].y,
                                 selected});
+        }
+    }
+    for (int mesh_index = 0; mesh_index < static_cast<int>(model.meshes.size()); ++mesh_index) {
+        const MeshObject& mesh = model.meshes[static_cast<std::size_t>(mesh_index)];
+        for (int face_index = 0; face_index < static_cast<int>(mesh.triangles.size()); ++face_index) {
+            const MeshTriangle& triangle = mesh.triangles[static_cast<std::size_t>(face_index)];
+            const bool selected_face =
+                face_index < static_cast<int>(mesh.selected_faces.size()) &&
+                mesh.selected_faces[static_cast<std::size_t>(face_index)] != 0;
+            for (int vertex_index : triangle.indices) {
+                if (vertex_index < 0 || vertex_index >= static_cast<int>(mesh.vertices.size())) {
+                    continue;
+                }
+                const MeshVertex& vertex = mesh.vertices[static_cast<std::size_t>(vertex_index)];
+                const bool selected_vertex =
+                    vertex_index < static_cast<int>(mesh.selected_vertices.size()) &&
+                    mesh.selected_vertices[static_cast<std::size_t>(vertex_index)] != 0;
+                vertices.push_back({vertex.position[0],
+                                    vertex.position[1],
+                                    vertex.position[2],
+                                    std::clamp(vertex.uv[0], 0.0f, 1.0f),
+                                    std::clamp(vertex.uv[1], 0.0f, 1.0f),
+                                    selected_face || selected_vertex ? 1.0f : 0.0f});
+            }
         }
     }
     return vertices;
@@ -481,6 +519,12 @@ bool point_in_triangle(Vec2 p, Vec2 a, Vec2 b, Vec2 c) {
     bool has_neg = (d1 < 0.0f) || (d2 < 0.0f) || (d3 < 0.0f);
     bool has_pos = (d1 > 0.0f) || (d2 > 0.0f) || (d3 > 0.0f);
     return !(has_neg && has_pos);
+}
+
+float distance_squared(Vec2 a, Vec2 b) {
+    const float dx = a.x - b.x;
+    const float dy = a.y - b.y;
+    return dx * dx + dy * dy;
 }
 
 } // namespace
@@ -777,6 +821,66 @@ FaceHit Renderer3D::pick_face(const ModelDocument& model,
             best.hit = true;
             best.cuboid = quad.cuboid;
             best.face = quad.face;
+            best.mesh = -1;
+            best.mesh_face = -1;
+            best.mesh_vertex = -1;
+            best.depth = z;
+        }
+    }
+    for (int mesh_index = 0; mesh_index < static_cast<int>(model.meshes.size()); ++mesh_index) {
+        const MeshObject& mesh = model.meshes[static_cast<std::size_t>(mesh_index)];
+        for (int face_index = 0; face_index < static_cast<int>(mesh.triangles.size()); ++face_index) {
+            const MeshTriangle& triangle = mesh.triangles[static_cast<std::size_t>(face_index)];
+            std::array<Vec2, 3> screen{};
+            std::array<float, 3> depth{};
+            bool clipped = false;
+            for (int i = 0; i < 3; ++i) {
+                const int vertex_index = triangle.indices[static_cast<std::size_t>(i)];
+                if (vertex_index < 0 || vertex_index >= static_cast<int>(mesh.vertices.size())) {
+                    clipped = true;
+                    break;
+                }
+                const auto& position = mesh.vertices[static_cast<std::size_t>(vertex_index)].position;
+                Vec4 clip = transform(mvp, {position[0], position[1], position[2]});
+                if (clip.w <= 0.0001f) {
+                    clipped = true;
+                    break;
+                }
+                const float ndc_x = clip.x / clip.w;
+                const float ndc_y = clip.y / clip.w;
+                const float ndc_z = clip.z / clip.w;
+                screen[static_cast<std::size_t>(i)] = {
+                    (ndc_x * 0.5f + 0.5f) * static_cast<float>(output_width),
+                    (1.0f - (ndc_y * 0.5f + 0.5f)) * static_cast<float>(output_height)
+                };
+                depth[static_cast<std::size_t>(i)] = ndc_z;
+            }
+            if (clipped) {
+                continue;
+            }
+            const Vec2 p{mouse_x, mouse_y};
+            if (!point_in_triangle(p, screen[0], screen[1], screen[2])) {
+                continue;
+            }
+            const float z = (depth[0] + depth[1] + depth[2]) / 3.0f;
+            if (best.hit && z >= best.depth) {
+                continue;
+            }
+            int nearest_vertex = triangle.indices[0];
+            float nearest_distance = distance_squared(p, screen[0]);
+            for (int i = 1; i < 3; ++i) {
+                const float candidate = distance_squared(p, screen[static_cast<std::size_t>(i)]);
+                if (candidate < nearest_distance) {
+                    nearest_distance = candidate;
+                    nearest_vertex = triangle.indices[static_cast<std::size_t>(i)];
+                }
+            }
+            best.hit = true;
+            best.cuboid = -1;
+            best.face = -1;
+            best.mesh = mesh_index;
+            best.mesh_face = face_index;
+            best.mesh_vertex = nearest_vertex;
             best.depth = z;
         }
     }

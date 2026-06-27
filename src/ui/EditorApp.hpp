@@ -249,6 +249,7 @@ private:
     float model_transform_rotation_delta_degrees_ = 0.0f;
     UvRect uv_drag_start_rect_;
     Cuboid model_transform_start_cuboid_;
+    MeshObject model_transform_start_mesh_;
     std::array<ImVec2, 4> straighten_points_ = {};
     std::vector<Pixel> stroke_before_;
     std::vector<Pixel> clone_source_pixels_;
@@ -297,6 +298,7 @@ private:
     char gltf_model_path_[512] = "model.gltf";
     char gltf_texture_path_[512] = "texture.png";
     char threejs_pack_path_[512] = "model.zip";
+    char stl_model_path_[512] = "model.stl";
     char minecraft_model_path_[512] = "minecraft_model.json";
     char minecraft_texture_path_[512] = "texture.png";
     char text_buffer_[128] = "TEXT";

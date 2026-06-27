@@ -246,11 +246,15 @@ AxisVec3 axis_vector(int axis) {
 }
 
 AxisVec3 selected_model_pivot(const ModelDocument& model) {
-    if (model.cuboids.empty()) {
-        return {0.0f, 0.0f, 0.0f};
+    if (model.selected_mesh >= 0 && model.selected_mesh < static_cast<int>(model.meshes.size())) {
+        const auto center = selected_mesh_component_center(model);
+        return {center[0], center[1], center[2]};
     }
-    const Cuboid& cuboid = model.selected();
-    return {cuboid.rotation_origin[0], cuboid.rotation_origin[1], cuboid.rotation_origin[2]};
+    if (!model.cuboids.empty()) {
+        const Cuboid& cuboid = model.selected();
+        return {cuboid.rotation_origin[0], cuboid.rotation_origin[1], cuboid.rotation_origin[2]};
+    }
+    return {0.0f, 0.0f, 0.0f};
 }
 
 ImU32 axis_color(int axis, int alpha = 255) {
@@ -287,7 +291,7 @@ ModelGizmoGeometry build_model_gizmo_geometry(Renderer3D& renderer,
                                               const ImVec2& origin,
                                               const ImVec2& size) {
     ModelGizmoGeometry geometry;
-    if (model.cuboids.empty() || size.x <= 1.0f || size.y <= 1.0f) {
+    if (!model_has_geometry(model) || size.x <= 1.0f || size.y <= 1.0f) {
         return geometry;
     }
 
@@ -1075,16 +1079,53 @@ bool cuboid_equal(const Cuboid& a_value, const Cuboid& b_value) {
     return true;
 }
 
+bool mesh_vertex_equal(const MeshVertex& a_value, const MeshVertex& b_value) {
+    return a_value.position == b_value.position && a_value.uv == b_value.uv;
+}
+
+bool mesh_triangle_equal(const MeshTriangle& a_value, const MeshTriangle& b_value) {
+    return a_value.indices == b_value.indices && a_value.normal == b_value.normal;
+}
+
+bool mesh_equal(const MeshObject& a_value, const MeshObject& b_value) {
+    if (a_value.name != b_value.name ||
+        a_value.vertices.size() != b_value.vertices.size() ||
+        a_value.triangles.size() != b_value.triangles.size() ||
+        a_value.selected_vertices != b_value.selected_vertices ||
+        a_value.selected_faces != b_value.selected_faces) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a_value.vertices.size(); ++i) {
+        if (!mesh_vertex_equal(a_value.vertices[i], b_value.vertices[i])) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < a_value.triangles.size(); ++i) {
+        if (!mesh_triangle_equal(a_value.triangles[i], b_value.triangles[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool model_state_equal(const ModelDocument& a_value, const ModelDocument& b_value) {
     if (a_value.texture_width != b_value.texture_width ||
         a_value.texture_height != b_value.texture_height ||
         a_value.selected_cuboid != b_value.selected_cuboid ||
         a_value.selected_face != b_value.selected_face ||
-        a_value.cuboids.size() != b_value.cuboids.size()) {
+        a_value.selected_mesh != b_value.selected_mesh ||
+        a_value.mesh_selection_mode != b_value.mesh_selection_mode ||
+        a_value.cuboids.size() != b_value.cuboids.size() ||
+        a_value.meshes.size() != b_value.meshes.size()) {
         return false;
     }
     for (std::size_t i = 0; i < a_value.cuboids.size(); ++i) {
         if (!cuboid_equal(a_value.cuboids[i], b_value.cuboids[i])) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < a_value.meshes.size(); ++i) {
+        if (!mesh_equal(a_value.meshes[i], b_value.meshes[i])) {
             return false;
         }
     }
@@ -1258,6 +1299,7 @@ constexpr FileFilter kAsepriteFilters[] = {{"Aseprite sprite", "aseprite,ase"}};
 constexpr FileFilter kJsonFilters[] = {{"JSON", "json"}};
 constexpr FileFilter kGltfFilters[] = {{"glTF model", "gltf"}};
 constexpr FileFilter kThreeJSPackFilters[] = {{"Three.js Package", "zip"}};
+constexpr FileFilter kStlFilters[] = {{"STL mesh", "stl"}};
 
 struct SkyboxOption {
     const char* name;
@@ -2268,6 +2310,29 @@ void EditorApp::draw_main_menu() {
                 std::string error;
                 if (export_threejs_pack(path, document_, model_, &error)) set_status(std::string("Exported ") + path);
                 else report_error("Export ThreeJSPack: " + path, error);
+            }
+        }
+        if (ImGui::MenuItem("Import STL Model...")) {
+            std::string path;
+            if (accept_dialog_result(open_file_dialog(filter_list(kStlFilters), stl_model_path_), path)) {
+                copy_path(stl_model_path_, sizeof(stl_model_path_), path);
+                std::string error;
+                if (import_stl_model(path, model_, &error)) {
+                    sync_model_texture_metadata();
+                    set_status(std::string("Imported ") + path);
+                } else {
+                    report_error("Import STL model: " + path, error);
+                }
+            }
+        }
+        if (ImGui::MenuItem("Export STL Model...")) {
+            std::string path;
+            if (accept_dialog_result(save_file_dialog(filter_list(kStlFilters), stl_model_path_), path)) {
+                path = with_default_extension(path, ".stl");
+                copy_path(stl_model_path_, sizeof(stl_model_path_), path);
+                std::string error;
+                if (export_stl_model(path, model_, &error)) set_status(std::string("Exported ") + path);
+                else report_error("Export STL model: " + path, error);
             }
         }
         if (ImGui::MenuItem("Import Minecraft Model...")) {
@@ -6626,8 +6691,35 @@ void EditorApp::draw_model_panel() {
         ImGui::PushID(i);
         if (ImGui::Selectable(model_.cuboids[static_cast<std::size_t>(i)].name.c_str(), model_.selected_cuboid == i)) {
             model_.selected_cuboid = i;
+            model_.selected_mesh = -1;
         }
         ImGui::PopID();
+    }
+    for (int i = 0; i < static_cast<int>(model_.meshes.size()); ++i) {
+        ImGui::PushID(10000 + i);
+        const MeshObject& mesh = model_.meshes[static_cast<std::size_t>(i)];
+        const std::string label = mesh.name + " (mesh)";
+        if (ImGui::Selectable(label.c_str(), model_.selected_mesh == i)) {
+            model_.selected_mesh = i;
+            model_.selected_cuboid = -1;
+        }
+        ImGui::PopID();
+    }
+    if (model_.selected_mesh >= 0 && model_.selected_mesh < static_cast<int>(model_.meshes.size())) {
+        MeshObject& mesh = model_.meshes[static_cast<std::size_t>(model_.selected_mesh)];
+        char name[96];
+        copy_path(name, sizeof(name), mesh.name);
+        if (ImGui::InputText("Mesh Name", name, sizeof(name))) {
+            mesh.name = name;
+        }
+        ImGui::Text("Vertices: %d", static_cast<int>(mesh.vertices.size()));
+        ImGui::Text("Faces: %d", static_cast<int>(mesh.triangles.size()));
+        ImGui::RadioButton("Face selection", &model_.mesh_selection_mode, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton("Vertex selection", &model_.mesh_selection_mode, 1);
+        ImGui::TextWrapped("Use the 3D preview to select mesh faces or vertices. Transform tools move, rotate, or scale the selected mesh components.");
+        ImGui::End();
+        return;
     }
     if (model_.cuboids.empty()) {
         ImGui::End();
@@ -7043,8 +7135,25 @@ void EditorApp::draw_model_preview() {
         ImVec2 local(io.MousePos.x - origin.x, io.MousePos.y - origin.y);
         FaceHit hit = renderer3d_.pick_face(model_, model_viewport_, static_cast<int>(size.x), static_cast<int>(size.y), local.x, local.y);
         if (hit.hit) {
-            model_.selected_cuboid = hit.cuboid;
-            model_.selected_face = hit.face;
+            if (hit.mesh >= 0 && hit.mesh < static_cast<int>(model_.meshes.size())) {
+                clear_mesh_selections(model_);
+                model_.selected_mesh = hit.mesh;
+                model_.selected_cuboid = -1;
+                MeshObject& mesh = model_.meshes[static_cast<std::size_t>(hit.mesh)];
+                if (model_.mesh_selection_mode == 1 &&
+                    hit.mesh_vertex >= 0 &&
+                    hit.mesh_vertex < static_cast<int>(mesh.selected_vertices.size())) {
+                    mesh.selected_vertices[static_cast<std::size_t>(hit.mesh_vertex)] = 1;
+                } else if (hit.mesh_face >= 0 &&
+                           hit.mesh_face < static_cast<int>(mesh.selected_faces.size())) {
+                    mesh.selected_faces[static_cast<std::size_t>(hit.mesh_face)] = 1;
+                }
+            } else {
+                clear_mesh_selections(model_);
+                model_.selected_mesh = -1;
+                model_.selected_cuboid = hit.cuboid;
+                model_.selected_face = hit.face;
+            }
         }
     }
 
@@ -7115,7 +7224,10 @@ void EditorApp::draw_model_preview() {
 }
 
 void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& size, bool hovered) {
-    if (model_transform_mode_ == 0 || model_.cuboids.empty()) {
+    const bool mesh_selected =
+        model_.selected_mesh >= 0 && model_.selected_mesh < static_cast<int>(model_.meshes.size());
+    const bool cuboid_selected = !mesh_selected && !model_.cuboids.empty();
+    if (model_transform_mode_ == 0 || (!mesh_selected && !cuboid_selected)) {
         model_transform_drag_active_ = false;
         return;
     }
@@ -7131,7 +7243,11 @@ void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& 
         model_transform_axis_ = hit_axis;
         model_transform_start_mouse_ = io.MousePos;
         model_transform_drag_center_ = transform_gizmo.center;
-        model_transform_start_cuboid_ = model_.selected();
+        if (mesh_selected) {
+            model_transform_start_mesh_ = model_.meshes[static_cast<std::size_t>(model_.selected_mesh)];
+        } else {
+            model_transform_start_cuboid_ = model_.selected();
+        }
         model_transform_start_angle_radians_ =
             rotation_ring_angle_at_mouse(transform_gizmo, model_viewport_, hit_axis, io.MousePos);
         model_transform_rotation_delta_degrees_ = 0.0f;
@@ -7146,13 +7262,32 @@ void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& 
             return;
         }
 
-        Cuboid next = model_transform_start_cuboid_;
         const ImVec2 axis = normalized_screen_axis({model_transform_axis_ == 0 ? 1.0f : 0.0f,
                                                     model_transform_axis_ == 1 ? 1.0f : 0.0f,
                                                     model_transform_axis_ == 2 ? 1.0f : 0.0f},
                                                    model_viewport_);
         const float signed_pixels = delta.x * axis.x + delta.y * axis.y;
         const bool constrained = io.KeyCtrl || io.KeySuper;
+        if (mesh_selected) {
+            model_.meshes[static_cast<std::size_t>(model_.selected_mesh)] = model_transform_start_mesh_;
+            if (model_transform_mode_ == 1) {
+                translate_selected_mesh_components(model_, model_transform_axis_, signed_pixels * 0.06f, constrained);
+            } else if (model_transform_mode_ == 2) {
+                const float current_angle =
+                    rotation_ring_angle_at_mouse(transform_gizmo, model_viewport_, model_transform_axis_, io.MousePos);
+                float angle_delta = unwrap_angle_delta(current_angle, model_transform_start_angle_radians_) * 180.0f / pi;
+                if (io.KeyShift) {
+                    angle_delta *= 0.20f;
+                }
+                rotate_selected_mesh_components(model_, model_transform_axis_, angle_delta, constrained);
+                model_transform_rotation_delta_degrees_ = constrained ? std::round(angle_delta / 15.0f) * 15.0f : angle_delta;
+            } else if (model_transform_mode_ == 3) {
+                scale_selected_mesh_components(model_, model_transform_axis_, 1.0f + signed_pixels * 0.012f, constrained);
+            }
+            return;
+        }
+
+        Cuboid next = model_transform_start_cuboid_;
         if (model_transform_mode_ == 1) {
             translate_cuboid(next, model_transform_axis_, signed_pixels * 0.06f, constrained);
         } else if (model_transform_mode_ == 2) {

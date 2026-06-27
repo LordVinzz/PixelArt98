@@ -876,6 +876,31 @@ ExportVec3 operator-(ExportVec3 a, ExportVec3 b) {
     return {a.x - b.x, a.y - b.y, a.z - b.z};
 }
 
+float export_dot(ExportVec3 a, ExportVec3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+ExportVec3 export_cross(ExportVec3 a, ExportVec3 b) {
+    return {
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    };
+}
+
+ExportVec3 export_normalize(ExportVec3 value) {
+    const float length = std::sqrt(std::max(0.000001f, export_dot(value, value)));
+    return {value.x / length, value.y / length, value.z / length};
+}
+
+ExportVec3 export_vec3_from_array(const std::array<float, 3>& value) {
+    return {value[0], value[1], value[2]};
+}
+
+ExportVec3 export_triangle_normal(ExportVec3 a, ExportVec3 b, ExportVec3 c) {
+    return export_normalize(export_cross(b - a, c - a));
+}
+
 ExportVec3 rotate_export_point(ExportVec3 point, const Cuboid& cuboid) {
     if (std::abs(cuboid.rotation_angle) <= 0.0001f) {
         return point;
@@ -948,6 +973,11 @@ void append_u32_le(std::vector<unsigned char>& bytes, std::uint32_t value) {
     bytes.push_back(static_cast<unsigned char>((value >> 8U) & 0xffU));
     bytes.push_back(static_cast<unsigned char>((value >> 16U) & 0xffU));
     bytes.push_back(static_cast<unsigned char>((value >> 24U) & 0xffU));
+}
+
+void append_u16_le(std::vector<unsigned char>& bytes, std::uint16_t value) {
+    bytes.push_back(static_cast<unsigned char>(value & 0xffU));
+    bytes.push_back(static_cast<unsigned char>((value >> 8U) & 0xffU));
 }
 
 void append_float_le(std::vector<unsigned char>& bytes, float value) {
@@ -1024,6 +1054,40 @@ nlohmann::json gltf_json_for_model(const ModelDocument& source_model, const std:
             base_index + 2U,
             base_index + 3U
         });
+    }
+    for (const MeshObject& mesh : model.meshes) {
+        for (const MeshTriangle& triangle : mesh.triangles) {
+            const auto base_index = static_cast<std::uint32_t>(positions.size() / 3U);
+            bool valid_triangle = true;
+            for (int index : triangle.indices) {
+                if (index < 0 || index >= static_cast<int>(mesh.vertices.size())) {
+                    valid_triangle = false;
+                    break;
+                }
+            }
+            if (!valid_triangle) {
+                continue;
+            }
+            for (int index : triangle.indices) {
+                const MeshVertex& vertex = mesh.vertices[static_cast<std::size_t>(index)];
+                positions.push_back(vertex.position[0]);
+                positions.push_back(vertex.position[1]);
+                positions.push_back(vertex.position[2]);
+                texcoords.push_back(std::clamp(vertex.uv[0], 0.0f, 1.0f));
+                texcoords.push_back(std::clamp(vertex.uv[1], 0.0f, 1.0f));
+                min_position[0] = std::min(min_position[0], vertex.position[0]);
+                min_position[1] = std::min(min_position[1], vertex.position[1]);
+                min_position[2] = std::min(min_position[2], vertex.position[2]);
+                max_position[0] = std::max(max_position[0], vertex.position[0]);
+                max_position[1] = std::max(max_position[1], vertex.position[1]);
+                max_position[2] = std::max(max_position[2], vertex.position[2]);
+            }
+            indices.insert(indices.end(), {base_index + 0U, base_index + 1U, base_index + 2U});
+        }
+    }
+    if (positions.empty()) {
+        min_position = {0.0f, 0.0f, 0.0f};
+        max_position = {0.0f, 0.0f, 0.0f};
     }
 
     std::vector<unsigned char> buffer;
@@ -1174,6 +1238,260 @@ export async function addPixelArt98Model(scene, options = {}) {
   return gltf;
 }
 )";
+}
+
+std::uint32_t read_u32_le(const unsigned char* bytes) {
+    return static_cast<std::uint32_t>(bytes[0]) |
+           (static_cast<std::uint32_t>(bytes[1]) << 8U) |
+           (static_cast<std::uint32_t>(bytes[2]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[3]) << 24U);
+}
+
+float read_float_le(const unsigned char* bytes) {
+    const std::uint32_t raw = read_u32_le(bytes);
+    float value = 0.0f;
+    static_assert(sizeof(raw) == sizeof(value));
+    std::memcpy(&value, &raw, sizeof(value));
+    return value;
+}
+
+std::string path_stem_or_default(const std::string& path, const char* fallback) {
+    const std::filesystem::path fs_path = std::filesystem::path(path);
+    const std::filesystem::path stem = fs_path.stem();
+    if (stem.empty()) {
+        return fallback;
+    }
+    return stem.string();
+}
+
+bool finite_export_vec3(ExportVec3 value) {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+void add_mesh_triangle(MeshObject& mesh, ExportVec3 normal, std::array<ExportVec3, 3> points) {
+    if (!finite_export_vec3(points[0]) || !finite_export_vec3(points[1]) || !finite_export_vec3(points[2])) {
+        return;
+    }
+    if (export_dot(normal, normal) <= 0.000001f || !finite_export_vec3(normal)) {
+        normal = export_triangle_normal(points[0], points[1], points[2]);
+    } else {
+        normal = export_normalize(normal);
+    }
+    const int base = static_cast<int>(mesh.vertices.size());
+    for (ExportVec3 point : points) {
+        MeshVertex vertex;
+        vertex.position = {point.x, point.y, point.z};
+        mesh.vertices.push_back(vertex);
+    }
+    MeshTriangle triangle;
+    triangle.indices = {base, base + 1, base + 2};
+    triangle.normal = {normal.x, normal.y, normal.z};
+    mesh.triangles.push_back(triangle);
+}
+
+void generate_box_projection_uvs(MeshObject& mesh) {
+    if (mesh.vertices.empty()) {
+        return;
+    }
+    std::array<float, 3> minp = {
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max()
+    };
+    std::array<float, 3> maxp = {
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest()
+    };
+    for (const MeshVertex& vertex : mesh.vertices) {
+        for (int i = 0; i < 3; ++i) {
+            minp[static_cast<std::size_t>(i)] =
+                std::min(minp[static_cast<std::size_t>(i)], vertex.position[static_cast<std::size_t>(i)]);
+            maxp[static_cast<std::size_t>(i)] =
+                std::max(maxp[static_cast<std::size_t>(i)], vertex.position[static_cast<std::size_t>(i)]);
+        }
+    }
+    auto normalized_coordinate = [&](float value, int axis) {
+        const float range = std::max(0.000001f,
+                                     maxp[static_cast<std::size_t>(axis)] -
+                                         minp[static_cast<std::size_t>(axis)]);
+        return std::clamp((value - minp[static_cast<std::size_t>(axis)]) / range, 0.0f, 1.0f);
+    };
+    for (MeshTriangle& triangle : mesh.triangles) {
+        const std::array<float, 3> normal = triangle.normal;
+        const float ax = std::abs(normal[0]);
+        const float ay = std::abs(normal[1]);
+        const float az = std::abs(normal[2]);
+        int u_axis = 0;
+        int v_axis = 1;
+        if (ax >= ay && ax >= az) {
+            u_axis = 2;
+            v_axis = 1;
+        } else if (ay >= ax && ay >= az) {
+            u_axis = 0;
+            v_axis = 2;
+        }
+        for (int index : triangle.indices) {
+            if (index < 0 || index >= static_cast<int>(mesh.vertices.size())) {
+                continue;
+            }
+            MeshVertex& vertex = mesh.vertices[static_cast<std::size_t>(index)];
+            vertex.uv = {
+                normalized_coordinate(vertex.position[static_cast<std::size_t>(u_axis)], u_axis),
+                normalized_coordinate(vertex.position[static_cast<std::size_t>(v_axis)], v_axis)
+            };
+        }
+    }
+}
+
+ModelDocument model_from_imported_mesh(MeshObject mesh) {
+    generate_box_projection_uvs(mesh);
+    mesh.selected_vertices.assign(mesh.vertices.size(), 0);
+    mesh.selected_faces.assign(mesh.triangles.size(), 0);
+    if (!mesh.selected_faces.empty()) {
+        mesh.selected_faces[0] = 1;
+    }
+    ModelDocument model;
+    model.cuboids.clear();
+    model.selected_cuboid = -1;
+    model.selected_face = 0;
+    model.selected_mesh = 0;
+    model.mesh_selection_mode = 0;
+    model.meshes.push_back(std::move(mesh));
+    clamp_model_uvs(model);
+    return model;
+}
+
+bool parse_binary_stl(const std::vector<unsigned char>& bytes, MeshObject& mesh, std::string* error) {
+    if (bytes.size() < 84U) {
+        set_error(error, "Binary STL is too small");
+        return false;
+    }
+    const std::uint32_t triangle_count = read_u32_le(bytes.data() + 80U);
+    const std::uint64_t expected_size = 84ULL + static_cast<std::uint64_t>(triangle_count) * 50ULL;
+    if (expected_size != static_cast<std::uint64_t>(bytes.size())) {
+        set_error(error, "Binary STL size does not match triangle count");
+        return false;
+    }
+    mesh.vertices.reserve(static_cast<std::size_t>(triangle_count) * 3U);
+    mesh.triangles.reserve(triangle_count);
+    const unsigned char* cursor = bytes.data() + 84U;
+    for (std::uint32_t triangle = 0; triangle < triangle_count; ++triangle) {
+        ExportVec3 normal{
+            read_float_le(cursor + 0),
+            read_float_le(cursor + 4),
+            read_float_le(cursor + 8)
+        };
+        std::array<ExportVec3, 3> points = {{
+            {read_float_le(cursor + 12), read_float_le(cursor + 16), read_float_le(cursor + 20)},
+            {read_float_le(cursor + 24), read_float_le(cursor + 28), read_float_le(cursor + 32)},
+            {read_float_le(cursor + 36), read_float_le(cursor + 40), read_float_le(cursor + 44)}
+        }};
+        add_mesh_triangle(mesh, normal, points);
+        cursor += 50;
+    }
+    if (mesh.triangles.empty()) {
+        set_error(error, "STL contains no triangles");
+        return false;
+    }
+    return true;
+}
+
+bool parse_ascii_stl(const std::vector<unsigned char>& bytes, MeshObject& mesh, std::string* error) {
+    const std::string text(bytes.begin(), bytes.end());
+    std::istringstream in(text);
+    std::string token;
+    while (in >> token) {
+        if (token != "facet") {
+            continue;
+        }
+        std::string normal_token;
+        ExportVec3 normal;
+        if (!(in >> normal_token >> normal.x >> normal.y >> normal.z) || normal_token != "normal") {
+            set_error(error, "Invalid ASCII STL facet normal");
+            return false;
+        }
+        std::array<ExportVec3, 3> points{};
+        int vertex_count = 0;
+        while (in >> token) {
+            if (token == "vertex") {
+                if (vertex_count >= 3 ||
+                    !(in >> points[static_cast<std::size_t>(vertex_count)].x >>
+                           points[static_cast<std::size_t>(vertex_count)].y >>
+                           points[static_cast<std::size_t>(vertex_count)].z)) {
+                    set_error(error, "Invalid ASCII STL vertex");
+                    return false;
+                }
+                ++vertex_count;
+            } else if (token == "endfacet") {
+                break;
+            }
+        }
+        if (vertex_count != 3) {
+            set_error(error, "ASCII STL facet does not contain exactly three vertices");
+            return false;
+        }
+        add_mesh_triangle(mesh, normal, points);
+    }
+    if (mesh.triangles.empty()) {
+        set_error(error, "STL contains no triangles");
+        return false;
+    }
+    return true;
+}
+
+bool read_stl_mesh(const std::string& path, MeshObject& mesh, std::string* error) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        set_error(error, "Could not open STL: " + path);
+        return false;
+    }
+    std::vector<unsigned char> bytes{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    mesh.name = path_stem_or_default(path, "STL Mesh");
+    if (bytes.size() >= 84U) {
+        const std::uint32_t triangle_count = read_u32_le(bytes.data() + 80U);
+        const std::uint64_t expected_size = 84ULL + static_cast<std::uint64_t>(triangle_count) * 50ULL;
+        if (expected_size == static_cast<std::uint64_t>(bytes.size())) {
+            return parse_binary_stl(bytes, mesh, error);
+        }
+    }
+    return parse_ascii_stl(bytes, mesh, error);
+}
+
+struct StlTriangle {
+    ExportVec3 normal;
+    std::array<ExportVec3, 3> points;
+};
+
+void add_stl_triangle(std::vector<StlTriangle>& triangles, ExportVec3 a, ExportVec3 b, ExportVec3 c) {
+    triangles.push_back({export_triangle_normal(a, b, c), {{a, b, c}}});
+}
+
+std::vector<StlTriangle> stl_triangles_for_model(const ModelDocument& model) {
+    std::vector<StlTriangle> triangles;
+    for (const ExportFaceQuad& quad : export_face_quads(model)) {
+        add_stl_triangle(triangles, quad.p[0], quad.p[1], quad.p[2]);
+        add_stl_triangle(triangles, quad.p[0], quad.p[2], quad.p[3]);
+    }
+    for (const MeshObject& mesh : model.meshes) {
+        for (const MeshTriangle& triangle : mesh.triangles) {
+            bool valid_triangle = true;
+            std::array<ExportVec3, 3> points{};
+            for (int i = 0; i < 3; ++i) {
+                const int index = triangle.indices[static_cast<std::size_t>(i)];
+                if (index < 0 || index >= static_cast<int>(mesh.vertices.size())) {
+                    valid_triangle = false;
+                    break;
+                }
+                points[static_cast<std::size_t>(i)] =
+                    export_vec3_from_array(mesh.vertices[static_cast<std::size_t>(index)].position);
+            }
+            if (valid_triangle) {
+                add_stl_triangle(triangles, points[0], points[1], points[2]);
+            }
+        }
+    }
+    return triangles;
 }
 
 } // namespace
@@ -1990,7 +2308,7 @@ bool import_model_json(const std::string& path, ModelDocument& out_model, std::s
 }
 
 bool export_gltf_model(const std::string& path, const ModelDocument& model, const std::string& texture_path, std::string* error) {
-    if (model.cuboids.empty()) {
+    if (!model_has_geometry(model)) {
         set_error(error, "Cannot export an empty model as glTF");
         return false;
     }
@@ -2005,7 +2323,7 @@ bool export_gltf_model(const std::string& path, const ModelDocument& model, cons
 }
 
 bool export_threejs_pack(const std::string& path, const Document& document, const ModelDocument& model, std::string* error) {
-    if (model.cuboids.empty()) {
+    if (!model_has_geometry(model)) {
         set_error(error, "Cannot export an empty model as ThreeJSPack");
         return false;
     }
@@ -2052,6 +2370,56 @@ bool export_threejs_pack(const std::string& path, const Document& document, cons
         set_error(error, "Could not finish ThreeJSPack archive");
     }
     return ok;
+}
+
+bool import_stl_model(const std::string& path, ModelDocument& out_model, std::string* error) {
+    MeshObject mesh;
+    if (!read_stl_mesh(path, mesh, error)) {
+        return false;
+    }
+    out_model = model_from_imported_mesh(std::move(mesh));
+    return true;
+}
+
+bool export_stl_model(const std::string& path, const ModelDocument& model, std::string* error) {
+    const std::vector<StlTriangle> triangles = stl_triangles_for_model(model);
+    if (triangles.empty()) {
+        set_error(error, "Cannot export an empty model as STL");
+        return false;
+    }
+    if (triangles.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        set_error(error, "STL triangle count is too large");
+        return false;
+    }
+
+    std::vector<unsigned char> bytes;
+    bytes.resize(80U, 0);
+    const std::string header = "PixelArt98 binary STL";
+    std::copy(header.begin(), header.end(), bytes.begin());
+    append_u32_le(bytes, static_cast<std::uint32_t>(triangles.size()));
+    for (const StlTriangle& triangle : triangles) {
+        append_float_le(bytes, triangle.normal.x);
+        append_float_le(bytes, triangle.normal.y);
+        append_float_le(bytes, triangle.normal.z);
+        for (ExportVec3 point : triangle.points) {
+            append_float_le(bytes, point.x);
+            append_float_le(bytes, point.y);
+            append_float_le(bytes, point.z);
+        }
+        append_u16_le(bytes, 0);
+    }
+
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        set_error(error, "Could not write STL model: " + path);
+        return false;
+    }
+    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!file) {
+        set_error(error, "Could not finish STL model: " + path);
+        return false;
+    }
+    return true;
 }
 
 bool export_minecraft_model(const std::string& path, const ModelDocument& model, const std::string& texture_path, std::string* error) {

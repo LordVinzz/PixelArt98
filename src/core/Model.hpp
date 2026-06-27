@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,9 @@ struct FaceHit {
     bool hit = false;
     int cuboid = -1;
     int face = -1;
+    int mesh = -1;
+    int mesh_face = -1;
+    int mesh_vertex = -1;
     float depth = 1.0f;
 };
 
@@ -53,12 +57,33 @@ struct Cuboid {
     bool selected = false;
 };
 
+struct MeshVertex {
+    std::array<float, 3> position = {0.0f, 0.0f, 0.0f};
+    std::array<float, 2> uv = {0.0f, 0.0f};
+};
+
+struct MeshTriangle {
+    std::array<int, 3> indices = {0, 0, 0};
+    std::array<float, 3> normal = {0.0f, 1.0f, 0.0f};
+};
+
+struct MeshObject {
+    std::string name = "Mesh";
+    std::vector<MeshVertex> vertices;
+    std::vector<MeshTriangle> triangles;
+    std::vector<std::uint8_t> selected_vertices;
+    std::vector<std::uint8_t> selected_faces;
+};
+
 struct ModelDocument {
     int texture_width = 64;
     int texture_height = 64;
     int selected_cuboid = 0;
     int selected_face = 0;
+    int selected_mesh = -1;
+    int mesh_selection_mode = 0; // 0 = faces, 1 = vertices
     std::vector<Cuboid> cuboids;
+    std::vector<MeshObject> meshes;
 
     static ModelDocument create_default();
     Cuboid& selected();
@@ -80,5 +105,12 @@ float cuboid_axis_size(const Cuboid& cuboid, int axis);
 void translate_cuboid(Cuboid& cuboid, int axis, float delta, bool snap_to_axis_size);
 void scale_cuboid(Cuboid& cuboid, int axis, float factor, bool snap_to_double);
 void rotate_cuboid(Cuboid& cuboid, int axis, float angle_degrees, bool snap_to_15_degrees);
+bool model_has_geometry(const ModelDocument& model);
+bool model_has_mesh_selection(const ModelDocument& model);
+std::array<float, 3> selected_mesh_component_center(const ModelDocument& model);
+void clear_mesh_selections(ModelDocument& model);
+void translate_selected_mesh_components(ModelDocument& model, int axis, float delta, bool snap_to_unit);
+void scale_selected_mesh_components(ModelDocument& model, int axis, float factor, bool snap_to_double);
+void rotate_selected_mesh_components(ModelDocument& model, int axis, float angle_degrees, bool snap_to_15_degrees);
 
 } // namespace px

@@ -88,6 +88,14 @@ bool file_contains(const std::filesystem::path& path, std::string_view needle) {
     return std::search(bytes.begin(), bytes.end(), needle.begin(), needle.end()) != bytes.end();
 }
 
+std::uint32_t read_u32_le(const std::vector<unsigned char>& bytes, std::size_t offset) {
+    assert(offset + 4U <= bytes.size());
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1U]) << 8U) |
+           (static_cast<std::uint32_t>(bytes[offset + 2U]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[offset + 3U]) << 24U);
+}
+
 std::vector<unsigned char> read_zip_entry(const std::filesystem::path& path, const char* name) {
     mz_zip_archive zip{};
     assert(mz_zip_reader_init_file(&zip, path.string().c_str(), 0));
@@ -429,6 +437,56 @@ void test_gltf_model_export(const std::filesystem::path& root) {
     assert(gltf.at("extras").at("pixelart98").at("source_model").at("cuboids").at(0).at("name").get<std::string>() == "Panel");
 }
 
+void test_stl_model_import_export_and_mesh_json(const std::filesystem::path& root) {
+    const ModelDocument source = make_model();
+    const auto binary_path = root / "classic model.stl";
+    std::string error;
+    assert(export_stl_model(binary_path.string(), source, &error));
+
+    const auto binary_bytes = read_bytes(binary_path);
+    assert(binary_bytes.size() == 84U + 12U * 50U);
+    assert(read_u32_le(binary_bytes, 80U) == 12U);
+
+    ModelDocument imported_binary;
+    assert(import_stl_model(binary_path.string(), imported_binary, &error));
+    assert(imported_binary.cuboids.empty());
+    assert(imported_binary.meshes.size() == 1U);
+    assert(imported_binary.selected_mesh == 0);
+    assert(imported_binary.meshes[0].triangles.size() == 12U);
+    assert(imported_binary.meshes[0].vertices.size() == 36U);
+    for (const auto& vertex : imported_binary.meshes[0].vertices) {
+        assert(vertex.uv[0] >= 0.0f && vertex.uv[0] <= 1.0f);
+        assert(vertex.uv[1] >= 0.0f && vertex.uv[1] <= 1.0f);
+    }
+
+    const auto ascii_path = root / "triangle.stl";
+    {
+        std::ofstream file(ascii_path);
+        file << R"STL(solid triangle
+facet normal 0 0 1
+  outer loop
+    vertex 0 0 0
+    vertex 1 0 0
+    vertex 0 1 0
+  endloop
+endfacet
+endsolid triangle
+)STL";
+    }
+    ModelDocument imported_ascii;
+    assert(import_stl_model(ascii_path.string(), imported_ascii, &error));
+    assert(imported_ascii.meshes.size() == 1U);
+    assert(imported_ascii.meshes[0].triangles.size() == 1U);
+    assert(imported_ascii.meshes[0].vertices.size() == 3U);
+
+    const auto mesh_json_path = root / "mesh model.json";
+    assert(export_model_json(mesh_json_path.string(), imported_ascii, &error));
+    ModelDocument imported_json;
+    assert(import_model_json(mesh_json_path.string(), imported_json, &error));
+    assert(imported_json.meshes.size() == 1U);
+    assert(imported_json.meshes[0].triangles.size() == 1U);
+}
+
 void test_threejs_pack_export(const std::filesystem::path& root) {
     const Document document = make_document();
     const ModelDocument model = make_model();
@@ -483,6 +541,7 @@ int main() {
     test_model_json_roundtrip(root);
     test_minecraft_model_roundtrip(root);
     test_gltf_model_export(root);
+    test_stl_model_import_export_and_mesh_json(root);
     test_threejs_pack_export(root);
     test_import_failures_are_reported(root);
     std::filesystem::remove_all(root);
