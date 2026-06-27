@@ -1257,7 +1257,7 @@ constexpr FileFilter kGifFilters[] = {{"GIF animation", "gif"}};
 constexpr FileFilter kAsepriteFilters[] = {{"Aseprite sprite", "aseprite,ase"}};
 constexpr FileFilter kJsonFilters[] = {{"JSON", "json"}};
 constexpr FileFilter kGltfFilters[] = {{"glTF model", "gltf"}};
-constexpr FileFilter kThreeJSPackFilters[] = {{"ThreeJSPack", "threejspack"}};
+constexpr FileFilter kThreeJSPackFilters[] = {{"Three.js Package", "zip"}};
 
 struct SkyboxOption {
     const char* name;
@@ -2263,7 +2263,7 @@ void EditorApp::draw_main_menu() {
         if (ImGui::MenuItem("Export ThreeJSPack...")) {
             std::string path;
             if (accept_dialog_result(save_file_dialog(filter_list(kThreeJSPackFilters), threejs_pack_path_), path)) {
-                path = with_default_extension(path, ".threejspack");
+                path = with_default_extension(path, ".zip");
                 copy_path(threejs_pack_path_, sizeof(threejs_pack_path_), path);
                 std::string error;
                 if (export_threejs_pack(path, document_, model_, &error)) set_status(std::string("Exported ") + path);

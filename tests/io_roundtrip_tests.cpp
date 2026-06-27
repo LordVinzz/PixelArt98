@@ -432,7 +432,7 @@ void test_gltf_model_export(const std::filesystem::path& root) {
 void test_threejs_pack_export(const std::filesystem::path& root) {
     const Document document = make_document();
     const ModelDocument model = make_model();
-    const auto path = root / "packed model.threejspack";
+    const auto path = root / "packed model.zip";
     std::string error;
     assert(export_threejs_pack(path.string(), document, model, &error));
 

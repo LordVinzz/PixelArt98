@@ -296,7 +296,7 @@ private:
     char model_path_[512] = "model.json";
     char gltf_model_path_[512] = "model.gltf";
     char gltf_texture_path_[512] = "texture.png";
-    char threejs_pack_path_[512] = "model.threejspack";
+    char threejs_pack_path_[512] = "model.zip";
     char minecraft_model_path_[512] = "minecraft_model.json";
     char minecraft_texture_path_[512] = "texture.png";
     char text_buffer_[128] = "TEXT";
