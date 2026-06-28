@@ -1344,7 +1344,7 @@ void generate_box_projection_uvs(MeshObject& mesh) {
     }
 }
 
-ModelDocument model_from_imported_mesh(MeshObject mesh) {
+ModelDocument model_from_imported_mesh(MeshObject mesh, MeshUvUnwrapResult* unwrap_result) {
     generate_box_projection_uvs(mesh);
     mesh.selected_vertices.assign(mesh.vertices.size(), 0);
     mesh.selected_faces.assign(mesh.triangles.size(), 0);
@@ -1359,6 +1359,10 @@ ModelDocument model_from_imported_mesh(MeshObject mesh) {
     model.mesh_selection_mode = 0;
     model.meshes.push_back(std::move(mesh));
     clamp_model_uvs(model);
+    const MeshUvUnwrapResult result = unwrap_model_mesh_uvs(model, model.texture_width, model.texture_height);
+    if (unwrap_result != nullptr) {
+        *unwrap_result = result;
+    }
     return model;
 }
 
@@ -2372,12 +2376,15 @@ bool export_threejs_pack(const std::string& path, const Document& document, cons
     return ok;
 }
 
-bool import_stl_model(const std::string& path, ModelDocument& out_model, std::string* error) {
+bool import_stl_model(const std::string& path,
+                      ModelDocument& out_model,
+                      std::string* error,
+                      MeshUvUnwrapResult* unwrap_result) {
     MeshObject mesh;
     if (!read_stl_mesh(path, mesh, error)) {
         return false;
     }
-    out_model = model_from_imported_mesh(std::move(mesh));
+    out_model = model_from_imported_mesh(std::move(mesh), unwrap_result);
     return true;
 }
 

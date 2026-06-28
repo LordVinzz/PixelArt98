@@ -54,7 +54,10 @@ bool export_model_json(const std::string& path, const ModelDocument& model, std:
 bool import_model_json(const std::string& path, ModelDocument& out_model, std::string* error = nullptr);
 bool export_gltf_model(const std::string& path, const ModelDocument& model, const std::string& texture_path = "texture.png", std::string* error = nullptr);
 bool export_threejs_pack(const std::string& path, const Document& document, const ModelDocument& model, std::string* error = nullptr);
-bool import_stl_model(const std::string& path, ModelDocument& out_model, std::string* error = nullptr);
+bool import_stl_model(const std::string& path,
+                      ModelDocument& out_model,
+                      std::string* error = nullptr,
+                      MeshUvUnwrapResult* unwrap_result = nullptr);
 bool export_stl_model(const std::string& path, const ModelDocument& model, std::string* error = nullptr);
 bool export_minecraft_model(const std::string& path, const ModelDocument& model, const std::string& texture_path = "texture.png", std::string* error = nullptr);
 bool import_minecraft_model(const std::string& path, ModelDocument& out_model, std::string* error = nullptr);

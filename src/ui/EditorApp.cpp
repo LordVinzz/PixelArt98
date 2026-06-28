@@ -1556,6 +1556,7 @@ void EditorApp::render() {
     draw_rotate_zoom_popup();
     draw_depth_map_popup();
     draw_image_import_popup();
+    draw_mesh_unwrap_resize_popup();
     draw_undo_tree_window();
     draw_error_console();
     draw_status_bar();
@@ -1609,6 +1610,11 @@ void EditorApp::refresh_texture() {
     if (!texture_dirty_) {
         return;
     }
+    const bool region_update_requested = canvas_dirty_region_active_;
+    const int dirty_min_x = canvas_dirty_min_x_;
+    const int dirty_min_y = canvas_dirty_min_y_;
+    const int dirty_max_x = canvas_dirty_max_x_;
+    const int dirty_max_y = canvas_dirty_max_y_;
     trace_document_pixel_buffers("refresh_texture.document_before", document_);
     memory_trace_vector("refresh_texture.composite_before", composite_);
     composite_uses_active_cel_ = can_use_active_cel_as_composite(document_);
@@ -1620,16 +1626,80 @@ void EditorApp::refresh_texture() {
         composite_ = document_.composite_active();
     }
     memory_trace_vector("refresh_texture.composite_after", composite_);
-    if (is_huge_document(document_) && tiled_canvas_texture_.has_prepared_pyramid()) {
+    const bool has_prepared_pyramid = tiled_canvas_texture_.has_prepared_pyramid();
+    if (is_huge_document(document_) && has_prepared_pyramid) {
         memory_trace_note("refresh_texture.clear_stale_pyramid", "huge_document_edit");
         tiled_canvas_texture_.clear_prepared_pyramid();
     }
-    tiled_canvas_texture_.invalidate();
-    tiled_onion_texture_.invalidate();
+    const std::vector<Pixel>& source = canvas_pixels();
+    const std::size_t expected_size = static_cast<std::size_t>(document_.width) * static_cast<std::size_t>(document_.height);
+    const bool can_upload_region = region_update_requested &&
+                                   !has_prepared_pyramid &&
+                                   source.size() == expected_size &&
+                                   dirty_max_x > dirty_min_x &&
+                                   dirty_max_y > dirty_min_y;
+    if (can_upload_region) {
+        tiled_canvas_texture_.upload_region_now(document_.width,
+                                                document_.height,
+                                                source,
+                                                dirty_min_x,
+                                                dirty_min_y,
+                                                dirty_max_x - dirty_min_x,
+                                                dirty_max_y - dirty_min_y);
+    } else {
+        tiled_canvas_texture_.invalidate();
+        tiled_onion_texture_.invalidate();
+    }
     full_canvas_texture_dirty_ = true;
     texture_dirty_ = false;
+    canvas_dirty_region_active_ = false;
     history_playback_frame_change_ = false;
     invalidate_histogram_cache();
+}
+
+void EditorApp::mark_canvas_dirty_region(int x0, int y0, int x1, int y1) {
+    const bool full_refresh_already_pending = texture_dirty_ && !canvas_dirty_region_active_;
+    texture_dirty_ = true;
+    if (full_refresh_already_pending) {
+        return;
+    }
+    if (document_.width <= 0 || document_.height <= 0) {
+        return;
+    }
+    const int min_x = std::clamp(x0, 0, document_.width);
+    const int min_y = std::clamp(y0, 0, document_.height);
+    const int max_x = std::clamp(x1, 0, document_.width);
+    const int max_y = std::clamp(y1, 0, document_.height);
+    if (max_x <= min_x || max_y <= min_y) {
+        return;
+    }
+    if (!canvas_dirty_region_active_) {
+        canvas_dirty_min_x_ = min_x;
+        canvas_dirty_min_y_ = min_y;
+        canvas_dirty_max_x_ = max_x;
+        canvas_dirty_max_y_ = max_y;
+        canvas_dirty_region_active_ = true;
+        return;
+    }
+    canvas_dirty_min_x_ = std::min(canvas_dirty_min_x_, min_x);
+    canvas_dirty_min_y_ = std::min(canvas_dirty_min_y_, min_y);
+    canvas_dirty_max_x_ = std::max(canvas_dirty_max_x_, max_x);
+    canvas_dirty_max_y_ = std::max(canvas_dirty_max_y_, max_y);
+}
+
+void EditorApp::mark_brush_dirty_region(int x, int y, int brush_size) {
+    const int size = std::max(1, brush_size);
+    const int half = size / 2;
+    mark_canvas_dirty_region(x - half - 1, y - half - 1, x - half + size + 1, y - half + size + 1);
+}
+
+void EditorApp::mark_brush_segment_dirty_region(int x0, int y0, int x1, int y1, int brush_size) {
+    const int size = std::max(1, brush_size);
+    const int half = size / 2;
+    mark_canvas_dirty_region(std::min(x0, x1) - half - 1,
+                             std::min(y0, y1) - half - 1,
+                             std::max(x0, x1) - half + size + 1,
+                             std::max(y0, y1) - half + size + 1);
 }
 
 const std::vector<Pixel>& EditorApp::canvas_pixels() const {
@@ -1752,6 +1822,11 @@ void EditorApp::sync_model_texture_metadata() {
     model_.texture_width = document_.width;
     model_.texture_height = document_.height;
     clamp_model_uvs(model_);
+}
+
+void EditorApp::invalidate_model_render_cache() {
+    renderer3d_.invalidate_model_cache();
+    mesh_uv_overlay_renderer_.invalidate_cache();
 }
 
 void EditorApp::begin_history_frame() {
@@ -1886,7 +1961,7 @@ void EditorApp::restore_history_node(int node_id) {
     document_.clear_recent_commit_names();
     history_current_node_ = node->id;
     sync_model_texture_metadata();
-    renderer3d_.invalidate_model_cache();
+    invalidate_model_render_cache();
     texture_dirty_ = true;
     invalidate_histogram_cache();
     history_pending_ = false;
@@ -2187,7 +2262,7 @@ void EditorApp::draw_main_menu() {
                     document_ = std::move(bundle.document);
                     model_ = std::move(bundle.model);
                     reset_history_tree();
-                    renderer3d_.invalidate_model_cache();
+                    invalidate_model_render_cache();
                     texture_dirty_ = true;
                     set_status(std::string("Loaded ") + path);
                 } else {
@@ -2295,7 +2370,7 @@ void EditorApp::draw_main_menu() {
                 std::string error;
                 if (import_model_json(path, model_, &error)) {
                     sync_model_texture_metadata();
-                    renderer3d_.invalidate_model_cache();
+                    invalidate_model_render_cache();
                     set_status(std::string("Imported ") + path);
                 } else {
                     report_error("Import model JSON: " + path, error);
@@ -2344,12 +2419,14 @@ void EditorApp::draw_main_menu() {
             if (accept_dialog_result(open_file_dialog(filter_list(kStlFilters), stl_model_path_), path)) {
                 copy_path(stl_model_path_, sizeof(stl_model_path_), path);
                 std::string error;
-                if (import_stl_model(path, model_, &error)) {
+                MeshUvUnwrapResult unwrap_result;
+                if (import_stl_model(path, model_, &error, &unwrap_result)) {
                     sync_model_texture_metadata();
                     frame_model_viewport(model_viewport_, model_);
-                    renderer3d_.invalidate_model_cache();
+                    invalidate_model_render_cache();
                     settings_.show_3d_preview = true;
                     set_status(std::string("Imported ") + path);
+                    handle_mesh_unwrap_result(unwrap_result);
                 } else {
                     report_error("Import STL model: " + path, error);
                 }
@@ -2372,7 +2449,7 @@ void EditorApp::draw_main_menu() {
                 std::string error;
                 if (import_minecraft_model(path, model_, &error)) {
                     sync_model_texture_metadata();
-                    renderer3d_.invalidate_model_cache();
+                    invalidate_model_render_cache();
                     set_status(std::string("Imported ") + path);
                 } else {
                     report_error("Import Minecraft model: " + path, error);
@@ -2875,7 +2952,7 @@ void EditorApp::draw_new_document_dialog() {
         model_ = ModelDocument::create_default();
         sync_model_texture_metadata();
         reset_history_tree();
-        renderer3d_.invalidate_model_cache();
+        invalidate_model_render_cache();
         canvas_pan_ = ImVec2(0.0f, 0.0f);
         canvas_fit_requested_ = true;
         texture_dirty_ = true;
@@ -3122,7 +3199,7 @@ void EditorApp::draw_canvas() {
     draw_grid_overlay(draw_list, origin, canvas_size);
     draw_floating_selection_overlay(draw_list, origin);
     draw_text_preview_overlay(draw_list, origin);
-    draw_selected_model_face_overlay(draw_list, origin);
+    draw_selected_model_face_overlay(draw_list, origin, viewport_origin, viewport_size);
     draw_selection_overlay(draw_list, origin);
     draw_lasso_preview(draw_list, origin);
     draw_tool_drag_preview(draw_list, origin);
@@ -3430,7 +3507,7 @@ void EditorApp::handle_canvas_input(const ImVec2& origin,
                 } else {
                     plot_brush_raw(document_, px_i, py_i, tool_.primary, tool_.tool == ToolType::Pencil ? 1 : tool_.brush_size, tool_.tool == ToolType::Eraser);
                 }
-                texture_dirty_ = true;
+                mark_brush_dirty_region(px_i, py_i, tool_.tool == ToolType::Pencil ? 1 : tool_.brush_size);
                 break;
             case ToolType::Bucket:
                 if (mask_editing) {
@@ -3462,7 +3539,7 @@ void EditorApp::handle_canvas_input(const ImVec2& origin,
                     stroke_before_ = document_.snapshot_active_cel();
                     clone_source_pixels_ = document_.active_cel().pixels;
                     clone_stamp_raw(document_, clone_source_pixels_, tool_.clone_source_x, tool_.clone_source_y, px_i, py_i, tool_.brush_size);
-                    texture_dirty_ = true;
+                    mark_brush_dirty_region(px_i, py_i, tool_.brush_size);
                 } else {
                     drag_active_ = false;
                     set_status("Right-click the canvas to set a clone source first");
@@ -3531,16 +3608,16 @@ void EditorApp::handle_canvas_input(const ImVec2& origin,
         } else {
             draw_line_raw(document_, last_x_, last_y_, px_i, py_i, tool_.primary, size, tool_.tool == ToolType::Eraser);
         }
+        mark_brush_segment_dirty_region(last_x_, last_y_, px_i, py_i, size);
         last_x_ = px_i;
         last_y_ = py_i;
-        texture_dirty_ = true;
     }
 
     if (clone_drag_active_ && over_pixel && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         int sx = tool_.clone_source_x + (px_i - drag_start_x_);
         int sy = tool_.clone_source_y + (py_i - drag_start_y_);
         clone_stamp_raw(document_, clone_source_pixels_, sx, sy, px_i, py_i, tool_.brush_size);
-        texture_dirty_ = true;
+        mark_brush_dirty_region(px_i, py_i, tool_.brush_size);
     }
 
     if (move_drag_active_ && over_pixel && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -3951,9 +4028,36 @@ void EditorApp::draw_lasso_preview(ImDrawList* draw_list, const ImVec2& origin) 
     }
 }
 
-void EditorApp::draw_selected_model_face_overlay(ImDrawList* draw_list, const ImVec2& origin) const {
+void EditorApp::draw_selected_model_face_overlay(ImDrawList* draw_list,
+                                                 const ImVec2& origin,
+                                                 const ImVec2& viewport_origin,
+                                                 const ImVec2& viewport_size) {
     if (!settings_.show_canvas_cuboid_uv_overlay) {
         return;
+    }
+    bool has_mesh_uvs = false;
+    for (const MeshObject& mesh : model_.meshes) {
+        if (!mesh.vertices.empty() && !mesh.triangles.empty()) {
+            has_mesh_uvs = true;
+            break;
+        }
+    }
+    if (has_mesh_uvs &&
+        mesh_uv_overlay_renderer_.render_to_texture(model_,
+                                                    document_.width,
+                                                    document_.height,
+                                                    origin.x - viewport_origin.x,
+                                                    origin.y - viewport_origin.y,
+                                                    zoom_,
+                                                    static_cast<int>(std::ceil(viewport_size.x)),
+                                                    static_cast<int>(std::ceil(viewport_size.y)),
+                                                    show_all_cuboid_wireframes_) &&
+        mesh_uv_overlay_renderer_.texture_id() != 0) {
+        draw_list->AddImage(gl_texture_id(mesh_uv_overlay_renderer_.texture_id()),
+                            viewport_origin,
+                            ImVec2(viewport_origin.x + viewport_size.x, viewport_origin.y + viewport_size.y),
+                            ImVec2(0.0f, 1.0f),
+                            ImVec2(1.0f, 0.0f));
     }
     if (model_.cuboids.empty()) {
         return;
@@ -6719,12 +6823,12 @@ void EditorApp::draw_model_panel() {
     sync_model_texture_metadata();
     if (ImGui::Button("+ Cuboid")) {
         model_.add_cuboid();
-        renderer3d_.invalidate_model_cache();
+        invalidate_model_render_cache();
     }
     ImGui::SameLine();
     if (ImGui::Button("- Cuboid")) {
         model_.remove_selected();
-        renderer3d_.invalidate_model_cache();
+        invalidate_model_render_cache();
     }
     ImGui::SameLine();
     ImGui::Checkbox("All Canvas UVs", &show_all_cuboid_wireframes_);
@@ -6735,7 +6839,7 @@ void EditorApp::draw_model_panel() {
             if (model_.selected_cuboid != i || model_.selected_mesh != -1) {
                 model_.selected_cuboid = i;
                 model_.selected_mesh = -1;
-                renderer3d_.invalidate_model_cache();
+                invalidate_model_render_cache();
             }
         }
         ImGui::PopID();
@@ -6748,7 +6852,7 @@ void EditorApp::draw_model_panel() {
             if (model_.selected_mesh != i || model_.selected_cuboid != -1) {
                 model_.selected_mesh = i;
                 model_.selected_cuboid = -1;
-                renderer3d_.invalidate_model_cache();
+                invalidate_model_render_cache();
             }
         }
         ImGui::PopID();
@@ -6762,6 +6866,11 @@ void EditorApp::draw_model_panel() {
         }
         ImGui::Text("Vertices: %d", static_cast<int>(mesh.vertices.size()));
         ImGui::Text("Faces: %d", static_cast<int>(mesh.triangles.size()));
+        if (ImGui::Button("Unwrap Mesh UVs")) {
+            MeshUvUnwrapResult unwrap_result = unwrap_model_mesh_uvs(model_, document_.width, document_.height);
+            invalidate_model_render_cache();
+            handle_mesh_unwrap_result(unwrap_result);
+        }
         ImGui::RadioButton("Face selection", &model_.mesh_selection_mode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Vertex selection", &model_.mesh_selection_mode, 1);
@@ -6780,13 +6889,13 @@ void EditorApp::draw_model_panel() {
         cuboid.name = name;
     }
     if (ImGui::InputFloat3("From", cuboid.from.data())) {
-        renderer3d_.invalidate_model_cache();
+        invalidate_model_render_cache();
     }
     if (ImGui::InputFloat3("To", cuboid.to.data())) {
-        renderer3d_.invalidate_model_cache();
+        invalidate_model_render_cache();
     }
     if (ImGui::SliderInt("Face", &model_.selected_face, 0, 5, face_name(model_.selected_face))) {
-        renderer3d_.invalidate_model_cache();
+        invalidate_model_render_cache();
     }
     UvRect& uv = cuboid.uv[static_cast<std::size_t>(model_.selected_face)];
     bool uv_changed = false;
@@ -6807,7 +6916,7 @@ void EditorApp::draw_model_panel() {
         uv_changed = true;
     }
     if (uv_changed) {
-        renderer3d_.invalidate_model_cache();
+        invalidate_model_render_cache();
     }
     ImGui::SeparatorText("Texture Atlas");
     float uv_scale = std::min(256.0f / static_cast<float>(document_.width), 256.0f / static_cast<float>(document_.height));
@@ -6815,7 +6924,7 @@ void EditorApp::draw_model_panel() {
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("UVAtlas", atlas_size, ImGuiButtonFlags_MouseButtonLeft);
     if (handle_uv_input(origin, uv_scale)) {
-        renderer3d_.invalidate_model_cache();
+        invalidate_model_render_cache();
     }
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(origin, ImVec2(origin.x + atlas_size.x, origin.y + atlas_size.y), IM_COL32(70, 70, 70, 255));
@@ -6999,6 +7108,118 @@ bool EditorApp::handle_uv_input(const ImVec2& origin, float scale) {
         uv_drag_mode_ = 0;
     }
     return changed;
+}
+
+void EditorApp::handle_mesh_unwrap_result(const MeshUvUnwrapResult& result) {
+    if (!result.changed) {
+        set_status("No mesh UVs to unwrap");
+        return;
+    }
+    pending_mesh_unwrap_result_ = result;
+    if (result.recommended_width > document_.width || result.recommended_height > document_.height) {
+        mesh_unwrap_resize_popup_requested_ = true;
+        set_status("Mesh UVs unwrapped; larger canvas recommended");
+        return;
+    }
+    set_status("Mesh UVs unwrapped: " + std::to_string(result.island_count) + " island(s), " +
+               std::to_string(result.triangle_count) + " triangle(s)");
+}
+
+bool EditorApp::resize_canvas_preserving_pixels(int width, int height) {
+    const int next_width = clamped_document_size(std::max(width, document_.width));
+    const int next_height = clamped_document_size(std::max(height, document_.height));
+    if (next_width == document_.width && next_height == document_.height) {
+        return false;
+    }
+    const int old_width = document_.width;
+    const int old_height = document_.height;
+    const std::size_t old_size = static_cast<std::size_t>(old_width) * static_cast<std::size_t>(old_height);
+    const std::size_t next_size = static_cast<std::size_t>(next_width) * static_cast<std::size_t>(next_height);
+
+    auto resize_pixels = [&](std::vector<Pixel>& pixels) {
+        std::vector<Pixel> next(next_size, 0);
+        if (pixels.size() == old_size) {
+            const int copy_width = std::min(old_width, next_width);
+            const int copy_height = std::min(old_height, next_height);
+            for (int y = 0; y < copy_height; ++y) {
+                const std::size_t source = static_cast<std::size_t>(y) * static_cast<std::size_t>(old_width);
+                const std::size_t destination = static_cast<std::size_t>(y) * static_cast<std::size_t>(next_width);
+                std::copy_n(pixels.data() + source, copy_width, next.data() + destination);
+            }
+        }
+        pixels = std::move(next);
+    };
+    auto resize_mask = [&](std::vector<std::uint8_t>& mask) {
+        if (mask.empty()) {
+            return;
+        }
+        std::vector<std::uint8_t> next(next_size, 255);
+        if (mask.size() == old_size) {
+            const int copy_width = std::min(old_width, next_width);
+            const int copy_height = std::min(old_height, next_height);
+            for (int y = 0; y < copy_height; ++y) {
+                const std::size_t source = static_cast<std::size_t>(y) * static_cast<std::size_t>(old_width);
+                const std::size_t destination = static_cast<std::size_t>(y) * static_cast<std::size_t>(next_width);
+                std::copy_n(mask.data() + source, copy_width, next.data() + destination);
+            }
+        }
+        mask = std::move(next);
+    };
+
+    for (Frame& frame : document_.frames) {
+        for (Cel& cel : frame.cels) {
+            resize_pixels(cel.pixels);
+        }
+    }
+    for (Layer& layer : document_.layers) {
+        resize_mask(layer.mask);
+    }
+    document_.width = next_width;
+    document_.height = next_height;
+    document_.selection.resize(next_width, next_height);
+    document_.floating_selection.clear();
+    sync_model_texture_metadata();
+    invalidate_model_render_cache();
+    texture_dirty_ = true;
+    full_canvas_texture_dirty_ = true;
+    tiled_canvas_texture_.invalidate();
+    canvas_fit_requested_ = true;
+    invalidate_histogram_cache();
+    history_pending_ = true;
+    return true;
+}
+
+void EditorApp::draw_mesh_unwrap_resize_popup() {
+    if (mesh_unwrap_resize_popup_requested_) {
+        ImGui::OpenPopup("Resize Canvas for Mesh UVs");
+        mesh_unwrap_resize_popup_requested_ = false;
+    }
+    bool open = true;
+    if (!ImGui::BeginPopupModal("Resize Canvas for Mesh UVs", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+    const int target_width = clamped_document_size(pending_mesh_unwrap_result_.recommended_width);
+    const int target_height = clamped_document_size(pending_mesh_unwrap_result_.recommended_height);
+    ImGui::TextWrapped("The mesh UV unwrap produced %d island(s) from %d triangle(s).",
+                       pending_mesh_unwrap_result_.island_count,
+                       pending_mesh_unwrap_result_.triangle_count);
+    ImGui::Text("Current canvas: %d x %d", document_.width, document_.height);
+    ImGui::Text("Recommended canvas: %d x %d", target_width, target_height);
+    ImGui::Spacing();
+    if (ImGui::Button("Resize Canvas", ImVec2(132.0f, 0.0f))) {
+        if (resize_canvas_preserving_pixels(target_width, target_height)) {
+            set_status("Canvas resized for mesh UVs");
+        } else {
+            set_status("Canvas already fits mesh UVs");
+        }
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Keep Current", ImVec2(124.0f, 0.0f))) {
+        set_status("Kept current canvas size after mesh unwrap");
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 bool EditorApp::ensure_skybox_texture() {
@@ -7243,13 +7464,13 @@ void EditorApp::draw_model_preview() {
                            hit.mesh_face < static_cast<int>(mesh.selected_faces.size())) {
                     mesh.selected_faces[static_cast<std::size_t>(hit.mesh_face)] = 1;
                 }
-                renderer3d_.invalidate_model_cache();
+                invalidate_model_render_cache();
             } else {
                 clear_mesh_selections(model_);
                 model_.selected_mesh = -1;
                 model_.selected_cuboid = hit.cuboid;
                 model_.selected_face = hit.face;
-                renderer3d_.invalidate_model_cache();
+                invalidate_model_render_cache();
             }
         }
     }
@@ -7391,7 +7612,7 @@ void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& 
             } else if (model_transform_mode_ == 3) {
                 scale_selected_mesh_components(model_, model_transform_axis_, 1.0f + signed_pixels * 0.012f, constrained);
             }
-            renderer3d_.invalidate_model_cache();
+            invalidate_model_render_cache();
             return;
         }
 
@@ -7417,7 +7638,7 @@ void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& 
             scale_cuboid(next, model_transform_axis_, 1.0f + signed_pixels * 0.012f, constrained);
         }
         model_.selected() = next;
-        renderer3d_.invalidate_model_cache();
+        invalidate_model_render_cache();
     }
     if (model_transform_drag_active_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         model_transform_drag_active_ = false;

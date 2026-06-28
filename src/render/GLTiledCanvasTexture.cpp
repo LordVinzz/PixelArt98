@@ -155,6 +155,50 @@ void GLTiledCanvasTexture::invalidate() {
     }
 }
 
+void GLTiledCanvasTexture::upload_region_now(int document_width,
+                                             int document_height,
+                                             const std::vector<Pixel>& pixels,
+                                             int x,
+                                             int y,
+                                             int width,
+                                             int height) {
+    MemoryTraceScope trace("GLTiledCanvasTexture::upload_region_now");
+    memory_trace_vector("upload_region_now.pixels", pixels);
+    const std::size_t expected_size = static_cast<std::size_t>(document_width) * static_cast<std::size_t>(document_height);
+    if (document_width <= 0 || document_height <= 0 || width <= 0 || height <= 0 || pixels.size() != expected_size) {
+        return;
+    }
+    if (document_width != document_width_ || document_height != document_height_ || levels_.empty()) {
+        reset_levels(document_width, document_height);
+    }
+    if (levels_.empty()) {
+        return;
+    }
+
+    Level& level = levels_.front();
+    if (level.downsample != 1 || level.columns <= 0 || level.rows <= 0) {
+        return;
+    }
+    const int min_x = std::clamp(x, 0, document_width);
+    const int min_y = std::clamp(y, 0, document_height);
+    const int max_x = std::clamp(x + width, 0, document_width);
+    const int max_y = std::clamp(y + height, 0, document_height);
+    if (max_x <= min_x || max_y <= min_y) {
+        return;
+    }
+
+    const int first_tile_x = std::clamp(min_x / kTileSize, 0, level.columns - 1);
+    const int first_tile_y = std::clamp(min_y / kTileSize, 0, level.rows - 1);
+    const int last_tile_x = std::clamp((max_x - 1) / kTileSize, 0, level.columns - 1);
+    const int last_tile_y = std::clamp((max_y - 1) / kTileSize, 0, level.rows - 1);
+    for (int tile_y = first_tile_y; tile_y <= last_tile_y; ++tile_y) {
+        for (int tile_x = first_tile_x; tile_x <= last_tile_x; ++tile_x) {
+            Tile& tile = tile_at(level, tile_x, tile_y);
+            upload_tile(level, tile, pixels, document_width, generation_);
+        }
+    }
+}
+
 void GLTiledCanvasTexture::draw_visible(ImDrawList* draw_list,
                                         int document_width,
                                         int document_height,
@@ -513,16 +557,14 @@ void GLTiledCanvasTexture::draw_ready_level(ImDrawList* draw_list,
     const int first_tile_y = min_y / kTileSize;
     const int last_tile_x = (max_x - 1) / kTileSize;
     const int last_tile_y = (max_y - 1) / kTileSize;
-    const std::uint64_t target_generation = target_generation_for_level(level_index);
-
     for (int tile_y = first_tile_y; tile_y <= last_tile_y; ++tile_y) {
         for (int tile_x = first_tile_x; tile_x <= last_tile_x; ++tile_x) {
             const int tile_index = tile_y * level.columns + tile_x;
-            if (!tile_ready(level_index, tile_index)) {
+            if (tile_index < 0 || tile_index >= static_cast<int>(level.tiles.size())) {
                 continue;
             }
             const Tile& tile = tile_at(level, tile_x, tile_y);
-            if (tile.generation != target_generation || tile.texture_id == 0) {
+            if (tile.texture_id == 0) {
                 continue;
             }
 

@@ -80,6 +80,7 @@ private:
     std::size_t model_vertex_count_ = 0;
     int model_texture_width_ = 0;
     int model_texture_height_ = 0;
+    int model_lod_stride_ = 1;
     bool model_vertices_dirty_ = true;
     int width_ = 0;
     int height_ = 0;

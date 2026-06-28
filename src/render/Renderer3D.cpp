@@ -300,10 +300,82 @@ std::vector<FaceQuad> face_quads(const ModelDocument& model) {
     return out;
 }
 
-std::vector<RenderVertex> make_vertices(const ModelDocument& model, int texture_width, int texture_height) {
+bool triangle_has_selected_vertex(const MeshObject& mesh, const MeshTriangle& triangle) {
+    for (int vertex_index : triangle.indices) {
+        if (vertex_index >= 0 &&
+            vertex_index < static_cast<int>(mesh.selected_vertices.size()) &&
+            mesh.selected_vertices[static_cast<std::size_t>(vertex_index)] != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool triangle_selected(const MeshObject& mesh, int face_index, const MeshTriangle& triangle) {
+    const bool selected_face =
+        face_index < static_cast<int>(mesh.selected_faces.size()) &&
+        mesh.selected_faces[static_cast<std::size_t>(face_index)] != 0;
+    return selected_face || triangle_has_selected_vertex(mesh, triangle);
+}
+
+bool lod_sample_triangle(int triangle_index, int lod_stride) {
+    if (lod_stride <= 1) {
+        return true;
+    }
+    const auto hash = static_cast<unsigned int>(triangle_index) * 2654435761U;
+    return (hash % static_cast<unsigned int>(lod_stride)) == 0U;
+}
+
+std::size_t mesh_triangle_count(const ModelDocument& model) {
+    std::size_t count = 0;
+    for (const MeshObject& mesh : model.meshes) {
+        count += mesh.triangles.size();
+    }
+    return count;
+}
+
+int render_lod_stride(const ModelDocument& model,
+                      const ModelViewportState& viewport,
+                      int output_width,
+                      int output_height) {
+    const std::size_t triangle_count = mesh_triangle_count(model);
+    if (triangle_count == 0U) {
+        return 1;
+    }
+    const float radius = std::max(0.0001f, model_bounding_radius(model));
+    const float distance = std::max(radius * 0.05f, viewport.distance);
+    const float f = 1.0f / std::tan(radians(45.0f) * 0.5f);
+    const float projected_diameter = (radius * 2.0f / distance) * f * static_cast<float>(std::max(1, output_height)) * 0.5f;
+    const float viewport_min_dimension = static_cast<float>(std::max(1, std::min(output_width, output_height)));
+    if (projected_diameter >= viewport_min_dimension * 0.82f) {
+        return 1;
+    }
+
+    const float screen_radius = std::max(1.0f, projected_diameter * 0.5f);
+    const float model_screen_area = std::min(static_cast<float>(std::max(1, output_width) * std::max(1, output_height)),
+                                             pi * screen_radius * screen_radius);
+    const std::size_t target_triangles = std::max<std::size_t>(900U, static_cast<std::size_t>(model_screen_area / 6.0f));
+    int stride = static_cast<int>((triangle_count + target_triangles - 1U) / target_triangles);
+    if (projected_diameter < viewport_min_dimension * 0.55f) {
+        stride = std::max(stride, 2);
+    }
+    if (projected_diameter < viewport_min_dimension * 0.35f) {
+        stride = std::max(stride, 4);
+    }
+    if (projected_diameter < viewport_min_dimension * 0.20f) {
+        stride = std::max(stride, 8);
+    }
+    if (projected_diameter < viewport_min_dimension * 0.12f) {
+        stride = std::max(stride, 16);
+    }
+    return std::clamp(stride, 1, 128);
+}
+
+std::vector<RenderVertex> make_vertices(const ModelDocument& model, int texture_width, int texture_height, int lod_stride) {
     std::vector<RenderVertex> vertices;
     texture_width = std::max(1, texture_width);
     texture_height = std::max(1, texture_height);
+    lod_stride = std::max(1, lod_stride);
     auto quads = face_quads(model);
     vertices.reserve(quads.size() * 6);
     for (const auto& quad : quads) {
@@ -329,23 +401,21 @@ std::vector<RenderVertex> make_vertices(const ModelDocument& model, int texture_
         const MeshObject& mesh = model.meshes[static_cast<std::size_t>(mesh_index)];
         for (int face_index = 0; face_index < static_cast<int>(mesh.triangles.size()); ++face_index) {
             const MeshTriangle& triangle = mesh.triangles[static_cast<std::size_t>(face_index)];
-            const bool selected_face =
-                face_index < static_cast<int>(mesh.selected_faces.size()) &&
-                mesh.selected_faces[static_cast<std::size_t>(face_index)] != 0;
+            const bool selected = triangle_selected(mesh, face_index, triangle);
+            if (!selected && !lod_sample_triangle(face_index, lod_stride)) {
+                continue;
+            }
             for (int vertex_index : triangle.indices) {
                 if (vertex_index < 0 || vertex_index >= static_cast<int>(mesh.vertices.size())) {
                     continue;
                 }
                 const MeshVertex& vertex = mesh.vertices[static_cast<std::size_t>(vertex_index)];
-                const bool selected_vertex =
-                    vertex_index < static_cast<int>(mesh.selected_vertices.size()) &&
-                    mesh.selected_vertices[static_cast<std::size_t>(vertex_index)] != 0;
                 vertices.push_back({vertex.position[0],
                                     vertex.position[1],
                                     vertex.position[2],
                                     std::clamp(vertex.uv[0], 0.0f, 1.0f),
                                     std::clamp(vertex.uv[1], 0.0f, 1.0f),
-                                    selected_face || selected_vertex ? 1.0f : 0.0f,
+                                    selected ? 1.0f : 0.0f,
                                     1.0f});
             }
         }
@@ -574,6 +644,7 @@ void Renderer3D::destroy() {
     model_vertex_count_ = 0;
     model_texture_width_ = 0;
     model_texture_height_ = 0;
+    model_lod_stride_ = 1;
     model_vertices_dirty_ = true;
     width_ = 0;
     height_ = 0;
@@ -680,8 +751,12 @@ bool Renderer3D::render_model_to_texture(const ModelDocument& model,
         return false;
     }
 
-    if (model_vertices_dirty_ || model_texture_width_ != texture_width || model_texture_height_ != texture_height) {
-        auto vertices = make_vertices(model, texture_width, texture_height);
+    const int lod_stride = force_wireframe ? render_lod_stride(model, viewport, output_width, output_height) : 1;
+    if (model_vertices_dirty_ ||
+        model_texture_width_ != texture_width ||
+        model_texture_height_ != texture_height ||
+        model_lod_stride_ != lod_stride) {
+        auto vertices = make_vertices(model, texture_width, texture_height, lod_stride);
         glBindVertexArray(model_vertex_array_);
         glBindBuffer(GL_ARRAY_BUFFER, model_vertex_buffer_);
         glBufferData(GL_ARRAY_BUFFER,
@@ -692,6 +767,7 @@ bool Renderer3D::render_model_to_texture(const ModelDocument& model,
         model_vertex_count_ = vertices.size();
         model_texture_width_ = texture_width;
         model_texture_height_ = texture_height;
+        model_lod_stride_ = lod_stride;
         model_vertices_dirty_ = false;
     }
     auto wire_vertices = make_transparent_wire_vertices(model, texture_width, texture_height, texture_pixels);

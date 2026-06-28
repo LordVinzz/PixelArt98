@@ -156,6 +156,7 @@ add_library(pixelart_app
     src/render/GLCanvasTexture.cpp
     src/render/GLTiledCanvasTexture.cpp
     src/render/Renderer3D.cpp
+    src/render/MeshUvOverlayRenderer.cpp
     src/ui/AppSettings.cpp
     src/ui/EmbeddedAssets.cpp
     src/ui/EmbeddedTransformIcons.c

@@ -62,6 +62,13 @@ public:
     GLTiledCanvasTexture& operator=(const GLTiledCanvasTexture&) = delete;
 
     void invalidate();
+    void upload_region_now(int document_width,
+                           int document_height,
+                           const std::vector<Pixel>& pixels,
+                           int x,
+                           int y,
+                           int width,
+                           int height);
     void draw_visible(ImDrawList* draw_list,
                       int document_width,
                       int document_height,

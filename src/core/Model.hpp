@@ -75,6 +75,15 @@ struct MeshObject {
     std::vector<std::uint8_t> selected_faces;
 };
 
+struct MeshUvUnwrapResult {
+    bool changed = false;
+    int mesh_count = 0;
+    int island_count = 0;
+    int triangle_count = 0;
+    int recommended_width = 1;
+    int recommended_height = 1;
+};
+
 struct ModelDocument {
     int texture_width = 64;
     int texture_height = 64;
@@ -114,5 +123,6 @@ void clear_mesh_selections(ModelDocument& model);
 void translate_selected_mesh_components(ModelDocument& model, int axis, float delta, bool snap_to_unit);
 void scale_selected_mesh_components(ModelDocument& model, int axis, float factor, bool snap_to_double);
 void rotate_selected_mesh_components(ModelDocument& model, int axis, float angle_degrees, bool snap_to_15_degrees);
+MeshUvUnwrapResult unwrap_model_mesh_uvs(ModelDocument& model, int texture_width, int texture_height);
 
 } // namespace px

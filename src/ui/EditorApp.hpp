@@ -13,6 +13,7 @@
 #include "render/GLCanvasTexture.hpp"
 #include "render/GLTiledCanvasTexture.hpp"
 #include "render/MpsEffectRenderer.hpp"
+#include "render/MeshUvOverlayRenderer.hpp"
 #include "render/Renderer3D.hpp"
 #include "ui/AppSettings.hpp"
 #include "ui/FileDialogs.hpp"
@@ -145,6 +146,7 @@ private:
     GLTiledCanvasTexture tiled_onion_texture_;
     GpuEffectRenderer gpu_effect_renderer_;
     MpsEffectRenderer mps_effect_renderer_;
+    MeshUvOverlayRenderer mesh_uv_overlay_renderer_;
     std::array<GLCanvasTexture, 4> transform_icon_textures_;
     std::array<GLCanvasTexture, 6> skybox_face_textures_;
     Renderer3D renderer3d_;
@@ -154,6 +156,7 @@ private:
     bool composite_uses_active_cel_ = false;
     bool texture_dirty_ = true;
     bool full_canvas_texture_dirty_ = true;
+    bool canvas_dirty_region_active_ = false;
     bool wants_quit_ = false;
 
     float zoom_ = 12.0f;
@@ -205,6 +208,7 @@ private:
     bool error_console_open_ = false;
     bool error_console_scroll_to_bottom_ = false;
     bool model_render_error_reported_ = false;
+    bool mesh_unwrap_resize_popup_requested_ = false;
     bool transform_icons_loaded_ = false;
     bool canvas_fit_requested_ = false;
     bool new_document_popup_requested_ = false;
@@ -220,6 +224,7 @@ private:
     int loaded_skybox_index_ = -1;
     int canvas_drag_button_ = ImGuiMouseButton_Left;
     int straighten_drag_point_ = -1;
+    MeshUvUnwrapResult pending_mesh_unwrap_result_;
     int image_transform_resampling_ = 2;
     int depth_source_layer_ = 0;
     int depth_tile_size_ = 1024;
@@ -237,6 +242,10 @@ private:
     int drag_current_y_ = 0;
     int last_x_ = 0;
     int last_y_ = 0;
+    int canvas_dirty_min_x_ = 0;
+    int canvas_dirty_min_y_ = 0;
+    int canvas_dirty_max_x_ = 0;
+    int canvas_dirty_max_y_ = 0;
     int move_start_x_ = 0;
     int move_start_y_ = 0;
     ImVec2 canvas_pan_ = ImVec2(0, 0);
@@ -350,6 +359,9 @@ private:
 
     void update_playback();
     void refresh_texture();
+    void mark_canvas_dirty_region(int x0, int y0, int x1, int y1);
+    void mark_brush_dirty_region(int x, int y, int brush_size);
+    void mark_brush_segment_dirty_region(int x0, int y0, int x1, int y1, int brush_size);
     const std::vector<Pixel>& canvas_pixels() const;
     bool ensure_full_canvas_texture();
     void invalidate_histogram_cache();
@@ -399,6 +411,7 @@ private:
     void draw_rotate_zoom_popup();
     void draw_depth_map_popup();
     void draw_image_import_popup();
+    void draw_mesh_unwrap_resize_popup();
     void draw_undo_tree_window();
     void draw_error_console();
     void draw_status_bar();
@@ -432,7 +445,10 @@ private:
     void draw_mask_overlay(ImDrawList* draw_list, const ImVec2& origin, const ImVec2& size) const;
     void draw_text_preview_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_lasso_preview(ImDrawList* draw_list, const ImVec2& origin) const;
-    void draw_selected_model_face_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
+    void draw_selected_model_face_overlay(ImDrawList* draw_list,
+                                          const ImVec2& origin,
+                                          const ImVec2& viewport_origin,
+                                          const ImVec2& viewport_size);
     void draw_tool_drag_preview(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_straighten_overlay(ImDrawList* draw_list, const ImVec2& origin) const;
     void draw_grid_overlay(ImDrawList* draw_list, const ImVec2& origin, const ImVec2& size) const;
@@ -447,6 +463,9 @@ private:
     bool ensure_skybox_texture();
     void draw_skybox_background(ImDrawList* draw_list, const ImVec2& origin, const ImVec2& size);
     void handle_model_transform_drag(const ImVec2& origin, const ImVec2& size, bool hovered);
+    void invalidate_model_render_cache();
+    void handle_mesh_unwrap_result(const MeshUvUnwrapResult& result);
+    bool resize_canvas_preserving_pixels(int width, int height);
     void start_effect_preview(EffectPreviewKind kind);
     GpuEffectRequest gpu_effect_request(EffectPreviewKind kind) const;
     bool try_mps_effect(EffectPreviewKind kind, std::vector<Pixel>& out_pixels);

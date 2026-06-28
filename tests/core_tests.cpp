@@ -778,6 +778,48 @@ static void test_model_transform_helpers() {
     assert(std::abs(cuboid.rotation_angle - 60.0f) < 0.001f);
 }
 
+static void test_mesh_uv_unwrap() {
+    ModelDocument model;
+    model.cuboids.clear();
+    MeshObject mesh;
+    mesh.name = "Unwrap Test";
+    auto add_triangle = [&](std::array<float, 3> a,
+                            std::array<float, 3> b,
+                            std::array<float, 3> c) {
+        const int base = static_cast<int>(mesh.vertices.size());
+        MeshVertex va;
+        va.position = a;
+        MeshVertex vb;
+        vb.position = b;
+        MeshVertex vc;
+        vc.position = c;
+        mesh.vertices.push_back(va);
+        mesh.vertices.push_back(vb);
+        mesh.vertices.push_back(vc);
+        MeshTriangle triangle;
+        triangle.indices = {base, base + 1, base + 2};
+        mesh.triangles.push_back(triangle);
+    };
+    add_triangle({0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    add_triangle({1.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    add_triangle({4.0f, 0.0f, 0.0f}, {5.0f, 0.0f, 0.0f}, {4.0f, 1.0f, 0.0f});
+    model.meshes.push_back(std::move(mesh));
+
+    const MeshUvUnwrapResult result = unwrap_model_mesh_uvs(model, 16, 16);
+    assert(result.changed);
+    assert(result.mesh_count == 1);
+    assert(result.triangle_count == 3);
+    assert(result.island_count == 2);
+    assert(result.recommended_width >= 16);
+    assert(result.recommended_height >= 16);
+    assert(model.meshes.size() == 1U);
+    assert(model.meshes[0].vertices.size() == 9U);
+    for (const MeshVertex& vertex : model.meshes[0].vertices) {
+        assert(vertex.uv[0] >= 0.0f && vertex.uv[0] <= 1.0f);
+        assert(vertex.uv[1] >= 0.0f && vertex.uv[1] <= 1.0f);
+    }
+}
+
 static void test_app_settings_roundtrip() {
     const auto settings_path = std::filesystem::temp_directory_path() / "pixelart98_settings_test.json";
     std::string error;
@@ -951,6 +993,7 @@ int main() {
     test_layer_blend_modes();
     test_model_json();
     test_model_transform_helpers();
+    test_mesh_uv_unwrap();
     test_app_settings_roundtrip();
     test_project_io();
     std::cout << "pixelart core tests passed\n";

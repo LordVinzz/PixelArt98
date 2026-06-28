@@ -5,6 +5,7 @@
 #define GLFW_INCLUDE_NONE
 
 #include "render/GpuEffectRenderer.hpp"
+#include "render/MeshUvOverlayRenderer.hpp"
 #include "render/Renderer3D.hpp"
 
 #include <GLFW/glfw3.h>
@@ -135,6 +136,9 @@ bool compile_glsl_shaders() {
     ok = compile_gl_program("Renderer3D",
                             px::Renderer3D::vertex_shader_source(),
                             px::Renderer3D::fragment_shader_source()) && ok;
+    ok = compile_gl_program("MeshUvOverlayRenderer",
+                            px::MeshUvOverlayRenderer::vertex_shader_source(),
+                            px::MeshUvOverlayRenderer::fragment_shader_source()) && ok;
 
     glfwDestroyWindow(window);
     glfwTerminate();
