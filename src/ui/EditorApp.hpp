@@ -188,6 +188,7 @@ private:
     bool uv_drag_active_ = false;
     bool model_transform_drag_active_ = false;
     bool model_view_gizmo_drag_active_ = false;
+    bool force_model_wireframe_ = false;
     bool effect_preview_active_ = false;
     bool effect_preview_dirty_ = false;
     bool effect_preview_popup_requested_ = false;
@@ -438,7 +439,7 @@ private:
     void draw_histogram_plot();
     bool draw_curves_editor();
     void draw_uv_overlay(ImDrawList* draw_list, const ImVec2& origin, float scale) const;
-    void handle_uv_input(const ImVec2& origin, float scale);
+    bool handle_uv_input(const ImVec2& origin, float scale);
     void draw_model_preview();
     bool ensure_transform_icon_textures();
     bool handle_model_transform_toolbar_input(const ImVec2& origin, const ImVec2& size);

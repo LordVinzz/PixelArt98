@@ -14,6 +14,7 @@
 #include <cassert>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -34,6 +35,22 @@ std::filesystem::path make_test_root() {
     auto root = std::filesystem::temp_directory_path() / ("PixelArt98 IO Tests " + std::to_string(stamp));
     std::filesystem::create_directories(root / "nested folder");
     return root;
+}
+
+std::filesystem::path test_fixture_path(const std::filesystem::path& relative_path) {
+    const std::array<std::filesystem::path, 4> roots = {
+        std::filesystem::current_path(),
+        std::filesystem::current_path().parent_path(),
+        std::filesystem::current_path().parent_path().parent_path(),
+        std::filesystem::path(__FILE__).parent_path().parent_path()
+    };
+    for (const auto& root : roots) {
+        const auto candidate = root / relative_path;
+        if (std::filesystem::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return relative_path;
 }
 
 std::vector<unsigned char> rgba_bytes(const std::vector<Pixel>& pixels) {
@@ -487,6 +504,29 @@ endsolid triangle
     assert(imported_json.meshes[0].triangles.size() == 1U);
 }
 
+void test_brontosaurus_stl_import_bounds() {
+    const auto path = test_fixture_path("tests/fixtures/Brontosaurus_Body_Green.stl");
+    assert(std::filesystem::exists(path));
+
+    ModelDocument model;
+    std::string error;
+    assert(import_stl_model(path.string(), model, &error));
+    assert(model.cuboids.empty());
+    assert(model.meshes.size() == 1U);
+    assert(model.meshes[0].triangles.size() == 388376U);
+    assert(model.meshes[0].vertices.size() == 388376U * 3U);
+
+    std::array<float, 3> minp{};
+    std::array<float, 3> maxp{};
+    assert(model_bounds(model, minp, maxp));
+    assert(minp[0] >= -0.001f && minp[1] >= -0.001f && minp[2] >= -0.001f);
+    assert(maxp[0] > 68.0f && maxp[0] < 69.5f);
+    assert(maxp[1] > 175.0f && maxp[1] < 176.5f);
+    assert(maxp[2] > 27.0f && maxp[2] < 29.0f);
+    const float radius = model_bounding_radius(model);
+    assert(radius > 95.0f && radius < 96.0f);
+}
+
 void test_threejs_pack_export(const std::filesystem::path& root) {
     const Document document = make_document();
     const ModelDocument model = make_model();
@@ -542,6 +582,7 @@ int main() {
     test_minecraft_model_roundtrip(root);
     test_gltf_model_export(root);
     test_stl_model_import_export_and_mesh_json(root);
+    test_brontosaurus_stl_import_bounds();
     test_threejs_pack_export(root);
     test_import_failures_are_reported(root);
     std::filesystem::remove_all(root);

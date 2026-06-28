@@ -570,6 +570,26 @@ const char* axis_gizmo_status(int hit) {
     return names[static_cast<std::size_t>(std::clamp(hit, 0, 5))];
 }
 
+std::array<float, 2> model_view_distance_limits(const ModelDocument& model) {
+    const float radius = std::max(0.0001f, model_bounding_radius(model));
+    return {
+        std::max(0.0001f, radius * 0.05f),
+        std::max(160.0f, radius * 32.0f)
+    };
+}
+
+void frame_model_viewport(ModelViewportState& viewport, const ModelDocument& model) {
+    const float radius = std::max(0.0001f, model_bounding_radius(model));
+    constexpr float fov_radians = 45.0f * pi / 180.0f;
+    const float fit_distance = (radius / std::tan(fov_radians * 0.5f)) * 1.35f;
+    const auto limits = model_view_distance_limits(model);
+    viewport.yaw_degrees = 35.0f;
+    viewport.pitch_degrees = 24.0f;
+    viewport.pan_x = 0.0f;
+    viewport.pan_y = 0.0f;
+    viewport.distance = std::clamp(fit_distance, limits[0], limits[1]);
+}
+
 void draw_axis_gizmo(ImDrawList* draw_list, const AxisGizmoGeometry& geometry, int hover_hit) {
     if (!geometry.visible) {
         return;
@@ -1866,6 +1886,7 @@ void EditorApp::restore_history_node(int node_id) {
     document_.clear_recent_commit_names();
     history_current_node_ = node->id;
     sync_model_texture_metadata();
+    renderer3d_.invalidate_model_cache();
     texture_dirty_ = true;
     invalidate_histogram_cache();
     history_pending_ = false;
@@ -2166,6 +2187,7 @@ void EditorApp::draw_main_menu() {
                     document_ = std::move(bundle.document);
                     model_ = std::move(bundle.model);
                     reset_history_tree();
+                    renderer3d_.invalidate_model_cache();
                     texture_dirty_ = true;
                     set_status(std::string("Loaded ") + path);
                 } else {
@@ -2271,8 +2293,13 @@ void EditorApp::draw_main_menu() {
             if (accept_dialog_result(open_file_dialog(filter_list(kJsonFilters), model_path_), path)) {
                 copy_path(model_path_, sizeof(model_path_), path);
                 std::string error;
-                if (import_model_json(path, model_, &error)) set_status(std::string("Imported ") + path);
-                else report_error("Import model JSON: " + path, error);
+                if (import_model_json(path, model_, &error)) {
+                    sync_model_texture_metadata();
+                    renderer3d_.invalidate_model_cache();
+                    set_status(std::string("Imported ") + path);
+                } else {
+                    report_error("Import model JSON: " + path, error);
+                }
             }
         }
         if (ImGui::MenuItem("Export Model JSON...")) {
@@ -2319,6 +2346,9 @@ void EditorApp::draw_main_menu() {
                 std::string error;
                 if (import_stl_model(path, model_, &error)) {
                     sync_model_texture_metadata();
+                    frame_model_viewport(model_viewport_, model_);
+                    renderer3d_.invalidate_model_cache();
+                    settings_.show_3d_preview = true;
                     set_status(std::string("Imported ") + path);
                 } else {
                     report_error("Import STL model: " + path, error);
@@ -2340,8 +2370,13 @@ void EditorApp::draw_main_menu() {
             if (accept_dialog_result(open_file_dialog(filter_list(kJsonFilters), minecraft_model_path_), path)) {
                 copy_path(minecraft_model_path_, sizeof(minecraft_model_path_), path);
                 std::string error;
-                if (import_minecraft_model(path, model_, &error)) set_status(std::string("Imported ") + path);
-                else report_error("Import Minecraft model: " + path, error);
+                if (import_minecraft_model(path, model_, &error)) {
+                    sync_model_texture_metadata();
+                    renderer3d_.invalidate_model_cache();
+                    set_status(std::string("Imported ") + path);
+                } else {
+                    report_error("Import Minecraft model: " + path, error);
+                }
             }
         }
         if (ImGui::MenuItem("Export Minecraft Model...")) {
@@ -2840,6 +2875,7 @@ void EditorApp::draw_new_document_dialog() {
         model_ = ModelDocument::create_default();
         sync_model_texture_metadata();
         reset_history_tree();
+        renderer3d_.invalidate_model_cache();
         canvas_pan_ = ImVec2(0.0f, 0.0f);
         canvas_fit_requested_ = true;
         texture_dirty_ = true;
@@ -6681,17 +6717,26 @@ void EditorApp::draw_model_panel() {
     }
     settings_.show_model_uv_panel = open;
     sync_model_texture_metadata();
-    if (ImGui::Button("+ Cuboid")) model_.add_cuboid();
+    if (ImGui::Button("+ Cuboid")) {
+        model_.add_cuboid();
+        renderer3d_.invalidate_model_cache();
+    }
     ImGui::SameLine();
-    if (ImGui::Button("- Cuboid")) model_.remove_selected();
+    if (ImGui::Button("- Cuboid")) {
+        model_.remove_selected();
+        renderer3d_.invalidate_model_cache();
+    }
     ImGui::SameLine();
     ImGui::Checkbox("All Canvas UVs", &show_all_cuboid_wireframes_);
     ImGui::Separator();
     for (int i = 0; i < static_cast<int>(model_.cuboids.size()); ++i) {
         ImGui::PushID(i);
         if (ImGui::Selectable(model_.cuboids[static_cast<std::size_t>(i)].name.c_str(), model_.selected_cuboid == i)) {
-            model_.selected_cuboid = i;
-            model_.selected_mesh = -1;
+            if (model_.selected_cuboid != i || model_.selected_mesh != -1) {
+                model_.selected_cuboid = i;
+                model_.selected_mesh = -1;
+                renderer3d_.invalidate_model_cache();
+            }
         }
         ImGui::PopID();
     }
@@ -6700,8 +6745,11 @@ void EditorApp::draw_model_panel() {
         const MeshObject& mesh = model_.meshes[static_cast<std::size_t>(i)];
         const std::string label = mesh.name + " (mesh)";
         if (ImGui::Selectable(label.c_str(), model_.selected_mesh == i)) {
-            model_.selected_mesh = i;
-            model_.selected_cuboid = -1;
+            if (model_.selected_mesh != i || model_.selected_cuboid != -1) {
+                model_.selected_mesh = i;
+                model_.selected_cuboid = -1;
+                renderer3d_.invalidate_model_cache();
+            }
         }
         ImGui::PopID();
     }
@@ -6731,20 +6779,44 @@ void EditorApp::draw_model_panel() {
     if (ImGui::InputText("Name", name, sizeof(name))) {
         cuboid.name = name;
     }
-    ImGui::InputFloat3("From", cuboid.from.data());
-    ImGui::InputFloat3("To", cuboid.to.data());
-    ImGui::SliderInt("Face", &model_.selected_face, 0, 5, face_name(model_.selected_face));
+    if (ImGui::InputFloat3("From", cuboid.from.data())) {
+        renderer3d_.invalidate_model_cache();
+    }
+    if (ImGui::InputFloat3("To", cuboid.to.data())) {
+        renderer3d_.invalidate_model_cache();
+    }
+    if (ImGui::SliderInt("Face", &model_.selected_face, 0, 5, face_name(model_.selected_face))) {
+        renderer3d_.invalidate_model_cache();
+    }
     UvRect& uv = cuboid.uv[static_cast<std::size_t>(model_.selected_face)];
-    if (ImGui::SliderInt("UV X", &uv.x, 0, std::max(0, document_.width - 1))) uv = clamped_uv_rect(uv, document_.width, document_.height);
-    if (ImGui::SliderInt("UV Y", &uv.y, 0, std::max(0, document_.height - 1))) uv = clamped_uv_rect(uv, document_.width, document_.height);
-    if (ImGui::SliderInt("UV W", &uv.w, 1, document_.width)) uv = clamped_uv_rect(uv, document_.width, document_.height);
-    if (ImGui::SliderInt("UV H", &uv.h, 1, document_.height)) uv = clamped_uv_rect(uv, document_.width, document_.height);
+    bool uv_changed = false;
+    if (ImGui::SliderInt("UV X", &uv.x, 0, std::max(0, document_.width - 1))) {
+        uv = clamped_uv_rect(uv, document_.width, document_.height);
+        uv_changed = true;
+    }
+    if (ImGui::SliderInt("UV Y", &uv.y, 0, std::max(0, document_.height - 1))) {
+        uv = clamped_uv_rect(uv, document_.width, document_.height);
+        uv_changed = true;
+    }
+    if (ImGui::SliderInt("UV W", &uv.w, 1, document_.width)) {
+        uv = clamped_uv_rect(uv, document_.width, document_.height);
+        uv_changed = true;
+    }
+    if (ImGui::SliderInt("UV H", &uv.h, 1, document_.height)) {
+        uv = clamped_uv_rect(uv, document_.width, document_.height);
+        uv_changed = true;
+    }
+    if (uv_changed) {
+        renderer3d_.invalidate_model_cache();
+    }
     ImGui::SeparatorText("Texture Atlas");
     float uv_scale = std::min(256.0f / static_cast<float>(document_.width), 256.0f / static_cast<float>(document_.height));
     ImVec2 atlas_size(pixel_scale(document_.width, uv_scale), pixel_scale(document_.height, uv_scale));
     ImVec2 origin = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("UVAtlas", atlas_size, ImGuiButtonFlags_MouseButtonLeft);
-    handle_uv_input(origin, uv_scale);
+    if (handle_uv_input(origin, uv_scale)) {
+        renderer3d_.invalidate_model_cache();
+    }
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(origin, ImVec2(origin.x + atlas_size.x, origin.y + atlas_size.y), IM_COL32(70, 70, 70, 255));
     if (ensure_full_canvas_texture()) {
@@ -6844,10 +6916,11 @@ void EditorApp::draw_uv_overlay(ImDrawList* draw_list, const ImVec2& origin, flo
     }
 }
 
-void EditorApp::handle_uv_input(const ImVec2& origin, float scale) {
+bool EditorApp::handle_uv_input(const ImVec2& origin, float scale) {
     if (model_.cuboids.empty() || scale <= 0.0f) {
-        return;
+        return false;
     }
+    bool changed = false;
     ImGuiIO& io = ImGui::GetIO();
     ImVec2 mouse = io.MousePos;
     auto hit_handle = [&](const UvRect& rect) {
@@ -6871,7 +6944,12 @@ void EditorApp::handle_uv_input(const ImVec2& origin, float scale) {
                 UvRect& candidate = model_.cuboids[static_cast<std::size_t>(ci)].uv[static_cast<std::size_t>(fi)];
                 int mode = hit_handle(candidate);
                 if (mode != 0) {
+                    changed = changed ||
+                              model_.selected_cuboid != ci ||
+                              model_.selected_face != fi ||
+                              model_.selected_mesh != -1;
                     model_.selected_cuboid = ci;
+                    model_.selected_mesh = -1;
                     model_.selected_face = fi;
                     uv_drag_active_ = true;
                     uv_drag_mode_ = mode;
@@ -6908,13 +6986,19 @@ void EditorApp::handle_uv_input(const ImVec2& origin, float scale) {
             next.h += dy;
         }
         Cuboid& cuboid = model_.selected();
-        cuboid.uv[static_cast<std::size_t>(model_.selected_face)] = clamped_uv_rect(next, document_.width, document_.height);
+        UvRect& target = cuboid.uv[static_cast<std::size_t>(model_.selected_face)];
+        const UvRect clamped = clamped_uv_rect(next, document_.width, document_.height);
+        if (!uv_equal(target, clamped)) {
+            target = clamped;
+            changed = true;
+        }
     }
 
     if (uv_drag_active_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         uv_drag_active_ = false;
         uv_drag_mode_ = 0;
     }
+    return changed;
 }
 
 bool EditorApp::ensure_skybox_texture() {
@@ -7084,19 +7168,30 @@ void EditorApp::draw_model_preview() {
     bool hovered = ImGui::IsItemHovered();
     ImGuiIO& io = ImGui::GetIO();
     const bool transform_toolbar_consumed_input = hovered && handle_model_transform_toolbar_input(origin, size);
-    if (hovered && !transform_toolbar_consumed_input && io.MouseWheel != 0.0f) {
-        model_viewport_.distance = std::clamp(model_viewport_.distance - io.MouseWheel * 2.0f, 6.0f, 160.0f);
+    const ImVec2 wire_button_min(origin.x + size.x - 124.0f, origin.y + size.y - 42.0f);
+    const ImVec2 wire_button_max(origin.x + size.x - 12.0f, origin.y + size.y - 12.0f);
+    const bool wire_button_hovered = hovered && point_in_rect(io.MousePos, wire_button_min, wire_button_max);
+    if (wire_button_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        force_model_wireframe_ = !force_model_wireframe_;
+        set_status(force_model_wireframe_ ? "3D wireframe enabled" : "3D wireframe disabled");
     }
-    if (hovered && !transform_toolbar_consumed_input && ImGui::IsMouseDragging(ImGuiMouseButton_Middle) && !io.KeyShift) {
+    const bool preview_control_consumed_input = transform_toolbar_consumed_input || wire_button_hovered;
+    if (hovered && !preview_control_consumed_input && io.MouseWheel != 0.0f) {
+        const auto distance_limits = model_view_distance_limits(model_);
+        const float step = std::max(0.01f, model_viewport_.distance * 0.08f);
+        model_viewport_.distance =
+            std::clamp(model_viewport_.distance - io.MouseWheel * step, distance_limits[0], distance_limits[1]);
+    }
+    if (hovered && !preview_control_consumed_input && ImGui::IsMouseDragging(ImGuiMouseButton_Middle) && !io.KeyShift) {
         model_viewport_.yaw_degrees -= io.MouseDelta.x * 0.35f;
         model_viewport_.pitch_degrees = std::clamp(model_viewport_.pitch_degrees + io.MouseDelta.y * 0.35f, -85.0f, 85.0f);
     }
-    if (hovered && !transform_toolbar_consumed_input && ImGui::IsMouseDragging(ImGuiMouseButton_Middle) && io.KeyShift) {
+    if (hovered && !preview_control_consumed_input && ImGui::IsMouseDragging(ImGuiMouseButton_Middle) && io.KeyShift) {
         model_viewport_.pan_x += io.MouseDelta.x * 0.04f;
         model_viewport_.pan_y -= io.MouseDelta.y * 0.04f;
     }
     AxisGizmoGeometry view_gizmo = build_axis_gizmo_geometry(model_viewport_, origin, size);
-    int view_gizmo_hit = hovered && !transform_toolbar_consumed_input ? hit_axis_gizmo(view_gizmo, io.MousePos) : -1;
+    int view_gizmo_hit = hovered && !preview_control_consumed_input ? hit_axis_gizmo(view_gizmo, io.MousePos) : -1;
     bool view_gizmo_consumed_input = false;
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && view_gizmo_hit >= 0) {
         view_gizmo_consumed_input = true;
@@ -7122,16 +7217,16 @@ void EditorApp::draw_model_preview() {
         model_view_gizmo_drag_active_ = false;
     }
     view_gizmo = build_axis_gizmo_geometry(model_viewport_, origin, size);
-    view_gizmo_hit = model_view_gizmo_drag_active_ ? 6 : (hovered && !transform_toolbar_consumed_input ? hit_axis_gizmo(view_gizmo, io.MousePos) : -1);
+    view_gizmo_hit = model_view_gizmo_drag_active_ ? 6 : (hovered && !preview_control_consumed_input ? hit_axis_gizmo(view_gizmo, io.MousePos) : -1);
     const ModelGizmoGeometry transform_gizmo =
         build_model_gizmo_geometry(renderer3d_, model_, model_viewport_, origin, size);
-    model_transform_hover_axis_ = hovered && !transform_toolbar_consumed_input && !view_gizmo_consumed_input
+    model_transform_hover_axis_ = hovered && !preview_control_consumed_input && !view_gizmo_consumed_input
                                       ? hit_model_gizmo(transform_gizmo, model_viewport_, model_transform_mode_, io.MousePos)
                                       : -1;
-    if (!transform_toolbar_consumed_input && !view_gizmo_consumed_input) {
+    if (!preview_control_consumed_input && !view_gizmo_consumed_input) {
         handle_model_transform_drag(origin, size, hovered);
     }
-    if (hovered && !transform_toolbar_consumed_input && !view_gizmo_consumed_input && model_transform_mode_ == 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (hovered && !preview_control_consumed_input && !view_gizmo_consumed_input && model_transform_mode_ == 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         ImVec2 local(io.MousePos.x - origin.x, io.MousePos.y - origin.y);
         FaceHit hit = renderer3d_.pick_face(model_, model_viewport_, static_cast<int>(size.x), static_cast<int>(size.y), local.x, local.y);
         if (hit.hit) {
@@ -7148,11 +7243,13 @@ void EditorApp::draw_model_preview() {
                            hit.mesh_face < static_cast<int>(mesh.selected_faces.size())) {
                     mesh.selected_faces[static_cast<std::size_t>(hit.mesh_face)] = 1;
                 }
+                renderer3d_.invalidate_model_cache();
             } else {
                 clear_mesh_selections(model_);
                 model_.selected_mesh = -1;
                 model_.selected_cuboid = hit.cuboid;
                 model_.selected_face = hit.face;
+                renderer3d_.invalidate_model_cache();
             }
         }
     }
@@ -7172,7 +7269,8 @@ void EditorApp::draw_model_preview() {
                                                                     model_viewport_,
                                                                     static_cast<int>(size.x),
                                                                     static_cast<int>(size.y),
-                                                                    canvas_pixels());
+                                                                    canvas_pixels(),
+                                                                    force_model_wireframe_);
     if (rendered_model) {
         model_render_error_reported_ = false;
         draw_list->AddImage(gl_texture_id(renderer3d_.texture_id()),
@@ -7218,6 +7316,15 @@ void EditorApp::draw_model_preview() {
         }
         draw_list->AddText(ImVec2(origin.x + 12, origin.y + 12), IM_COL32(255, 255, 255, 230), "OpenGL preview unavailable");
     }
+    const ImU32 wire_fill = force_model_wireframe_
+                                ? IM_COL32(96, 190, 88, 238)
+                                : (wire_button_hovered ? IM_COL32(228, 232, 238, 236) : IM_COL32(198, 204, 212, 218));
+    const ImU32 wire_border = force_model_wireframe_ ? IM_COL32(190, 245, 152, 255) : IM_COL32(20, 24, 30, 210);
+    draw_list->AddRectFilled(wire_button_min, wire_button_max, wire_fill, 4.0f);
+    draw_list->AddRect(wire_button_min, wire_button_max, wire_border, 4.0f, 0, force_model_wireframe_ ? 2.2f : 1.2f);
+    draw_list->AddText(ImVec2(wire_button_min.x + 12.0f, wire_button_min.y + 7.0f),
+                       force_model_wireframe_ ? IM_COL32(8, 18, 8, 255) : IM_COL32(10, 12, 16, 255),
+                       "Wireframe");
     draw_list->AddRect(origin, ImVec2(origin.x + size.x, origin.y + size.y),
                        hovered ? IM_COL32(255, 230, 40, 220) : IM_COL32(20, 20, 20, 120));
     draw_model_transform_toolbar(draw_list, origin);
@@ -7284,6 +7391,7 @@ void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& 
             } else if (model_transform_mode_ == 3) {
                 scale_selected_mesh_components(model_, model_transform_axis_, 1.0f + signed_pixels * 0.012f, constrained);
             }
+            renderer3d_.invalidate_model_cache();
             return;
         }
 
@@ -7309,6 +7417,7 @@ void EditorApp::handle_model_transform_drag(const ImVec2& origin, const ImVec2& 
             scale_cuboid(next, model_transform_axis_, 1.0f + signed_pixels * 0.012f, constrained);
         }
         model_.selected() = next;
+        renderer3d_.invalidate_model_cache();
     }
     if (model_transform_drag_active_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         model_transform_drag_active_ = false;

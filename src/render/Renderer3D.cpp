@@ -49,6 +49,7 @@ struct RenderVertex {
     float u;
     float v;
     float selected;
+    float mesh;
 };
 
 constexpr const char* kRenderer3DVertexShader = R"GLSL(
@@ -56,12 +57,15 @@ constexpr const char* kRenderer3DVertexShader = R"GLSL(
     layout(location = 0) in vec3 in_pos;
     layout(location = 1) in vec2 in_uv;
     layout(location = 2) in float in_selected;
+    layout(location = 3) in float in_mesh;
     uniform mat4 u_mvp;
     out vec2 v_uv;
     flat out float v_selected;
+    flat out float v_mesh;
     void main() {
         v_uv = in_uv;
         v_selected = in_selected;
+        v_mesh = in_mesh;
         gl_Position = u_mvp * vec4(in_pos, 1.0);
     }
 )GLSL";
@@ -70,6 +74,7 @@ constexpr const char* kRenderer3DFragmentShader = R"GLSL(
     #version 330 core
     in vec2 v_uv;
     flat in float v_selected;
+    flat in float v_mesh;
     uniform sampler2D u_texture;
     uniform bool u_wireframe;
     uniform vec4 u_wire_color;
@@ -81,7 +86,11 @@ constexpr const char* kRenderer3DFragmentShader = R"GLSL(
         }
         vec4 color = texture(u_texture, v_uv);
         if (color.a <= 0.001) {
-            discard;
+            if (v_mesh > 0.5) {
+                color = vec4(0.52, 0.74, 0.45, 1.0);
+            } else {
+                discard;
+            }
         }
         if (v_selected > 0.5) {
             color.rgb = mix(color.rgb, vec3(1.0, 0.86, 0.08), 0.38);
@@ -223,47 +232,12 @@ Mat4 look_at(Vec3 eye, Vec3 center, Vec3 up) {
 }
 
 Vec3 model_center(const ModelDocument& model) {
-    Vec3 minp{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
-    Vec3 maxp{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
-    bool found = false;
-    for (const auto& c : model.cuboids) {
-        float x0 = std::min(c.from[0], c.to[0]);
-        float y0 = std::min(c.from[1], c.to[1]);
-        float z0 = std::min(c.from[2], c.to[2]);
-        float x1 = std::max(c.from[0], c.to[0]);
-        float y1 = std::max(c.from[1], c.to[1]);
-        float z1 = std::max(c.from[2], c.to[2]);
-        std::array<Vec3, 8> points = {{
-            {x0, y0, z0}, {x1, y0, z0}, {x1, y1, z0}, {x0, y1, z0},
-            {x0, y0, z1}, {x1, y0, z1}, {x1, y1, z1}, {x0, y1, z1}
-        }};
-        for (Vec3 point : points) {
-            point = rotate_point(point, c);
-            minp.x = std::min(minp.x, point.x);
-            minp.y = std::min(minp.y, point.y);
-            minp.z = std::min(minp.z, point.z);
-            maxp.x = std::max(maxp.x, point.x);
-            maxp.y = std::max(maxp.y, point.y);
-            maxp.z = std::max(maxp.z, point.z);
-            found = true;
-        }
-    }
-    for (const MeshObject& mesh : model.meshes) {
-        for (const MeshVertex& vertex : mesh.vertices) {
-            const auto& point = vertex.position;
-            minp.x = std::min(minp.x, point[0]);
-            minp.y = std::min(minp.y, point[1]);
-            minp.z = std::min(minp.z, point[2]);
-            maxp.x = std::max(maxp.x, point[0]);
-            maxp.y = std::max(maxp.y, point[1]);
-            maxp.z = std::max(maxp.z, point[2]);
-            found = true;
-        }
-    }
-    if (!found) {
+    std::array<float, 3> minp{};
+    std::array<float, 3> maxp{};
+    if (!model_bounds(model, minp, maxp)) {
         return {8.0f, 8.0f, 8.0f};
     }
-    return {(minp.x + maxp.x) * 0.5f, (minp.y + maxp.y) * 0.5f, (minp.z + maxp.z) * 0.5f};
+    return {(minp[0] + maxp[0]) * 0.5f, (minp[1] + maxp[1]) * 0.5f, (minp[2] + maxp[2]) * 0.5f};
 }
 
 Mat4 view_projection(const ModelDocument& model, const ModelViewportState& viewport, int width, int height) {
@@ -273,14 +247,20 @@ Mat4 view_projection(const ModelDocument& model, const ModelViewportState& viewp
 
     float yaw = radians(viewport.yaw_degrees);
     float pitch = radians(std::clamp(viewport.pitch_degrees, -85.0f, 85.0f));
-    float distance = std::max(4.0f, viewport.distance);
+    const float radius = std::max(0.0001f, model_bounding_radius(model));
+    float distance = std::max(radius * 0.05f, viewport.distance);
     Vec3 eye{
         center.x + std::sin(yaw) * std::cos(pitch) * distance,
         center.y + std::sin(pitch) * distance,
         center.z + std::cos(yaw) * std::cos(pitch) * distance
     };
     Mat4 view = look_at(eye, center, {0.0f, 1.0f, 0.0f});
-    Mat4 proj = perspective(radians(45.0f), static_cast<float>(std::max(1, width)) / static_cast<float>(std::max(1, height)), 0.1f, 512.0f);
+    const float near_plane = std::clamp(distance / 1000.0f, 0.0001f, 0.1f);
+    const float far_plane = std::max(512.0f, distance + radius * 8.0f + 1.0f);
+    Mat4 proj = perspective(radians(45.0f),
+                            static_cast<float>(std::max(1, width)) / static_cast<float>(std::max(1, height)),
+                            near_plane,
+                            far_plane);
     return multiply(proj, view);
 }
 
@@ -341,7 +321,8 @@ std::vector<RenderVertex> make_vertices(const ModelDocument& model, int texture_
                                 quad.p[static_cast<std::size_t>(i)].z,
                                 uvp[static_cast<std::size_t>(i)].x,
                                 uvp[static_cast<std::size_t>(i)].y,
-                                selected});
+                                selected,
+                                0.0f});
         }
     }
     for (int mesh_index = 0; mesh_index < static_cast<int>(model.meshes.size()); ++mesh_index) {
@@ -364,7 +345,8 @@ std::vector<RenderVertex> make_vertices(const ModelDocument& model, int texture_
                                     vertex.position[2],
                                     std::clamp(vertex.uv[0], 0.0f, 1.0f),
                                     std::clamp(vertex.uv[1], 0.0f, 1.0f),
-                                    selected_face || selected_vertex ? 1.0f : 0.0f});
+                                    selected_face || selected_vertex ? 1.0f : 0.0f,
+                                    1.0f});
             }
         }
     }
@@ -408,7 +390,7 @@ std::vector<RenderVertex> make_transparent_wire_vertices(const ModelDocument& mo
         float selected = (quad.cuboid == model.selected_cuboid && quad.face == model.selected_face) ? 1.0f : 0.0f;
         for (int index : edges) {
             Vec3 p = quad.p[static_cast<std::size_t>(index)];
-            vertices.push_back({p.x, p.y, p.z, 0.0f, 0.0f, selected});
+            vertices.push_back({p.x, p.y, p.z, 0.0f, 0.0f, selected, 0.0f});
         }
     }
     return vertices;
@@ -426,10 +408,10 @@ std::vector<RenderVertex> make_reference_grid_vertices() {
             continue;
         }
         const float coordinate = static_cast<float>(value);
-        vertices.push_back({static_cast<float>(min_line), y, coordinate, 0.0f, 0.0f, 0.0f});
-        vertices.push_back({static_cast<float>(max_line), y, coordinate, 0.0f, 0.0f, 0.0f});
-        vertices.push_back({coordinate, y, static_cast<float>(min_line), 0.0f, 0.0f, 0.0f});
-        vertices.push_back({coordinate, y, static_cast<float>(max_line), 0.0f, 0.0f, 0.0f});
+        vertices.push_back({static_cast<float>(min_line), y, coordinate, 0.0f, 0.0f, 0.0f, 0.0f});
+        vertices.push_back({static_cast<float>(max_line), y, coordinate, 0.0f, 0.0f, 0.0f, 0.0f});
+        vertices.push_back({coordinate, y, static_cast<float>(min_line), 0.0f, 0.0f, 0.0f, 0.0f});
+        vertices.push_back({coordinate, y, static_cast<float>(max_line), 0.0f, 0.0f, 0.0f, 0.0f});
     }
     return vertices;
 }
@@ -440,11 +422,11 @@ std::array<RenderVertex, 2> reference_axis_vertices(int axis) {
     constexpr float y = 0.0f;
     switch (std::clamp(axis, 0, 2)) {
         case 0:
-            return {{{min_line, y, 0.0f, 0.0f, 0.0f, 0.0f}, {max_line, y, 0.0f, 0.0f, 0.0f, 0.0f}}};
+            return {{{min_line, y, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}, {max_line, y, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}}};
         case 1:
-            return {{{0.0f, min_line, 0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, max_line, 0.0f, 0.0f, 0.0f, 0.0f}}};
+            return {{{0.0f, min_line, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, max_line, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}}};
         default:
-            return {{{0.0f, y, min_line, 0.0f, 0.0f, 0.0f}, {0.0f, y, max_line, 0.0f, 0.0f, 0.0f}}};
+            return {{{0.0f, y, min_line, 0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, y, max_line, 0.0f, 0.0f, 0.0f, 0.0f}}};
     }
 }
 
@@ -490,6 +472,20 @@ const char* shader_type_name(unsigned int type) {
 
 void set_error(std::string& target, const std::string& value) {
     target = value;
+}
+
+void configure_render_vertex_layout(unsigned int vertex_array, unsigned int vertex_buffer) {
+    glBindVertexArray(vertex_array);
+    glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), reinterpret_cast<void*>(sizeof(float) * 3));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), reinterpret_cast<void*>(sizeof(float) * 5));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), reinterpret_cast<void*>(sizeof(float) * 6));
+    glBindVertexArray(0);
 }
 
 unsigned int compile_shader(unsigned int type, const char* source, std::string& error) {
@@ -550,15 +546,10 @@ bool Renderer3D::init() {
     }
     glGenVertexArrays(1, &vertex_array_);
     glGenBuffers(1, &vertex_buffer_);
-    glBindVertexArray(vertex_array_);
-    glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), reinterpret_cast<void*>(0));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), reinterpret_cast<void*>(sizeof(float) * 3));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(RenderVertex), reinterpret_cast<void*>(sizeof(float) * 5));
-    glBindVertexArray(0);
+    glGenVertexArrays(1, &model_vertex_array_);
+    glGenBuffers(1, &model_vertex_buffer_);
+    configure_render_vertex_layout(vertex_array_, vertex_buffer_);
+    configure_render_vertex_layout(model_vertex_array_, model_vertex_buffer_);
     initialized_ = true;
     return true;
 }
@@ -566,19 +557,31 @@ bool Renderer3D::init() {
 void Renderer3D::destroy() {
     if (vertex_buffer_ != 0) glDeleteBuffers(1, &vertex_buffer_);
     if (vertex_array_ != 0) glDeleteVertexArrays(1, &vertex_array_);
+    if (model_vertex_buffer_ != 0) glDeleteBuffers(1, &model_vertex_buffer_);
+    if (model_vertex_array_ != 0) glDeleteVertexArrays(1, &model_vertex_array_);
     if (depth_buffer_ != 0) glDeleteRenderbuffers(1, &depth_buffer_);
     if (color_texture_ != 0) glDeleteTextures(1, &color_texture_);
     if (framebuffer_ != 0) glDeleteFramebuffers(1, &framebuffer_);
     if (shader_program_ != 0) glDeleteProgram(shader_program_);
     vertex_buffer_ = 0;
     vertex_array_ = 0;
+    model_vertex_buffer_ = 0;
+    model_vertex_array_ = 0;
     depth_buffer_ = 0;
     color_texture_ = 0;
     framebuffer_ = 0;
     shader_program_ = 0;
+    model_vertex_count_ = 0;
+    model_texture_width_ = 0;
+    model_texture_height_ = 0;
+    model_vertices_dirty_ = true;
     width_ = 0;
     height_ = 0;
     initialized_ = false;
+}
+
+void Renderer3D::invalidate_model_cache() {
+    model_vertices_dirty_ = true;
 }
 
 bool Renderer3D::ensure_program() {
@@ -656,13 +659,16 @@ bool Renderer3D::render_model_to_texture(const ModelDocument& model,
                                          const ModelViewportState& viewport,
                                          int output_width,
                                          int output_height,
-                                         const std::vector<Pixel>& texture_pixels) {
+                                         const std::vector<Pixel>& texture_pixels,
+                                         bool force_wireframe) {
     GLint previous_fbo = 0;
     GLint previous_viewport[4] = {};
     GLint previous_program = 0;
+    GLint previous_polygon_mode[2] = {};
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
     glGetIntegerv(GL_VIEWPORT, previous_viewport);
     glGetIntegerv(GL_CURRENT_PROGRAM, &previous_program);
+    glGetIntegerv(GL_POLYGON_MODE, previous_polygon_mode);
 
     if (!init()) {
         return false;
@@ -674,7 +680,20 @@ bool Renderer3D::render_model_to_texture(const ModelDocument& model,
         return false;
     }
 
-    auto vertices = make_vertices(model, texture_width, texture_height);
+    if (model_vertices_dirty_ || model_texture_width_ != texture_width || model_texture_height_ != texture_height) {
+        auto vertices = make_vertices(model, texture_width, texture_height);
+        glBindVertexArray(model_vertex_array_);
+        glBindBuffer(GL_ARRAY_BUFFER, model_vertex_buffer_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(vertices.size() * sizeof(RenderVertex)),
+                     vertices.empty() ? nullptr : vertices.data(),
+                     GL_DYNAMIC_DRAW);
+        glBindVertexArray(0);
+        model_vertex_count_ = vertices.size();
+        model_texture_width_ = texture_width;
+        model_texture_height_ = texture_height;
+        model_vertices_dirty_ = false;
+    }
     auto wire_vertices = make_transparent_wire_vertices(model, texture_width, texture_height, texture_pixels);
     auto grid_vertices = make_reference_grid_vertices();
     Mat4 mvp = view_projection(model, viewport, output_width, output_height);
@@ -735,23 +754,30 @@ bool Renderer3D::render_model_to_texture(const ModelDocument& model,
                        0.52f,
                        1.8f);
 
-    if (!vertices.empty() && canvas_texture != 0) {
+    if (model_vertex_count_ > 0U && canvas_texture != 0) {
         glUseProgram(shader_program_);
         glUniformMatrix4fv(glGetUniformLocation(shader_program_, "u_mvp"), 1, GL_FALSE, mvp.v.data());
         glUniform1i(glGetUniformLocation(shader_program_, "u_texture"), 0);
-        glUniform1i(glGetUniformLocation(shader_program_, "u_wireframe"), 0);
+        glUniform1i(glGetUniformLocation(shader_program_, "u_wireframe"), force_wireframe ? 1 : 0);
+        glUniform4f(glGetUniformLocation(shader_program_, "u_wire_color"),
+                    force_wireframe ? 0.70f : 0.28f,
+                    force_wireframe ? 0.94f : 0.78f,
+                    force_wireframe ? 0.48f : 1.0f,
+                    1.0f);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, canvas_texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glBindVertexArray(vertex_array_);
-        glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(vertices.size() * sizeof(RenderVertex)),
-                     vertices.data(),
-                     GL_DYNAMIC_DRAW);
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+        if (force_wireframe) {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            glLineWidth(1.0f);
+        }
+        glBindVertexArray(model_vertex_array_);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(model_vertex_count_));
         glBindVertexArray(0);
+        if (force_wireframe) {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
     }
     if (!wire_vertices.empty()) {
         glUseProgram(shader_program_);
@@ -772,6 +798,8 @@ bool Renderer3D::render_model_to_texture(const ModelDocument& model,
     }
 
     glDisable(GL_DEPTH_TEST);
+    glPolygonMode(GL_FRONT, static_cast<GLenum>(previous_polygon_mode[0]));
+    glPolygonMode(GL_BACK, static_cast<GLenum>(previous_polygon_mode[1]));
     glUseProgram(static_cast<GLuint>(previous_program));
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(previous_fbo));
     glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);

@@ -107,6 +107,8 @@ void scale_cuboid(Cuboid& cuboid, int axis, float factor, bool snap_to_double);
 void rotate_cuboid(Cuboid& cuboid, int axis, float angle_degrees, bool snap_to_15_degrees);
 bool model_has_geometry(const ModelDocument& model);
 bool model_has_mesh_selection(const ModelDocument& model);
+bool model_bounds(const ModelDocument& model, std::array<float, 3>& out_min, std::array<float, 3>& out_max);
+float model_bounding_radius(const ModelDocument& model);
 std::array<float, 3> selected_mesh_component_center(const ModelDocument& model);
 void clear_mesh_selections(ModelDocument& model);
 void translate_selected_mesh_components(ModelDocument& model, int axis, float delta, bool snap_to_unit);

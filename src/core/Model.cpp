@@ -450,6 +450,71 @@ bool model_has_mesh_selection(const ModelDocument& model) {
     return !selected_mesh_vertex_indices(mesh).empty();
 }
 
+bool model_bounds(const ModelDocument& model, std::array<float, 3>& out_min, std::array<float, 3>& out_max) {
+    out_min = {
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max()
+    };
+    out_max = {
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest()
+    };
+    bool found = false;
+    auto include_point = [&](const std::array<float, 3>& point) {
+        for (int axis = 0; axis < 3; ++axis) {
+            out_min[static_cast<std::size_t>(axis)] =
+                std::min(out_min[static_cast<std::size_t>(axis)], point[static_cast<std::size_t>(axis)]);
+            out_max[static_cast<std::size_t>(axis)] =
+                std::max(out_max[static_cast<std::size_t>(axis)], point[static_cast<std::size_t>(axis)]);
+        }
+        found = true;
+    };
+
+    for (const Cuboid& cuboid : model.cuboids) {
+        const float x0 = std::min(cuboid.from[0], cuboid.to[0]);
+        const float y0 = std::min(cuboid.from[1], cuboid.to[1]);
+        const float z0 = std::min(cuboid.from[2], cuboid.to[2]);
+        const float x1 = std::max(cuboid.from[0], cuboid.to[0]);
+        const float y1 = std::max(cuboid.from[1], cuboid.to[1]);
+        const float z1 = std::max(cuboid.from[2], cuboid.to[2]);
+        const std::array<std::array<float, 3>, 8> corners = {{
+            {x0, y0, z0}, {x1, y0, z0}, {x1, y1, z0}, {x0, y1, z0},
+            {x0, y0, z1}, {x1, y0, z1}, {x1, y1, z1}, {x0, y1, z1}
+        }};
+        for (const auto& corner : corners) {
+            include_point(rotate_position_around_axis(corner,
+                                                      cuboid.rotation_origin,
+                                                      cuboid.rotation_axis,
+                                                      cuboid.rotation_angle));
+        }
+    }
+
+    for (const MeshObject& mesh : model.meshes) {
+        for (const MeshVertex& vertex : mesh.vertices) {
+            include_point(vertex.position);
+        }
+    }
+    if (!found) {
+        out_min = {0.0f, 0.0f, 0.0f};
+        out_max = {0.0f, 0.0f, 0.0f};
+    }
+    return found;
+}
+
+float model_bounding_radius(const ModelDocument& model) {
+    std::array<float, 3> minp{};
+    std::array<float, 3> maxp{};
+    if (!model_bounds(model, minp, maxp)) {
+        return 1.0f;
+    }
+    const float dx = maxp[0] - minp[0];
+    const float dy = maxp[1] - minp[1];
+    const float dz = maxp[2] - minp[2];
+    return std::max(0.0001f, std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5f);
+}
+
 std::array<float, 3> selected_mesh_component_center(const ModelDocument& model) {
     if (model.selected_mesh < 0 || model.selected_mesh >= static_cast<int>(model.meshes.size())) {
         return {0.0f, 0.0f, 0.0f};

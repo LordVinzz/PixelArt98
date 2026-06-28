@@ -30,7 +30,9 @@ public:
                                  const ModelViewportState& viewport,
                                  int output_width,
                                  int output_height,
-                                 const std::vector<Pixel>& texture_pixels);
+                                 const std::vector<Pixel>& texture_pixels,
+                                 bool force_wireframe = false);
+    void invalidate_model_cache();
 
     FaceHit pick_face(const ModelDocument& model,
                       const ModelViewportState& viewport,
@@ -72,7 +74,13 @@ private:
     unsigned int depth_buffer_ = 0;
     unsigned int vertex_array_ = 0;
     unsigned int vertex_buffer_ = 0;
+    unsigned int model_vertex_array_ = 0;
+    unsigned int model_vertex_buffer_ = 0;
     unsigned int shader_program_ = 0;
+    std::size_t model_vertex_count_ = 0;
+    int model_texture_width_ = 0;
+    int model_texture_height_ = 0;
+    bool model_vertices_dirty_ = true;
     int width_ = 0;
     int height_ = 0;
     bool initialized_ = false;
