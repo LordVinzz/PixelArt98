@@ -197,10 +197,14 @@ void test_dense_history_spills_to_private_journal(const std::filesystem::path& r
         if (entry.path().extension() == ".pxhist") {
             found_journal = true;
             const auto permissions = entry.status().permissions();
+#ifndef _WIN32
             assert((permissions & std::filesystem::perms::owner_read) != std::filesystem::perms::none);
             assert((permissions & std::filesystem::perms::owner_write) != std::filesystem::perms::none);
             assert((permissions & std::filesystem::perms::group_read) == std::filesystem::perms::none);
             assert((permissions & std::filesystem::perms::others_read) == std::filesystem::perms::none);
+#else
+            (void)permissions;
+#endif
         }
     }
     assert(found_journal);
