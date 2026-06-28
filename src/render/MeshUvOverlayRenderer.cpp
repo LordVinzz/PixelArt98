@@ -32,15 +32,17 @@ constexpr const char* kMeshUvOverlayVertexShader = R"GLSL(
     #version 330 core
     layout(location = 0) in vec2 in_uv;
     layout(location = 1) in float in_selected;
-    uniform vec2 u_viewport_size;
-    uniform vec2 u_texture_size;
-    uniform vec2 u_canvas_origin;
-    uniform float u_zoom;
+    uniform vec4 u_canvas_params0;
+    uniform vec4 u_canvas_params1;
     flat out float v_selected;
     void main() {
-        vec2 pixel = u_canvas_origin + in_uv * u_texture_size * u_zoom;
-        vec2 ndc = vec2((pixel.x / max(1.0, u_viewport_size.x)) * 2.0 - 1.0,
-                        1.0 - (pixel.y / max(1.0, u_viewport_size.y)) * 2.0);
+        vec2 viewport_size = u_canvas_params0.xy;
+        vec2 texture_size = u_canvas_params0.zw;
+        vec2 canvas_origin = u_canvas_params1.xy;
+        float zoom = u_canvas_params1.z;
+        vec2 pixel = canvas_origin + in_uv * texture_size * zoom;
+        vec2 ndc = vec2((pixel.x / max(1.0, viewport_size.x)) * 2.0 - 1.0,
+                        1.0 - (pixel.y / max(1.0, viewport_size.y)) * 2.0);
         v_selected = in_selected;
         gl_Position = vec4(ndc, 0.0, 1.0);
     }
@@ -382,14 +384,12 @@ bool MeshUvOverlayRenderer::render_to_texture(const ModelDocument& model,
 
     if (vertex_count_ > 0U) {
         glUseProgram(shader_program_);
-        glUniform2f(glGetUniformLocation(shader_program_, "u_viewport_size"),
+        glUniform4f(glGetUniformLocation(shader_program_, "u_canvas_params0"),
                     static_cast<float>(width_),
-                    static_cast<float>(height_));
-        glUniform2f(glGetUniformLocation(shader_program_, "u_texture_size"),
+                    static_cast<float>(height_),
                     static_cast<float>(std::max(1, texture_width)),
                     static_cast<float>(std::max(1, texture_height)));
-        glUniform2f(glGetUniformLocation(shader_program_, "u_canvas_origin"), canvas_x, canvas_y);
-        glUniform1f(glGetUniformLocation(shader_program_, "u_zoom"), std::max(0.0001f, zoom));
+        glUniform4f(glGetUniformLocation(shader_program_, "u_canvas_params1"), canvas_x, canvas_y, std::max(0.0001f, zoom), 0.0f);
         glBindVertexArray(vertex_array_);
         glLineWidth(1.0f);
         glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(vertex_count_));

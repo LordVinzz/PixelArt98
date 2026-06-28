@@ -30,16 +30,12 @@ std::array<float, 4> pixel_to_float4(Pixel pixel) {
     return {channel_to_float(r(pixel)), channel_to_float(g(pixel)), channel_to_float(b(pixel)), channel_to_float(a(pixel))};
 }
 
-template <std::size_t Size>
-void upload_float_array_uniform(unsigned int program, const char* name, const std::array<float, Size>& values) {
-    char indexed_name[96]{};
-    for (std::size_t i = 0; i < Size; ++i) {
-        std::snprintf(indexed_name, sizeof(indexed_name), "%s[%zu]", name, i);
-        const int location = glGetUniformLocation(program, indexed_name);
-        if (location >= 0) {
-            glUniform1f(location, values[i]);
-        }
-    }
+void upload_curve_uniforms(unsigned int program,
+                           const char* first_name,
+                           const char* second_name,
+                           const std::array<float, kMaxCurvePoints>& values) {
+    glUniform4f(glGetUniformLocation(program, first_name), values[0], values[1], values[2], values[3]);
+    glUniform4f(glGetUniformLocation(program, second_name), values[4], values[5], values[6], values[7]);
 }
 
 std::uint64_t texture_footprint(int width, int height, std::uint64_t texture_count) {
@@ -203,8 +199,10 @@ uniform vec4 u_size;
 uniform vec4 u_params;
 uniform vec4 u_params2;
 uniform int u_curve_point_count;
-uniform float u_curve_x[8];
-uniform float u_curve_y[8];
+uniform vec4 u_curve_x0;
+uniform vec4 u_curve_x1;
+uniform vec4 u_curve_y0;
+uniform vec4 u_curve_y1;
 uniform vec4 u_primary;
 uniform vec4 u_secondary;
 
@@ -293,26 +291,34 @@ vec4 affine_transform(vec2 uv) {
     return sample_source_nearest_transparent(source);
 }
 
+float curve_x_at(int index) {
+    return index < 4 ? u_curve_x0[index] : u_curve_x1[index - 4];
+}
+
+float curve_y_at(int index) {
+    return index < 4 ? u_curve_y0[index] : u_curve_y1[index - 4];
+}
+
 float evaluate_point_curve(float value) {
     float target = clamp(value, 0.0, 1.0);
     int count = clamp(u_curve_point_count, 2, 8);
-    if (target <= u_curve_x[0]) {
-        return clamp(u_curve_y[0], 0.0, 1.0);
+    if (target <= curve_x_at(0)) {
+        return clamp(curve_y_at(0), 0.0, 1.0);
     }
     for (int i = 1; i < 8; ++i) {
         if (i < count) {
-            float x0 = clamp(u_curve_x[i - 1], 0.0, 1.0);
-            float x1 = clamp(u_curve_x[i], x0 + 0.001, 1.0);
+            float x0 = clamp(curve_x_at(i - 1), 0.0, 1.0);
+            float x1 = clamp(curve_x_at(i), x0 + 0.001, 1.0);
             if (target <= x1 || i == count - 1) {
-                float y0 = clamp(u_curve_y[i - 1], 0.0, 1.0);
-                float y1 = clamp(u_curve_y[i], 0.0, 1.0);
+                float y0 = clamp(curve_y_at(i - 1), 0.0, 1.0);
+                float y1 = clamp(curve_y_at(i), 0.0, 1.0);
                 float t = clamp((target - x0) / max(0.001, x1 - x0), 0.0, 1.0);
                 float smooth_t = t * t * (3.0 - 2.0 * t);
                 return mix(y0, y1, smooth_t);
             }
         }
     }
-    return clamp(u_curve_y[count - 1], 0.0, 1.0);
+    return clamp(curve_y_at(count - 1), 0.0, 1.0);
 }
 
 vec4 blur_box(vec2 uv, int radius) {
@@ -916,8 +922,8 @@ bool GpuEffectRenderer::render_full_active_cel(const Document& document, const G
     glUniform4f(glGetUniformLocation(shader_program_, "u_params2"),
                 request.params2[0], request.params2[1], request.params2[2], request.params2[3]);
     glUniform1i(glGetUniformLocation(shader_program_, "u_curve_point_count"), request.curve_point_count);
-    upload_float_array_uniform(shader_program_, "u_curve_x", request.curve_x);
-    upload_float_array_uniform(shader_program_, "u_curve_y", request.curve_y);
+    upload_curve_uniforms(shader_program_, "u_curve_x0", "u_curve_x1", request.curve_x);
+    upload_curve_uniforms(shader_program_, "u_curve_y0", "u_curve_y1", request.curve_y);
     glUniform4f(glGetUniformLocation(shader_program_, "u_primary"), primary[0], primary[1], primary[2], primary[3]);
     glUniform4f(glGetUniformLocation(shader_program_, "u_secondary"), secondary[0], secondary[1], secondary[2], secondary[3]);
 
