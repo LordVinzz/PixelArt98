@@ -127,6 +127,9 @@ function(pixelart_enable_memory_profile_flags target)
 endfunction()
 
 function(pixelart_configure_project_target target)
+    target_compile_definitions(${target} PRIVATE
+        $<$<COMPILE_LANG_AND_ID:C,MSVC>:_CRT_SECURE_NO_WARNINGS>
+        $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:_CRT_SECURE_NO_WARNINGS>)
     pixelart_enable_project_warnings(${target})
     pixelart_enable_debug_sanitizers(${target})
     pixelart_enable_memory_profile_flags(${target})

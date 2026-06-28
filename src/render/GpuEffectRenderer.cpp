@@ -30,6 +30,18 @@ std::array<float, 4> pixel_to_float4(Pixel pixel) {
     return {channel_to_float(r(pixel)), channel_to_float(g(pixel)), channel_to_float(b(pixel)), channel_to_float(a(pixel))};
 }
 
+template <std::size_t Size>
+void upload_float_array_uniform(unsigned int program, const char* name, const std::array<float, Size>& values) {
+    char indexed_name[96]{};
+    for (std::size_t i = 0; i < Size; ++i) {
+        std::snprintf(indexed_name, sizeof(indexed_name), "%s[%zu]", name, i);
+        const int location = glGetUniformLocation(program, indexed_name);
+        if (location >= 0) {
+            glUniform1f(location, values[i]);
+        }
+    }
+}
+
 std::uint64_t texture_footprint(int width, int height, std::uint64_t texture_count) {
     if (width <= 0 || height <= 0) {
         return 0;
@@ -904,8 +916,8 @@ bool GpuEffectRenderer::render_full_active_cel(const Document& document, const G
     glUniform4f(glGetUniformLocation(shader_program_, "u_params2"),
                 request.params2[0], request.params2[1], request.params2[2], request.params2[3]);
     glUniform1i(glGetUniformLocation(shader_program_, "u_curve_point_count"), request.curve_point_count);
-    glUniform1fv(glGetUniformLocation(shader_program_, "u_curve_x"), kMaxCurvePoints, request.curve_x.data());
-    glUniform1fv(glGetUniformLocation(shader_program_, "u_curve_y"), kMaxCurvePoints, request.curve_y.data());
+    upload_float_array_uniform(shader_program_, "u_curve_x", request.curve_x);
+    upload_float_array_uniform(shader_program_, "u_curve_y", request.curve_y);
     glUniform4f(glGetUniformLocation(shader_program_, "u_primary"), primary[0], primary[1], primary[2], primary[3]);
     glUniform4f(glGetUniformLocation(shader_program_, "u_secondary"), secondary[0], secondary[1], secondary[2], secondary[3]);
 

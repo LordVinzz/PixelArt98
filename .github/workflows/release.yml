@@ -76,11 +76,28 @@ jobs:
 
       - name: Build
         if: runner.os != 'macOS'
-        run: cmake --build build --config ${{ env.BUILD_TYPE }} --target pixelart_sdl2 pixelart_tests pixelart_io_tests pixelart_opengl_smoke
+        run: >
+          cmake --build build --config ${{ env.BUILD_TYPE }}
+          --target
+          pixelart_sdl2
+          pixelart_tests
+          pixelart_io_tests
+          pixelart_huge_image_memory_tests
+          pixelart_shader_compile_tests
+          pixelart_opengl_smoke
 
       - name: Build macOS
         if: runner.os == 'macOS'
-        run: cmake --build build --config ${{ env.BUILD_TYPE }} --target pixelart_sdl2 pixelart_tests pixelart_io_tests pixelart_opengl_smoke pixelart_mps_smoke
+        run: >
+          cmake --build build --config ${{ env.BUILD_TYPE }}
+          --target
+          pixelart_sdl2
+          pixelart_tests
+          pixelart_io_tests
+          pixelart_huge_image_memory_tests
+          pixelart_shader_compile_tests
+          pixelart_opengl_smoke
+          pixelart_mps_smoke
 
       - name: Test
         run: ctest --test-dir build --build-config ${{ env.BUILD_TYPE }} --output-on-failure
