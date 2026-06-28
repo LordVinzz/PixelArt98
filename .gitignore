@@ -41,6 +41,12 @@ _deps/
 .idea/
 *.swp
 *.swo
+.cache/
+build-memory-profile/
+examples/
+logs.txt
+logs/
+models/
 
 # Local ImGui state
 imgui.ini
