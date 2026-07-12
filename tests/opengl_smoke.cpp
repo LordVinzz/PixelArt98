@@ -96,6 +96,11 @@ int main() {
     std::cout << "OpenGL vendor: " << reinterpret_cast<const char*>(glGetString(GL_VENDOR)) << "\n";
     std::cout << "OpenGL renderer: " << reinterpret_cast<const char*>(glGetString(GL_RENDERER)) << "\n";
     std::cout << "OpenGL version: " << reinterpret_cast<const char*>(glGetString(GL_VERSION)) << "\n";
+    std::cout << "GLSL version: " << reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION)) << "\n";
+    if (!qt_offscreen_gl_supports_glsl_330()) {
+        std::cout << "OpenGL smoke skipped: GLSL 3.30 unavailable in CI offscreen context\n";
+        return 0;
+    }
     int gl_max_texture_size = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl_max_texture_size);
     std::cout << "OpenGL max texture size: " << gl_max_texture_size << "\n";

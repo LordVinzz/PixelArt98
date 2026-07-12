@@ -10,6 +10,7 @@
 #include <glad/gl.h>
 
 #include <array>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -90,6 +91,12 @@ bool compile_gl_program(const char* name, const char* vertex_source, const char*
 }
 
 bool compile_glsl_shaders() {
+#if defined(__APPLE__)
+    if (std::getenv("PIXELART_RUN_GL_SMOKE") == nullptr) {
+        std::cout << "[SKIP] GLSL shader compile: set PIXELART_RUN_GL_SMOKE=1 for interactive macOS GL validation\n";
+        return true;
+    }
+#endif
     QtOffscreenGlContext context;
     if (!context.ready()) {
         std::cout << "[SKIP] GLSL shader compile: Qt offscreen context unavailable\n";
@@ -99,6 +106,14 @@ bool compile_glsl_shaders() {
     const auto* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     if (version != nullptr) {
         std::cout << "OpenGL version: " << version << "\n";
+    }
+    const auto* glsl_version = reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION));
+    if (glsl_version != nullptr) {
+        std::cout << "GLSL version: " << glsl_version << "\n";
+    }
+    if (!qt_offscreen_gl_supports_glsl_330()) {
+        std::cout << "[SKIP] GLSL shader compile: GLSL 3.30 unavailable in CI offscreen context\n";
+        return true;
     }
 
     bool ok = true;

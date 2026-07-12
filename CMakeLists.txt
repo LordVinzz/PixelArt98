@@ -186,9 +186,11 @@ else()
         message(STATUS "OpenCV DNN not found; depth extraction will skip the OpenCV model backend.")
     endif()
 endif()
-target_link_libraries(pixelart_app PUBLIC pixelart_core glad_gl_core_33 OpenGL::GL PRIVATE stb_headers)
+target_link_libraries(pixelart_app PUBLIC pixelart_core glad_gl_core_33 PRIVATE stb_headers)
 if(APPLE)
-    target_link_libraries(pixelart_app PUBLIC "-framework Foundation" "-framework Metal" "-framework MetalPerformanceShaders")
+    target_link_libraries(pixelart_app PUBLIC Qt6::OpenGL "-framework Foundation" "-framework Metal" "-framework MetalPerformanceShaders")
+else()
+    target_link_libraries(pixelart_app PUBLIC OpenGL::GL)
 endif()
 target_compile_definitions(pixelart_app PUBLIC
     GL_SILENCE_DEPRECATION

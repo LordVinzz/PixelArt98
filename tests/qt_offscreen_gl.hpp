@@ -3,18 +3,27 @@
 
 #pragma once
 
+#include <QByteArray>
 #include <QGuiApplication>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QSurfaceFormat>
+#include <QtGlobal>
 
 #include <glad/gl.h>
 
+#include <cctype>
+#include <cstdlib>
 #include <memory>
 
 class QtOffscreenGlContext {
 public:
     QtOffscreenGlContext() {
+#if defined(__linux__)
+        if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+            qputenv("QT_QPA_PLATFORM", QByteArray("offscreen"));
+        }
+#endif
         if (QGuiApplication::instance() == nullptr) {
             static char application_name[] = "pixelart-gl-test";
             static char* arguments[] = {application_name, nullptr};
@@ -55,3 +64,30 @@ private:
     QOpenGLContext context_;
     bool ready_ = false;
 };
+
+inline int qt_offscreen_glsl_version_number() {
+    const auto* version = reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION));
+    if (version == nullptr) {
+        return 0;
+    }
+    const char* cursor = version;
+    while (*cursor != '\0' && !std::isdigit(static_cast<unsigned char>(*cursor))) {
+        ++cursor;
+    }
+    if (*cursor == '\0') {
+        return 0;
+    }
+    const int major = std::atoi(cursor);
+    while (std::isdigit(static_cast<unsigned char>(*cursor))) {
+        ++cursor;
+    }
+    if (*cursor == '.') {
+        ++cursor;
+    }
+    const int minor = std::atoi(cursor);
+    return major * 100 + minor;
+}
+
+inline bool qt_offscreen_gl_supports_glsl_330() {
+    return qt_offscreen_glsl_version_number() >= 330;
+}
