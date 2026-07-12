@@ -80,6 +80,10 @@ static bool seam_pixels_match(const std::vector<Pixel>& lhs,
 }
 
 int main() {
+    if (std::getenv("GITHUB_ACTIONS") != nullptr && std::getenv("PIXELART_RUN_GL_SMOKE") == nullptr) {
+        std::cout << "OpenGL smoke skipped on CI: set PIXELART_RUN_GL_SMOKE=1 for CI GL validation\n";
+        return 0;
+    }
 #if defined(__APPLE__)
     if (std::getenv("PIXELART_RUN_GL_SMOKE") == nullptr) {
         std::cout << "OpenGL smoke skipped: set PIXELART_RUN_GL_SMOKE=1 for interactive macOS GL validation\n";

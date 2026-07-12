@@ -140,7 +140,9 @@ typedef void (APIENTRYP PFNGLGETPROGRAMIVPROC)(GLuint program, GLenum pname, GLi
 typedef void (APIENTRYP PFNGLGETSHADERINFOLOGPROC)(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* infoLog);
 typedef void (APIENTRYP PFNGLGETSHADERIVPROC)(GLuint shader, GLenum pname, GLint* params);
 typedef void (APIENTRYP PFNGLGETTEXIMAGEPROC)(GLenum target, GLint level, GLenum format, GLenum type, void* pixels);
+typedef void (APIENTRYP PXGLADLINEWIDTHPROC)(GLfloat width);
 typedef void (APIENTRYP PFNGLLINKPROGRAMPROC)(GLuint program);
+typedef void (APIENTRYP PXGLADPOLYGONMODEPROC)(GLenum face, GLenum mode);
 typedef void (APIENTRYP PFNGLRENDERBUFFERSTORAGEPROC)(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
 typedef void (APIENTRYP PFNGLSHADERSOURCEPROC)(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length);
 typedef void (APIENTRYP PFNGLTEXIMAGE2DPROC)(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void* pixels);
@@ -193,7 +195,9 @@ extern PFNGLGETPROGRAMIVPROC glad_glGetProgramiv;
 extern PFNGLGETSHADERINFOLOGPROC glad_glGetShaderInfoLog;
 extern PFNGLGETSHADERIVPROC glad_glGetShaderiv;
 extern PFNGLGETTEXIMAGEPROC glad_glGetTexImage;
+extern PXGLADLINEWIDTHPROC glad_glLineWidth;
 extern PFNGLLINKPROGRAMPROC glad_glLinkProgram;
+extern PXGLADPOLYGONMODEPROC glad_glPolygonMode;
 extern PFNGLRENDERBUFFERSTORAGEPROC glad_glRenderbufferStorage;
 extern PFNGLSHADERSOURCEPROC glad_glShaderSource;
 extern PFNGLTEXIMAGE2DPROC glad_glTexImage2D;
@@ -251,7 +255,9 @@ void gladLoaderUnloadGL(void);
 #define glGetShaderInfoLog glad_glGetShaderInfoLog
 #define glGetShaderiv glad_glGetShaderiv
 #define glGetTexImage glad_glGetTexImage
+#define glLineWidth glad_glLineWidth
 #define glLinkProgram glad_glLinkProgram
+#define glPolygonMode glad_glPolygonMode
 #define glRenderbufferStorage glad_glRenderbufferStorage
 #define glShaderSource glad_glShaderSource
 #define glTexImage2D glad_glTexImage2D

@@ -4,7 +4,7 @@
 
 include(FetchContent)
 find_package(OpenGL REQUIRED)
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets OpenGLWidgets)
 
 set(FETCHCONTENT_QUIET FALSE)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Avoid network updates for already populated dependencies" FORCE)

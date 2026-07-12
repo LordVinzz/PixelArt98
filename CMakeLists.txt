@@ -187,10 +187,11 @@ else()
     endif()
 endif()
 target_link_libraries(pixelart_app PUBLIC pixelart_core glad_gl_core_33 PRIVATE stb_headers)
-if(APPLE)
-    target_link_libraries(pixelart_app PUBLIC Qt6::OpenGL "-framework Foundation" "-framework Metal" "-framework MetalPerformanceShaders")
-else()
+if(NOT APPLE)
     target_link_libraries(pixelart_app PUBLIC OpenGL::GL)
+endif()
+if(APPLE)
+    target_link_libraries(pixelart_app PUBLIC "-framework Foundation" "-framework Metal" "-framework MetalPerformanceShaders")
 endif()
 target_compile_definitions(pixelart_app PUBLIC
     GL_SILENCE_DEPRECATION
@@ -232,7 +233,6 @@ target_link_libraries(PixelArt98 PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
-    Qt6::OpenGL
     Qt6::OpenGLWidgets)
 target_compile_definitions(PixelArt98 PRIVATE GL_SILENCE_DEPRECATION)
 set_target_properties(PixelArt98 PROPERTIES
