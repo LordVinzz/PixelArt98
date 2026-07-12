@@ -5,7 +5,7 @@
 #include "core/Document.hpp"
 #include "io/ProjectIO.hpp"
 #include "render/GLTiledCanvasTexture.hpp"
-#include "ui/EditorApp.hpp"
+#include "ui/EditorController.hpp"
 
 // Keep unit-test assertions active even when the project is configured as Release.
 #undef NDEBUG
@@ -229,16 +229,16 @@ void test_editor_huge_history_and_refresh_are_lightweight() {
     Document document = document_from_pixels(width, height, make_pixels(width, height));
     const std::size_t live_pixels = document.active_cel().pixels.capacity();
 
-    EditorApp app(nullptr, AppSettings{});
-    app.debug_replace_document_for_memory_test(std::move(document));
+    EditorController app;
+    app.replace_document(std::move(document));
 
-    assert(app.debug_huge_document_history_mode());
-    assert(app.debug_canvas_uses_active_cel());
-    assert(app.debug_composite_pixel_capacity() == 0U);
-    assert(app.debug_history_document_pixel_capacity() == 0U);
-    app.debug_update_histogram_cache_for_memory_test();
-    assert(app.debug_histogram_cache_approximate());
-    assert(app.debug_composite_pixel_capacity() == 0U);
+    assert(app.huge_document_history_mode());
+    assert(app.display_uses_active_cel());
+    assert(app.display_pixel_capacity() == 0U);
+    const auto& histogram = app.histogram_luma();
+    (void)histogram;
+    assert(app.histogram_approximate());
+    assert(app.display_pixel_capacity() == 0U);
     assert(live_pixels == static_cast<std::size_t>(width * height));
 }
 

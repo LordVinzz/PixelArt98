@@ -1,6 +1,5 @@
 BUILD_DIR ?= build
 BUILD_TYPE ?= Release
-BACKEND ?= SDL2
 CMAKE ?= cmake
 CTEST ?= ctest
 DEPS_DIR ?= .deps
@@ -16,16 +15,17 @@ ONNXRUNTIME_SOURCE_DIR ?= $(DEPS_DIR)/onnxruntime-src-$(ONNXRUNTIME_VERSION)
 ONNXRUNTIME_STAMP ?= $(ONNXRUNTIME_PREFIX)/.pixelart-onnxruntime-$(ONNXRUNTIME_VERSION).stamp
 
 ifeq ($(OS),Windows_NT)
-RUN_EXE := $(BUILD_DIR)/pixelart_sdl2.exe
+RUN_EXE := $(BUILD_DIR)/PixelArt98.exe
 ONNXRUNTIME_PLATFORM := win-x64
 ONNXRUNTIME_ARCHIVE_EXT := zip
 ONNXRUNTIME_TAR_FLAGS := xf
 ONNXRUNTIME_EXTRACTED_DIR := onnxruntime-$(ONNXRUNTIME_PLATFORM)-$(ONNXRUNTIME_VERSION)
 else
-RUN_EXE := ./$(BUILD_DIR)/pixelart_sdl2
+RUN_EXE := ./$(BUILD_DIR)/PixelArt98
 UNAME_S := $(shell uname -s 2>/dev/null || echo unknown)
 UNAME_M := $(shell uname -m 2>/dev/null || echo unknown)
 ifeq ($(UNAME_S),Darwin)
+RUN_EXE := ./$(BUILD_DIR)/PixelArt98.app/Contents/MacOS/PixelArt98
 ifeq ($(UNAME_M),arm64)
 ONNXRUNTIME_PLATFORM := osx-arm64
 else
@@ -43,8 +43,6 @@ ONNXRUNTIME_URL := https://github.com/microsoft/onnxruntime/releases/download/v$
 
 CMAKE_CONFIGURE_FLAGS ?= \
 	-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-	-DPIXELART_BACKEND=$(BACKEND) \
-	-DPIXELART_BUILD_BOTH=ON \
 	-DPIXELART_BUILD_TESTS=ON
 
 DEPTH_CMAKE_CONFIGURE_FLAGS ?= \

@@ -69,7 +69,7 @@ as part of any paid or monetized offering.
 
 1.6. “Third-Party Components” means software, libraries, APIs, headers,
 assets, documentation, or other materials not owned by the Licensor,
-including but not limited to Dear ImGui, SDL2, GLFW, OpenGL-related
+including but not limited to Qt, OpenGL-related
 headers, OpenGL specifications, drivers, loaders, and platform libraries.
 
 2. License Grant
@@ -178,9 +178,7 @@ Components.
 The Software may use or interact with third-party technologies including,
 without limitation:
 
-- Dear ImGui, licensed under the MIT License;
-- SDL2, licensed under the zlib License;
-- GLFW, licensed under the zlib/libpng License;
+- Qt, licensed under the LGPLv3/GPLv3 or an applicable commercial license;
 - OpenGL, OpenGL-related APIs, headers, specifications, drivers, loaders,
   or platform components, which may be subject to separate copyright,
   trademark, patent, platform, vendor, or specification terms.
@@ -333,4 +331,3 @@ licenses the Software for Non-Commercial Purposes.
 
 No additional permissions are granted unless provided in a separate
 written agreement signed by the Licensor.
-

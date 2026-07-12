@@ -255,6 +255,12 @@ void test_project_roundtrip(const std::filesystem::path& root) {
     assert(loaded.model.cuboids[0].name == "Panel");
     assert(loaded.model.cuboids[0].rotation_axis == 2);
     assert(loaded.model.cuboids[0].rotation_rescale);
+
+    const auto unicode_path = root / "nested folder" / "projet-éclair-像素.pixart";
+    assert(save_project(unicode_path, source, model, &error));
+    ProjectBundle unicode_loaded;
+    assert(load_project(unicode_path, unicode_loaded, &error));
+    assert_document_shape(unicode_loaded.document);
 }
 
 void write_import_fixture(const std::filesystem::path& path, int width, int height, std::string_view extension) {

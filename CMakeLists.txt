@@ -16,15 +16,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(PIXELART_BUILD_BOTH "Build both SDL2 and GLFW launchers" ON)
-set(PIXELART_BACKEND "SDL2" CACHE STRING "Default backend: SDL2 or GLFW")
-set_property(CACHE PIXELART_BACKEND PROPERTY STRINGS SDL2 GLFW)
 option(PIXELART_ENABLE_ANIMATION "Enable animation timeline features" ON)
 option(PIXELART_ENABLE_MODEL "Enable cuboid model texturing features" ON)
 option(PIXELART_BUILD_TESTS "Build unit tests" ON)
 option(PIXELART_ENABLE_SANITIZERS "Enable ASan/UBSan for Debug builds with supported compilers" ON)
 option(PIXELART_MEMORY_PROFILE_BUILD "Build with debug symbols, -O1, and frame pointers for allocation profiling" OFF)
-option(PIXELART_USE_LINUX_PORTAL_FILE_DIALOGS "Use xdg-desktop-portal for native Linux file dialogs" ON)
 option(PIXELART_ENABLE_ONNXRUNTIME "Enable ONNX Runtime-backed depth map extraction when ONNX Runtime is installed" ON)
 option(PIXELART_ENABLE_OPENCV_DNN "Enable OpenCV DNN-backed depth map extraction when OpenCV is installed" OFF)
 set(ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime SDK root directory")
@@ -153,7 +149,6 @@ target_compile_definitions(pixelart_core PUBLIC
 pixelart_configure_project_target(pixelart_core)
 
 add_library(pixelart_app
-    src/platform/NativeFileDialogProvider.cpp
     src/depth/DepthMapExtractor.cpp
     src/render/GpuEffectRenderer.cpp
     src/render/GLCanvasTexture.cpp
@@ -161,11 +156,7 @@ add_library(pixelart_app
     src/render/Renderer3D.cpp
     src/render/MeshUvOverlayRenderer.cpp
     src/ui/AppSettings.cpp
-    src/ui/EmbeddedAssets.cpp
-    src/ui/EmbeddedTransformIcons.c
-    src/ui/SplashScreen.cpp
-    src/ui/StartupSplash.cpp
-    src/ui/EditorApp.cpp)
+    src/ui/EditorController.cpp)
 if(APPLE)
     target_sources(pixelart_app PRIVATE src/render/MpsEffectRenderer.mm)
     set_source_files_properties(src/render/MpsEffectRenderer.mm PROPERTIES
@@ -195,7 +186,7 @@ else()
         message(STATUS "OpenCV DNN not found; depth extraction will skip the OpenCV model backend.")
     endif()
 endif()
-target_link_libraries(pixelart_app PUBLIC pixelart_core imgui_backend glad_gl_core_33 nfd::nfd OpenGL::GL PRIVATE stb_headers)
+target_link_libraries(pixelart_app PUBLIC pixelart_core glad_gl_core_33 OpenGL::GL PRIVATE stb_headers)
 if(APPLE)
     target_link_libraries(pixelart_app PUBLIC "-framework Foundation" "-framework Metal" "-framework MetalPerformanceShaders")
 endif()
@@ -205,52 +196,63 @@ target_compile_definitions(pixelart_app PUBLIC
     WIN32_LEAN_AND_MEAN)
 pixelart_configure_project_target(pixelart_app)
 
-set(PIXELART_BUILD_SDL OFF)
-set(PIXELART_BUILD_GLFW OFF)
-if(PIXELART_BUILD_BOTH)
-    set(PIXELART_BUILD_SDL ON)
-    set(PIXELART_BUILD_GLFW ON)
-elseif(PIXELART_BACKEND STREQUAL "SDL2")
-    set(PIXELART_BUILD_SDL ON)
-elseif(PIXELART_BACKEND STREQUAL "GLFW")
-    set(PIXELART_BUILD_GLFW ON)
-else()
-    message(FATAL_ERROR "PIXELART_BACKEND must be SDL2 or GLFW")
+qt_standard_project_setup()
+set(PIXELART_TOOL_ICONS
+    ${CMAKE_SOURCE_DIR}/res/icons/brush.png ${CMAKE_SOURCE_DIR}/res/icons/bucket.png
+    ${CMAKE_SOURCE_DIR}/res/icons/clone_stamp.png ${CMAKE_SOURCE_DIR}/res/icons/ellipse.png
+    ${CMAKE_SOURCE_DIR}/res/icons/eraser.png ${CMAKE_SOURCE_DIR}/res/icons/eyedropper.png
+    ${CMAKE_SOURCE_DIR}/res/icons/gradient.png ${CMAKE_SOURCE_DIR}/res/icons/lasso.png
+    ${CMAKE_SOURCE_DIR}/res/icons/line.png ${CMAKE_SOURCE_DIR}/res/icons/magic_wand.png
+    ${CMAKE_SOURCE_DIR}/res/icons/new_layer.png ${CMAKE_SOURCE_DIR}/res/icons/duplicate_layer.png
+    ${CMAKE_SOURCE_DIR}/res/icons/remove_layer.png ${CMAKE_SOURCE_DIR}/res/icons/up.png
+    ${CMAKE_SOURCE_DIR}/res/icons/reveal_mask.png ${CMAKE_SOURCE_DIR}/res/icons/hide_mask.png
+    ${CMAKE_SOURCE_DIR}/res/icons/mask_from_selection.png ${CMAKE_SOURCE_DIR}/res/icons/clear_from_selection.png
+    ${CMAKE_SOURCE_DIR}/res/icons/move_pixels.png ${CMAKE_SOURCE_DIR}/res/icons/pencil.png
+    ${CMAKE_SOURCE_DIR}/res/icons/rectangle.png ${CMAKE_SOURCE_DIR}/res/icons/rectangle_select.png
+    ${CMAKE_SOURCE_DIR}/res/icons/text.png)
+qt_add_executable(PixelArt98
+    src/platform/main_qt.cpp
+    src/ui/EmbeddedAssets.cpp
+    src/ui/QtCanvasWidget.cpp
+    src/ui/QtModelPreviewWidget.cpp
+    src/ui/QtMainWindow.cpp)
+qt_add_resources(PixelArt98 tool_icons
+    PREFIX "/"
+    BASE "${CMAKE_SOURCE_DIR}/res"
+    FILES ${PIXELART_TOOL_ICONS})
+if(APPLE)
+    target_sources(PixelArt98 PRIVATE ${PIXELART_TOOL_ICONS})
+    set_source_files_properties(${PIXELART_TOOL_ICONS} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources/icons")
 endif()
+target_link_libraries(PixelArt98 PRIVATE
+    pixelart_app
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    Qt6::OpenGL
+    Qt6::OpenGLWidgets)
+target_compile_definitions(PixelArt98 PRIVATE GL_SILENCE_DEPRECATION)
+set_target_properties(PixelArt98 PROPERTIES
+    MACOSX_BUNDLE TRUE
+    WIN32_EXECUTABLE TRUE)
+pixelart_configure_project_target(PixelArt98)
+add_custom_target(pixelart DEPENDS PixelArt98)
 
-if(PIXELART_BUILD_SDL)
-    add_executable(pixelart_sdl2 src/platform/main_sdl.cpp)
-    target_link_libraries(pixelart_sdl2 PRIVATE pixelart_app)
-    target_include_directories(pixelart_sdl2 SYSTEM PRIVATE
-        ${sdl2_SOURCE_DIR}/include
-        ${sdl2_BINARY_DIR}/include
-        ${sdl2_BINARY_DIR}/include/SDL2
-        ${nfd_SOURCE_DIR}/src/include)
-    target_compile_definitions(pixelart_sdl2 PRIVATE GL_SILENCE_DEPRECATION)
-    pixelart_configure_project_target(pixelart_sdl2)
-    install(TARGETS pixelart_sdl2 RUNTIME DESTINATION .)
-endif()
+install(TARGETS PixelArt98
+    BUNDLE DESTINATION .
+    RUNTIME DESTINATION .)
 
-if(PIXELART_BUILD_GLFW)
-    add_executable(pixelart_glfw src/platform/main_glfw.cpp)
-    target_link_libraries(pixelart_glfw PRIVATE pixelart_app)
-    target_include_directories(pixelart_glfw SYSTEM PRIVATE
-        ${glfw_SOURCE_DIR}/include
-        ${nfd_SOURCE_DIR}/src/include)
-    target_compile_definitions(pixelart_glfw PRIVATE GL_SILENCE_DEPRECATION)
-    pixelart_configure_project_target(pixelart_glfw)
-    install(TARGETS pixelart_glfw RUNTIME DESTINATION .)
-endif()
-
-if(PIXELART_BACKEND STREQUAL "GLFW" AND TARGET pixelart_glfw)
-    add_custom_target(pixelart DEPENDS pixelart_glfw)
-elseif(TARGET pixelart_sdl2)
-    add_custom_target(pixelart DEPENDS pixelart_sdl2)
-endif()
+qt_generate_deploy_app_script(
+    TARGET PixelArt98
+    OUTPUT_SCRIPT pixelart_deploy_script
+    NO_UNSUPPORTED_PLATFORM_ERROR)
+install(SCRIPT ${pixelart_deploy_script})
 
 install(DIRECTORY res/skyboxes DESTINATION res)
 install(FILES
     ${CMAKE_SOURCE_DIR}/README.md
+    ${CMAKE_SOURCE_DIR}/FEATURES.md
     ${CMAKE_SOURCE_DIR}/LICENSE
     ${CMAKE_SOURCE_DIR}/THIRD-PARTY-NOTICES.md
     DESTINATION .)
@@ -272,6 +274,11 @@ if(PIXELART_BUILD_TESTS)
     pixelart_configure_project_target(pixelart_huge_image_memory_tests)
     add_test(NAME pixelart_huge_image_memory_tests COMMAND pixelart_huge_image_memory_tests)
 
+    add_executable(pixelart_editor_controller_tests tests/editor_controller_tests.cpp)
+    target_link_libraries(pixelart_editor_controller_tests PRIVATE pixelart_app)
+    pixelart_configure_project_target(pixelart_editor_controller_tests)
+    add_test(NAME pixelart_editor_controller_tests COMMAND pixelart_editor_controller_tests)
+
     add_executable(pixelart_shader_compile_tests tests/shader_compile_tests.cpp)
     if(APPLE)
         target_sources(pixelart_shader_compile_tests PRIVATE tests/metal_shader_compile_tests.mm)
@@ -279,18 +286,14 @@ if(PIXELART_BUILD_TESTS)
             LANGUAGE CXX
             COMPILE_FLAGS "-x objective-c++ -fobjc-arc")
     endif()
-    target_link_libraries(pixelart_shader_compile_tests PRIVATE pixelart_app)
-    target_include_directories(pixelart_shader_compile_tests SYSTEM PRIVATE
-        ${glfw_SOURCE_DIR}/include)
+    target_link_libraries(pixelart_shader_compile_tests PRIVATE pixelart_app Qt6::Gui)
     target_compile_definitions(pixelart_shader_compile_tests PRIVATE GL_SILENCE_DEPRECATION)
     pixelart_configure_project_target(pixelart_shader_compile_tests)
     add_test(NAME pixelart_shader_compile_tests COMMAND pixelart_shader_compile_tests)
     set_tests_properties(pixelart_shader_compile_tests PROPERTIES TIMEOUT 15)
 
     add_executable(pixelart_opengl_smoke tests/opengl_smoke.cpp)
-    target_link_libraries(pixelart_opengl_smoke PRIVATE pixelart_app)
-    target_include_directories(pixelart_opengl_smoke SYSTEM PRIVATE
-        ${glfw_SOURCE_DIR}/include)
+    target_link_libraries(pixelart_opengl_smoke PRIVATE pixelart_app Qt6::Gui)
     target_compile_definitions(pixelart_opengl_smoke PRIVATE GL_SILENCE_DEPRECATION)
     pixelart_configure_project_target(pixelart_opengl_smoke)
     add_test(NAME pixelart_opengl_smoke COMMAND pixelart_opengl_smoke)
@@ -305,9 +308,7 @@ if(PIXELART_BUILD_TESTS)
     endif()
 
     add_executable(pixelart_gpu_backend_benchmark tests/gpu_backend_benchmark.cpp)
-    target_link_libraries(pixelart_gpu_backend_benchmark PRIVATE pixelart_app)
-    target_include_directories(pixelart_gpu_backend_benchmark SYSTEM PRIVATE
-        ${glfw_SOURCE_DIR}/include)
+    target_link_libraries(pixelart_gpu_backend_benchmark PRIVATE pixelart_app Qt6::Gui)
     target_compile_definitions(pixelart_gpu_backend_benchmark PRIVATE GL_SILENCE_DEPRECATION)
     pixelart_configure_project_target(pixelart_gpu_backend_benchmark)
 endif()

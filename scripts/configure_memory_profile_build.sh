@@ -10,12 +10,17 @@ cmake -S "$repo_root" -B "$repo_root/$build_dir" \
   -DPIXELART_ENABLE_SANITIZERS=OFF \
   -DPIXELART_BUILD_TESTS=ON
 
-cmake --build "$repo_root/$build_dir" --target pixelart_sdl2
+cmake --build "$repo_root/$build_dir" --target PixelArt98
+
+app_path="$repo_root/$build_dir/PixelArt98"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  app_path="$repo_root/$build_dir/PixelArt98.app/Contents/MacOS/PixelArt98"
+fi
 
 cat <<EOF
 Memory profile build ready:
-  $repo_root/$build_dir/pixelart_sdl2
+  $app_path
 
 Trace with:
-  PIXELART_APP="$repo_root/$build_dir/pixelart_sdl2" scripts/profile_blue_marble_memory.sh
+  PIXELART_APP="$app_path" scripts/profile_blue_marble_memory.sh
 EOF

@@ -35,6 +35,12 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          cache: true
+
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -44,6 +50,8 @@ jobs:
             libgl1-mesa-dev \
             libglu1-mesa-dev \
             libgtk-3-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             libx11-dev \
             libxcursor-dev \
             libxext-dev \
@@ -60,8 +68,6 @@ jobs:
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
-          -DPIXELART_BUILD_BOTH=OFF
-          -DPIXELART_BACKEND=SDL2
           -DPIXELART_BUILD_TESTS=ON
 
       - name: Configure CMake for macOS universal binary
@@ -69,9 +75,6 @@ jobs:
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
-          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
-          -DPIXELART_BUILD_BOTH=OFF
-          -DPIXELART_BACKEND=SDL2
           -DPIXELART_BUILD_TESTS=ON
 
       - name: Build
@@ -79,10 +82,11 @@ jobs:
         run: >
           cmake --build build --config ${{ env.BUILD_TYPE }}
           --target
-          pixelart_sdl2
+          PixelArt98
           pixelart_tests
           pixelart_io_tests
           pixelart_huge_image_memory_tests
+          pixelart_editor_controller_tests
           pixelart_shader_compile_tests
           pixelart_opengl_smoke
 
@@ -91,10 +95,11 @@ jobs:
         run: >
           cmake --build build --config ${{ env.BUILD_TYPE }}
           --target
-          pixelart_sdl2
+          PixelArt98
           pixelart_tests
           pixelart_io_tests
           pixelart_huge_image_memory_tests
+          pixelart_editor_controller_tests
           pixelart_shader_compile_tests
           pixelart_opengl_smoke
           pixelart_mps_smoke
@@ -105,14 +110,14 @@ jobs:
       - name: Install package files
         run: cmake --install build --config ${{ env.BUILD_TYPE }} --prefix package/PixelArt98-${{ matrix.platform }}
 
-      - name: Package executable on Unix
+      - name: Package application on Unix
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           package_dir="package/PixelArt98-${{ matrix.platform }}"
-          cmake -E rename "${package_dir}/pixelart_sdl2" "${package_dir}/PixelArt98"
           cmake -E copy README.md "${package_dir}/README.md"
+          cmake -E copy FEATURES.md "${package_dir}/FEATURES.md"
           cmake -E make_directory dist
           cmake -E chdir package cmake -E tar cfv "../dist/PixelArt98-${{ matrix.platform }}.zip" --format=zip -- "PixelArt98-${{ matrix.platform }}"
 
@@ -121,8 +126,8 @@ jobs:
         shell: pwsh
         run: |
           $packageDir = "package/PixelArt98-${{ matrix.platform }}"
-          cmake -E rename "$packageDir/pixelart_sdl2.exe" "$packageDir/PixelArt98.exe"
           cmake -E copy README.md "$packageDir/README.md"
+          cmake -E copy FEATURES.md "$packageDir/FEATURES.md"
           cmake -E make_directory dist
           cmake -E chdir package cmake -E tar cfv "../dist/PixelArt98-${{ matrix.platform }}.zip" --format=zip -- "PixelArt98-${{ matrix.platform }}"
 

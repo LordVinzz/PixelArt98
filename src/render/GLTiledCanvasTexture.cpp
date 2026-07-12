@@ -17,10 +17,6 @@ namespace px {
 
 namespace {
 
-ImTextureID gl_imgui_texture_id(unsigned int id) {
-    return static_cast<ImTextureID>(static_cast<unsigned long long>(id));
-}
-
 int ceil_div(int value, int divisor) {
     return (value + divisor - 1) / divisor;
 }
@@ -199,43 +195,6 @@ void GLTiledCanvasTexture::upload_region_now(int document_width,
     }
 }
 
-void GLTiledCanvasTexture::draw_visible(ImDrawList* draw_list,
-                                        int document_width,
-                                        int document_height,
-                                        const std::vector<Pixel>& pixels,
-                                        ImVec2 canvas_origin,
-                                        float zoom,
-                                        ImVec2 viewport_min,
-                                        ImVec2 viewport_max,
-                                        ImU32 tint) {
-    MemoryTraceScope trace("GLTiledCanvasTexture::draw_visible");
-    memory_trace_vector("draw_visible.base_pixels", pixels);
-    last_draw_stats_ = {};
-    if (draw_list == nullptr || document_width <= 0 || document_height <= 0 || zoom <= 0.0f ||
-        pixels.size() != static_cast<std::size_t>(document_width) * static_cast<std::size_t>(document_height)) {
-        return;
-    }
-    if (document_width != document_width_ || document_height != document_height_ || levels_.empty()) {
-        reset_levels(document_width, document_height);
-    }
-
-    const int selected_level = choose_level(zoom);
-    last_draw_stats_.selected_level = selected_level;
-    last_draw_stats_.drew_lod = selected_level > 0;
-
-    upload_queue_.clear();
-    for (int level = static_cast<int>(levels_.size()) - 1; level >= selected_level; --level) {
-        enqueue_visible_tiles(level, canvas_origin, zoom, viewport_min, viewport_max, level == selected_level ? 1 : 0);
-    }
-    process_upload_queue(pixels, document_width);
-
-    for (int level = static_cast<int>(levels_.size()) - 1; level >= selected_level; --level) {
-        draw_ready_level(draw_list, level, canvas_origin, zoom, viewport_min, viewport_max, tint);
-    }
-    last_draw_stats_.pending_tiles = static_cast<int>(std::min<std::size_t>(upload_queue_.size(),
-                                                                            static_cast<std::size_t>(std::numeric_limits<int>::max())));
-}
-
 void GLTiledCanvasTexture::set_prepared_pyramid(CpuPyramid&& pyramid) {
     MemoryTraceScope trace("GLTiledCanvasTexture::set_prepared_pyramid");
     memory_trace_event("counter",
@@ -376,55 +335,6 @@ std::uint64_t GLTiledCanvasTexture::target_generation_for_level(int level_index)
     return level.downsample == 1 ? generation_ : level.source_generation;
 }
 
-void GLTiledCanvasTexture::enqueue_visible_tiles(int level_index,
-                                                 ImVec2 canvas_origin,
-                                                 float zoom,
-                                                 ImVec2 viewport_min,
-                                                 ImVec2 viewport_max,
-                                                 int margin_tiles) {
-    if (level_index < 0 || level_index >= static_cast<int>(levels_.size())) {
-        return;
-    }
-    Level& level = levels_[static_cast<std::size_t>(level_index)];
-    const float level_zoom = zoom * static_cast<float>(level.downsample);
-    if (level_zoom <= 0.0f) {
-        return;
-    }
-    const int min_x = std::clamp(static_cast<int>(std::floor((viewport_min.x - canvas_origin.x) / level_zoom)) - 1,
-                                 0,
-                                 level.width - 1);
-    const int min_y = std::clamp(static_cast<int>(std::floor((viewport_min.y - canvas_origin.y) / level_zoom)) - 1,
-                                 0,
-                                 level.height - 1);
-    const int max_x = std::clamp(static_cast<int>(std::ceil((viewport_max.x - canvas_origin.x) / level_zoom)) + 1,
-                                 0,
-                                 level.width);
-    const int max_y = std::clamp(static_cast<int>(std::ceil((viewport_max.y - canvas_origin.y) / level_zoom)) + 1,
-                                 0,
-                                 level.height);
-    if (max_x <= min_x || max_y <= min_y) {
-        return;
-    }
-
-    const int first_tile_x = std::clamp(min_x / kTileSize - margin_tiles, 0, level.columns - 1);
-    const int first_tile_y = std::clamp(min_y / kTileSize - margin_tiles, 0, level.rows - 1);
-    const int last_tile_x = std::clamp((max_x - 1) / kTileSize + margin_tiles, 0, level.columns - 1);
-    const int last_tile_y = std::clamp((max_y - 1) / kTileSize + margin_tiles, 0, level.rows - 1);
-    const std::uint64_t target_generation = target_generation_for_level(level_index);
-    for (int tile_y = first_tile_y; tile_y <= last_tile_y; ++tile_y) {
-        for (int tile_x = first_tile_x; tile_x <= last_tile_x; ++tile_x) {
-            const int tile_index = tile_y * level.columns + tile_x;
-            Tile& tile = level.tiles[static_cast<std::size_t>(tile_index)];
-            if (margin_tiles == 0) {
-                ++last_draw_stats_.visible_tiles;
-            }
-            if (tile.generation != target_generation) {
-                enqueue_tile(level_index, tile_index);
-            }
-        }
-    }
-}
-
 void GLTiledCanvasTexture::enqueue_tile(int level_index, int tile_index) {
     for (const TileKey& key : upload_queue_) {
         if (key.level == level_index && key.tile == tile_index) {
@@ -524,61 +434,6 @@ bool GLTiledCanvasTexture::upload_tile(Level& level,
     tile.generation = generation;
     (void)level;
     return true;
-}
-
-void GLTiledCanvasTexture::draw_ready_level(ImDrawList* draw_list,
-                                            int level_index,
-                                            ImVec2 canvas_origin,
-                                            float zoom,
-                                            ImVec2 viewport_min,
-                                            ImVec2 viewport_max,
-                                            ImU32 tint) {
-    if (level_index < 0 || level_index >= static_cast<int>(levels_.size())) {
-        return;
-    }
-    const Level& level = levels_[static_cast<std::size_t>(level_index)];
-    const float level_zoom = zoom * static_cast<float>(level.downsample);
-    const int min_x = std::clamp(static_cast<int>(std::floor((viewport_min.x - canvas_origin.x) / level_zoom)) - 1,
-                                 0,
-                                 level.width - 1);
-    const int min_y = std::clamp(static_cast<int>(std::floor((viewport_min.y - canvas_origin.y) / level_zoom)) - 1,
-                                 0,
-                                 level.height - 1);
-    const int max_x = std::clamp(static_cast<int>(std::ceil((viewport_max.x - canvas_origin.x) / level_zoom)) + 1,
-                                 0,
-                                 level.width);
-    const int max_y = std::clamp(static_cast<int>(std::ceil((viewport_max.y - canvas_origin.y) / level_zoom)) + 1,
-                                 0,
-                                 level.height);
-    if (max_x <= min_x || max_y <= min_y) {
-        return;
-    }
-    const int first_tile_x = min_x / kTileSize;
-    const int first_tile_y = min_y / kTileSize;
-    const int last_tile_x = (max_x - 1) / kTileSize;
-    const int last_tile_y = (max_y - 1) / kTileSize;
-    for (int tile_y = first_tile_y; tile_y <= last_tile_y; ++tile_y) {
-        for (int tile_x = first_tile_x; tile_x <= last_tile_x; ++tile_x) {
-            const int tile_index = tile_y * level.columns + tile_x;
-            if (tile_index < 0 || tile_index >= static_cast<int>(level.tiles.size())) {
-                continue;
-            }
-            const Tile& tile = tile_at(level, tile_x, tile_y);
-            if (tile.texture_id == 0) {
-                continue;
-            }
-
-            const float source_min_x = static_cast<float>(tile.x * level.downsample);
-            const float source_min_y = static_cast<float>(tile.y * level.downsample);
-            const float source_max_x = static_cast<float>(std::min(document_width_, (tile.x + tile.width) * level.downsample));
-            const float source_max_y = static_cast<float>(std::min(document_height_, (tile.y + tile.height) * level.downsample));
-            const ImVec2 min_pos(canvas_origin.x + source_min_x * zoom,
-                                 canvas_origin.y + source_min_y * zoom);
-            const ImVec2 max_pos(canvas_origin.x + source_max_x * zoom,
-                                 canvas_origin.y + source_max_y * zoom);
-            draw_list->AddImage(gl_imgui_texture_id(tile.texture_id), min_pos, max_pos, ImVec2(0, 0), ImVec2(1, 1), tint);
-        }
-    }
 }
 
 } // namespace px

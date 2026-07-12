@@ -8,29 +8,13 @@ The DOMINGUEZ Non-Commercial Software License applies only to code and
 materials owned by DOMINGUEZ Vincent or explicitly contributed to this
 project under that license.
 
-## Dear ImGui
+## Qt
 
-License: MIT License
+License: LGPLv3/GPLv3 or applicable commercial Qt license
 
-Dear ImGui is not relicensed by this project.
-Its copyright notices, license text, and disclaimers must be preserved
-when required by its license.
-
-## SDL2
-
-License: zlib License
-
-SDL2 is not relicensed by this project.
-Its copyright notices, license text, and disclaimers must be preserved
-when required by its license.
-
-## GLFW
-
-License: zlib/libpng License
-
-GLFW is not relicensed by this project.
-Its copyright notices, license text, and disclaimers must be preserved
-when required by its license.
+Qt is dynamically linked and is not relicensed by this project. Distributed
+packages must include the applicable Qt license text, copyright notices, and
+the relink/replace rights required by the selected Qt license.
 
 ## OpenGL
 
@@ -47,4 +31,3 @@ When distributing this project, preserve all applicable third-party
 copyright notices, license texts, attribution notices, and disclaimers.
 
 Do not remove or overwrite third-party license files.
-

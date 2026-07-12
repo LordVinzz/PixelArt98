@@ -2,13 +2,11 @@
 // Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
 // See LICENSE for details.
 
-#define GLFW_INCLUDE_NONE
-
 #include "render/GpuEffectRenderer.hpp"
 #include "render/MeshUvOverlayRenderer.hpp"
 #include "render/Renderer3D.hpp"
+#include "qt_offscreen_gl.hpp"
 
-#include <GLFW/glfw3.h>
 #include <glad/gl.h>
 
 #include <array>
@@ -20,10 +18,6 @@ bool compile_metal_shaders(bool& skipped, std::string& message);
 #endif
 
 namespace {
-
-void* load_glfw_gl_proc(const char* name) {
-    return reinterpret_cast<void*>(glfwGetProcAddress(name));
-}
 
 const char* shader_type_name(GLenum type) {
     if (type == GL_VERTEX_SHADER) {
@@ -96,31 +90,9 @@ bool compile_gl_program(const char* name, const char* vertex_source, const char*
 }
 
 bool compile_glsl_shaders() {
-    if (!glfwInit()) {
-        std::cout << "[SKIP] GLSL shader compile: GLFW init failed\n";
-        return true;
-    }
-
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#if defined(__APPLE__)
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-#endif
-
-    GLFWwindow* window = glfwCreateWindow(64, 64, "pixelart shader compile", nullptr, nullptr);
-    if (window == nullptr) {
-        glfwTerminate();
-        std::cout << "[SKIP] GLSL shader compile: hidden OpenGL context unavailable\n";
-        return true;
-    }
-
-    glfwMakeContextCurrent(window);
-    if (!gladLoadGL(load_glfw_gl_proc)) {
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        std::cout << "[SKIP] GLSL shader compile: GLAD load failed\n";
+    QtOffscreenGlContext context;
+    if (!context.ready()) {
+        std::cout << "[SKIP] GLSL shader compile: Qt offscreen context unavailable\n";
         return true;
     }
 
@@ -140,8 +112,6 @@ bool compile_glsl_shaders() {
                             px::MeshUvOverlayRenderer::vertex_shader_source(),
                             px::MeshUvOverlayRenderer::fragment_shader_source()) && ok;
 
-    glfwDestroyWindow(window);
-    glfwTerminate();
     return ok;
 }
 

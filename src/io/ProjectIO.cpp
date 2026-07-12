@@ -89,6 +89,19 @@ void set_error(std::string* error, const std::string& value) {
     }
 }
 
+std::string path_display(const std::filesystem::path& path) {
+    const auto text = path.u8string();
+    return {text.begin(), text.end()};
+}
+
+std::FILE* open_project_file(const std::filesystem::path& path, bool write) {
+#if defined(_WIN32)
+    return _wfopen(path.c_str(), write ? L"wb" : L"rb");
+#else
+    return std::fopen(path.c_str(), write ? "wb" : "rb");
+#endif
+}
+
 nlohmann::json document_to_json(const Document& document) {
     nlohmann::json root;
     root["format"] = "pixelart98-project";
@@ -1524,9 +1537,20 @@ bool decode_png_streaming_rgba(const std::string& path,
 }
 
 bool save_project(const std::string& path, const Document& document, const ModelDocument& model, std::string* error) {
+    return save_project(std::filesystem::path(path), document, model, error);
+}
+
+bool save_project(const std::filesystem::path& path, const Document& document, const ModelDocument& model, std::string* error) {
+    std::FILE* file = open_project_file(path, true);
+    if (file == nullptr) {
+        set_error(error, "Could not create project archive: " + path_display(path));
+        return false;
+    }
+
     mz_zip_archive zip{};
-    if (!mz_zip_writer_init_file(&zip, path.c_str(), 0)) {
-        set_error(error, "Could not create project archive: " + path);
+    if (!mz_zip_writer_init_cfile(&zip, file, 0)) {
+        std::fclose(file);
+        set_error(error, "Could not create project archive: " + path_display(path));
         return false;
     }
 
@@ -1562,16 +1586,33 @@ bool save_project(const std::string& path, const Document& document, const Model
 
     ok = ok && mz_zip_writer_finalize_archive(&zip);
     mz_zip_writer_end(&zip);
+    const bool closed = std::fclose(file) == 0;
     if (!ok) {
         set_error(error, "Could not finish project archive");
+        return false;
     }
-    return ok;
+    if (!closed) {
+        set_error(error, "Could not close project archive: " + path_display(path));
+        return false;
+    }
+    return true;
 }
 
 bool load_project(const std::string& path, ProjectBundle& out_bundle, std::string* error) {
+    return load_project(std::filesystem::path(path), out_bundle, error);
+}
+
+bool load_project(const std::filesystem::path& path, ProjectBundle& out_bundle, std::string* error) {
+    std::FILE* file = open_project_file(path, false);
+    if (file == nullptr) {
+        set_error(error, "Could not open project archive: " + path_display(path));
+        return false;
+    }
+
     mz_zip_archive zip{};
-    if (!mz_zip_reader_init_file(&zip, path.c_str(), 0)) {
-        set_error(error, "Could not open project archive: " + path);
+    if (!mz_zip_reader_init_cfile(&zip, file, 0, 0)) {
+        std::fclose(file);
+        set_error(error, "Could not open project archive: " + path_display(path));
         return false;
     }
 
@@ -1579,6 +1620,7 @@ bool load_project(const std::string& path, ProjectBundle& out_bundle, std::strin
     void* json_mem = mz_zip_reader_extract_file_to_heap(&zip, "project.json", &json_size, 0);
     if (!json_mem) {
         mz_zip_reader_end(&zip);
+        std::fclose(file);
         set_error(error, "project.json missing from archive");
         return false;
     }
@@ -1643,6 +1685,7 @@ bool load_project(const std::string& path, ProjectBundle& out_bundle, std::strin
     }
 
     mz_zip_reader_end(&zip);
+    std::fclose(file);
     if (!ok) {
         return false;
     }

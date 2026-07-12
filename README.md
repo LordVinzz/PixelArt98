@@ -9,15 +9,17 @@
 
 ![PixelArt98 splash art](res/splash.png)
 
-[README](README.md) | [License](LICENSE) | [Animation](docs/ANIMATION.md) | [Comparisons](docs/COMPARISONS.md) | [Our Philosophy](docs/OUR_PHILOSOPHY.md)
+[README](README.md) | [Features](FEATURES.md) | [License](LICENSE) | [Animation](docs/ANIMATION.md) | [Comparisons](docs/COMPARISONS.md) | [Our Philosophy](docs/OUR_PHILOSOPHY.md)
 
 PixelArt98 is a native C++23 pixel-art editor inspired by classic desktop paint tools. It focuses on direct pixel editing, animation frames, layered compositing, and Minecraft-style cuboid texture workflows in one small OpenGL application.
 
 The badges above track the main deployment workflow. Each platform job builds the application and runs the complete test suite, including import/export roundtrip tests.
 
-The app is built as a portable desktop executable for Windows, macOS, and Linux. Release builds embed the splash artwork and application assets into the binary, so the distributed ZIP packages contain a runnable executable plus documentation rather than a loose resource tree.
+The app uses Qt 6 Widgets and is distributed for Windows, macOS, and Linux. Release packages bundle the required Qt runtime and platform plugins.
 
 ## Features
+
+The complete behavior reference is maintained in [`FEATURES.md`](FEATURES.md).
 
 - New document dialog for starting custom canvases without editing a project file by hand.
 - Pixel canvas with pencil, brush, eraser, line, rectangle, ellipse, fill, gradient, clone stamp, text, selection, lasso, and magic wand tools.
@@ -51,6 +53,7 @@ Requirements:
 - CMake 3.24 or newer
 - A C++23 compiler: Clang, GCC, or MSVC
 - Git
+- Qt 6.8 or newer with Core, Gui, Widgets, OpenGL, and OpenGLWidgets
 - Platform OpenGL development libraries
 
 Optional depth-map extraction support:
@@ -62,7 +65,7 @@ Optional depth-map extraction support:
 Configure, build, and test:
 
 ```sh
-cmake -S . -B build -DPIXELART_BUILD_BOTH=ON -DPIXELART_BUILD_TESTS=ON
+cmake -S . -B build -DPIXELART_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
@@ -76,14 +79,13 @@ make test
 
 `make all` configures, builds, and runs the full regular test pass. `make test` builds first, then runs the same tests.
 
-Run either launcher:
+Run the Qt application:
 
 ```sh
-./build/pixelart_sdl2
-./build/pixelart_glfw
+./build/PixelArt98
 ```
 
-On Windows, use the executable path produced under the selected CMake configuration directory, for example `build/Release/pixelart_sdl2.exe` when using a multi-config generator.
+On macOS, run `build/PixelArt98.app`; on Windows multi-config builds, run `build/Release/PixelArt98.exe`.
 
 ## Release Workflow
 
@@ -102,7 +104,7 @@ git push origin v0.1.0
 
 ## Development Notes
 
-The project uses CMake `FetchContent` for pinned third-party dependencies: SDL2, GLFW, Dear ImGui docking, stb, miniz, gifenc, nlohmann/json, GLAD, and nativefiledialog-extended.
+The project uses Qt 6.8 or newer and CMake `FetchContent` for pinned stb, miniz, gifenc, and nlohmann/json dependencies. GLAD is vendored for the existing OpenGL renderers.
 
 The codebase targets C++23 with warnings treated as errors for Clang, GCC, and MSVC. Debug builds on Clang/GCC enable address and undefined-behavior sanitizers.
 

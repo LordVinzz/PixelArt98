@@ -2,8 +2,6 @@
 // Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
 // See LICENSE for details.
 
-#define GLFW_INCLUDE_NONE
-
 #include "core/Document.hpp"
 #include "core/Filters.hpp"
 #include "core/Model.hpp"
@@ -11,8 +9,8 @@
 #include "render/GLCanvasTexture.hpp"
 #include "render/MpsEffectRenderer.hpp"
 #include "render/Renderer3D.hpp"
+#include "qt_offscreen_gl.hpp"
 
-#include <GLFW/glfw3.h>
 #include <glad/gl.h>
 
 #include <algorithm>
@@ -22,10 +20,6 @@
 #include <vector>
 
 using namespace px;
-
-static void* load_glfw_gl_proc(const char* name) {
-    return reinterpret_cast<void*>(glfwGetProcAddress(name));
-}
 
 static bool report_step(const char* name, bool passed) {
     std::cout << (passed ? "[PASS] " : "[FAIL] ") << name << "\n";
@@ -93,33 +87,12 @@ int main() {
     }
 #endif
     std::cout << "OpenGL smoke starting\n";
-    if (!glfwInit()) {
-        std::cout << "OpenGL smoke skipped: GLFW init failed\n";
+    QtOffscreenGlContext context;
+    if (!context.ready()) {
+        std::cout << "OpenGL smoke skipped: Qt offscreen context unavailable\n";
         return 0;
     }
-    std::cout << "[PASS] GLFW init\n";
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#if defined(__APPLE__)
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-#endif
-    GLFWwindow* window = glfwCreateWindow(64, 64, "pixelart smoke", nullptr, nullptr);
-    if (!window) {
-        glfwTerminate();
-        std::cout << "OpenGL smoke skipped: hidden context unavailable\n";
-        return 0;
-    }
-    std::cout << "[PASS] Hidden OpenGL window/context created\n";
-    glfwMakeContextCurrent(window);
-    if (!gladLoadGL(load_glfw_gl_proc)) {
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        std::cout << "OpenGL smoke skipped: GLAD load failed\n";
-        return 0;
-    }
-    std::cout << "[PASS] GLAD loaded\n";
+    std::cout << "[PASS] Qt offscreen OpenGL context and GLAD loaded\n";
     std::cout << "OpenGL vendor: " << reinterpret_cast<const char*>(glGetString(GL_VENDOR)) << "\n";
     std::cout << "OpenGL renderer: " << reinterpret_cast<const char*>(glGetString(GL_RENDERER)) << "\n";
     std::cout << "OpenGL version: " << reinterpret_cast<const char*>(glGetString(GL_VERSION)) << "\n";
@@ -368,10 +341,6 @@ int main() {
         }
         ok = report_step("OpenGL 3D model render with transparent texture", transparent_model_ok) && ok;
     }
-
-    gladLoaderUnloadGL();
-    glfwDestroyWindow(window);
-    glfwTerminate();
 
     if (!ok) {
         std::cerr << "OpenGL smoke failed: one or more required OpenGL checks failed\n";

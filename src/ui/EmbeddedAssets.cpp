@@ -926,82 +926,10 @@ constexpr std::array<unsigned char, 10951> kSplashPng = {
     0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
 };
 
-constexpr std::string_view kDefaultImGuiIni = R"ini([Window][WindowOverViewport_11111111]
-Pos=0,19
-Size=1440,881
-Collapsed=0
-
-[Window][Debug##Default]
-Pos=60,60
-Size=400,400
-Collapsed=0
-
-[Window][Tools]
-Pos=0,19
-Size=382,686
-Collapsed=0
-DockId=0x00000003,0
-
-[Window][Canvas]
-Pos=384,19
-Size=738,686
-Collapsed=0
-DockId=0x00000001,0
-
-[Window][Colors]
-Pos=0,19
-Size=382,686
-Collapsed=0
-DockId=0x00000003,2
-
-[Window][Layers]
-Pos=0,19
-Size=382,686
-Collapsed=0
-DockId=0x00000003,3
-
-[Window][Animation]
-Pos=0,707
-Size=1440,193
-Collapsed=0
-DockId=0x0000000B,0
-
-[Window][Adjustments]
-Pos=0,19
-Size=382,686
-Collapsed=0
-DockId=0x00000003,1
-
-[Window][Model / UV]
-Pos=1124,19
-Size=316,686
-Collapsed=0
-DockId=0x00000002,0
-
-[Window][3D Preview]
-Pos=1124,19
-Size=316,686
-Collapsed=0
-DockId=0x00000002,1
-
-[Docking][Data]
-DockSpace       ID=0x2755EF5B Window=0x1BBC0F80 Pos=0,19 Size=1440,881 Split=Y
-  DockNode      ID=0x00000007 Parent=0x2755EF5B SizeRef=1512,686 Split=X
-    DockNode    ID=0x00000003 Parent=0x00000007 SizeRef=382,898 Selected=0x097358DE
-    DockNode    ID=0x00000004 Parent=0x00000007 SizeRef=1128,898 Split=X
-      DockNode  ID=0x00000001 Parent=0x00000004 SizeRef=810,898 CentralNode=1 Selected=0x5EE3988C
-      DockNode  ID=0x00000002 Parent=0x00000004 SizeRef=316,898 Selected=0xCF993737
-  DockNode      ID=0x0000000B Parent=0x2755EF5B SizeRef=1512,193 Selected=0x5921A509
-)ini";
-
 } // namespace
 
 std::span<const unsigned char> splash_png() noexcept {
     return kSplashPng;
-}
-
-std::string_view default_imgui_ini() noexcept {
-    return kDefaultImGuiIni;
 }
 
 } // namespace px::assets

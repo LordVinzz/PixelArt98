@@ -5,7 +5,11 @@ unset MallocStackLogging
 unset MallocStackLoggingNoCompact
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-app="${PIXELART_APP:-$repo_root/build/pixelart_sdl2}"
+default_app="$repo_root/build/PixelArt98"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  default_app="$repo_root/build/PixelArt98.app/Contents/MacOS/PixelArt98"
+fi
+app="${PIXELART_APP:-$default_app}"
 image="${1:-${PIXELART_PROFILE_IMAGE:-/Users/vincentdominguez/Desktop/Blue_Marble_2002.png}}"
 seconds="${PIXELART_PROFILE_SECONDS:-120}"
 max_addresses="${PIXELART_PROFILE_MAX_ADDRESSES:-12}"

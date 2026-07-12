@@ -2,14 +2,12 @@
 // Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
 // See LICENSE for details.
 
-#define GLFW_INCLUDE_NONE
-
 #include "core/Document.hpp"
 #include "core/Pixel.hpp"
 #include "render/GpuEffectRenderer.hpp"
 #include "render/MpsEffectRenderer.hpp"
+#include "qt_offscreen_gl.hpp"
 
-#include <GLFW/glfw3.h>
 #include <glad/gl.h>
 
 #include <algorithm>
@@ -42,10 +40,6 @@ struct BenchResult {
     std::uint64_t estimated_gpu_memory = 0;
     std::string note;
 };
-
-void* load_glfw_gl_proc(const char* name) {
-    return reinterpret_cast<void*>(glfwGetProcAddress(name));
-}
 
 std::uint64_t max_rss_bytes() {
     rusage usage = {};
@@ -235,28 +229,9 @@ BenchResult benchmark_opengl(const std::vector<Pixel>& input, int width, int hei
     BenchResult result;
     result.name = "OpenGL Heavy GPU Optimization";
 
-    if (!glfwInit()) {
-        result.note = "Skipped: GLFW init failed";
-        return result;
-    }
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#if defined(__APPLE__)
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-#endif
-    GLFWwindow* window = glfwCreateWindow(64, 64, "pixelart gpu benchmark", nullptr, nullptr);
-    if (window == nullptr) {
-        glfwTerminate();
-        result.note = "Skipped: hidden OpenGL context unavailable";
-        return result;
-    }
-    glfwMakeContextCurrent(window);
-    if (!gladLoadGL(load_glfw_gl_proc)) {
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        result.note = "Skipped: GLAD load failed";
+    QtOffscreenGlContext context;
+    if (!context.ready()) {
+        result.note = "Skipped: Qt offscreen OpenGL context unavailable";
         return result;
     }
 
@@ -276,10 +251,6 @@ BenchResult benchmark_opengl(const std::vector<Pixel>& input, int width, int hei
     }
     const auto end = std::chrono::steady_clock::now();
     const std::uint64_t rss_after = max_rss_bytes();
-
-    gladLoaderUnloadGL();
-    glfwDestroyWindow(window);
-    glfwTerminate();
 
     if (ok) {
         result.ran = true;

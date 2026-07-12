@@ -8,6 +8,7 @@
 #include "core/Model.hpp"
 
 #include <functional>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,8 @@ struct ProjectBundle {
 
 bool save_project(const std::string& path, const Document& document, const ModelDocument& model, std::string* error = nullptr);
 bool load_project(const std::string& path, ProjectBundle& out_bundle, std::string* error = nullptr);
+bool save_project(const std::filesystem::path& path, const Document& document, const ModelDocument& model, std::string* error = nullptr);
+bool load_project(const std::filesystem::path& path, ProjectBundle& out_bundle, std::string* error = nullptr);
 
 Document document_from_pixels(int width, int height, std::vector<Pixel> pixels);
 bool decode_png_streaming_rgba(const std::string& path,

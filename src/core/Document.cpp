@@ -885,6 +885,37 @@ bool Document::has_active_cel() const {
     return frame.cels[static_cast<std::size_t>(active_layer)].pixels.size() == expected_size;
 }
 
+bool Document::ensure_active_cel() {
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+    if (frames.empty()) {
+        frames.push_back(Frame{});
+        active_frame = 0;
+    } else {
+        active_frame = std::clamp(active_frame, 0, static_cast<int>(frames.size()) - 1);
+    }
+    if (layers.empty()) {
+        Layer layer;
+        layer.name = "Layer";
+        layers.push_back(std::move(layer));
+        active_layer = 0;
+    } else {
+        active_layer = std::clamp(active_layer, 0, static_cast<int>(layers.size()) - 1);
+    }
+
+    Frame& frame = frames[static_cast<std::size_t>(active_frame)];
+    if (frame.cels.size() < layers.size()) {
+        frame.cels.resize(layers.size());
+    }
+    Cel& active = frame.cels[static_cast<std::size_t>(active_layer)];
+    const std::size_t expected_size = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (active.pixels.size() != expected_size) {
+        active.pixels.assign(expected_size, 0);
+    }
+    return true;
+}
+
 bool Document::in_bounds(int x, int y) const {
     return x >= 0 && y >= 0 && x < width && y < height;
 }
@@ -1312,7 +1343,7 @@ void Document::duplicate_layer(int index) {
 }
 
 bool Document::remove_layer(int index) {
-    if (index < 0 || index >= static_cast<int>(layers.size())) {
+    if (layers.size() <= 1 || index < 0 || index >= static_cast<int>(layers.size())) {
         return false;
     }
     auto before_layers = layers;

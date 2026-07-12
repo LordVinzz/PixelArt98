@@ -6,8 +6,6 @@
 
 #include "core/Pixel.hpp"
 
-#include <imgui.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -69,15 +67,6 @@ public:
                            int y,
                            int width,
                            int height);
-    void draw_visible(ImDrawList* draw_list,
-                      int document_width,
-                      int document_height,
-                      const std::vector<Pixel>& pixels,
-                      ImVec2 canvas_origin,
-                      float zoom,
-                      ImVec2 viewport_min,
-                      ImVec2 viewport_max,
-                      ImU32 tint = IM_COL32_WHITE);
     const DrawStats& last_draw_stats() const { return last_draw_stats_; }
     void set_prepared_pyramid(CpuPyramid&& pyramid);
     void clear_prepared_pyramid();
@@ -132,23 +121,10 @@ private:
     void add_level(int width, int height, int downsample, std::vector<Pixel> pixels, std::uint64_t source_generation);
     int choose_level(float zoom) const;
     std::uint64_t target_generation_for_level(int level_index) const;
-    void enqueue_visible_tiles(int level_index,
-                               ImVec2 canvas_origin,
-                               float zoom,
-                               ImVec2 viewport_min,
-                               ImVec2 viewport_max,
-                               int margin_tiles);
     void enqueue_tile(int level_index, int tile_index);
     bool tile_ready(int level_index, int tile_index) const;
     void process_upload_queue(const std::vector<Pixel>& base_pixels, int document_width);
     bool upload_tile(Level& level, Tile& tile, const std::vector<Pixel>& source, int source_width, std::uint64_t generation);
-    void draw_ready_level(ImDrawList* draw_list,
-                          int level_index,
-                          ImVec2 canvas_origin,
-                          float zoom,
-                          ImVec2 viewport_min,
-                          ImVec2 viewport_max,
-                          ImU32 tint);
 
     static constexpr int kTileSize = 512;
     static constexpr int kPyramidMinDimension = 512;
