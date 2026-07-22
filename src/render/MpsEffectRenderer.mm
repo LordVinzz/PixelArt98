@@ -376,10 +376,11 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
             } else {
                 color = float3(mapped_lum);
             }
+        } else {
+            if (u.params2.y > 0.5) color.r = evaluate_point_curve(color.r, u);
+            if (u.params2.z > 0.5) color.g = evaluate_point_curve(color.g, u);
+            if (u.params2.w > 0.5) color.b = evaluate_point_curve(color.b, u);
         }
-        if (u.params2.y > 0.5) color.r = evaluate_point_curve(color.r, u);
-        if (u.params2.z > 0.5) color.g = evaluate_point_curve(color.g, u);
-        if (u.params2.w > 0.5) color.b = evaluate_point_curve(color.b, u);
         out = float4(clamp(color, 0.0, 1.0), src.a);
     } else if (u.mode == 46) {
         float temperature = clamp(u.params.x, -1.0, 1.0);

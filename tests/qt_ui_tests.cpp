@@ -2,6 +2,7 @@
 // Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
 
 #include "core/Document.hpp"
+#include "ui/GraphEffectWidget.hpp"
 #include "ui/QtCanvasWidget.hpp"
 #include "ui/QtMainWindow.hpp"
 
@@ -12,6 +13,7 @@
 #include <QCheckBox>
 #include <QDialog>
 #include <QDockWidget>
+#include <QGraphicsView>
 #include <QGridLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -20,11 +22,13 @@
 #include <QRadioButton>
 #include <QSettings>
 #include <QSlider>
+#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 #include <QToolButton>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -70,6 +74,12 @@ private slots:
 
     void main_window_builds_all_platform_neutral_controls() {
         QtMainWindow window(cpu_settings());
+        auto* workspace = window.findChild<QTabWidget*>(QStringLiteral("MainWorkspaceTabs"));
+        QVERIFY(workspace != nullptr);
+        QCOMPARE(workspace->count(), 2);
+        QCOMPARE(workspace->tabText(0), QStringLiteral("Canvas"));
+        QCOMPARE(workspace->tabText(1), QStringLiteral("GraphEffect"));
+        QVERIFY(window.findChild<QWidget*>(QStringLiteral("GraphEffectWidget")) != nullptr);
         QVERIFY(window.findChild<QMenu*>(QStringLiteral("AdjustmentsMenu")) != nullptr);
         for (const char* name : {"ToolsDock", "ColorsDock", "LayersDock", "AnimationDock",
                                  "HistoryDock", "ModelDock", "ErrorConsoleDock"}) {
@@ -87,6 +97,65 @@ private slots:
         QVERIFY(window.isVisible());
     }
 
+    void graph_workspace_hides_canvas_only_docks_and_restores_them() {
+        QtMainWindow window(cpu_settings());
+        window.show();
+        QApplication::processEvents();
+
+        auto* workspace = window.findChild<QTabWidget*>(QStringLiteral("MainWorkspaceTabs"));
+        QVERIFY(workspace != nullptr);
+        QCOMPARE(workspace->currentIndex(), 0);
+
+        const std::array<const char*, 5> canvas_only_dock_names = {
+            "ToolsDock", "ColorsDock", "ModelPreviewDock", "TilePreviewDock", "ModelDock"};
+        std::array<QDockWidget*, 5> canvas_only_docks{};
+        for (std::size_t index = 0; index < canvas_only_dock_names.size(); ++index) {
+            canvas_only_docks[index] = window.findChild<QDockWidget*>(
+                QString::fromLatin1(canvas_only_dock_names[index]));
+            QVERIFY2(canvas_only_docks[index] != nullptr, canvas_only_dock_names[index]);
+            canvas_only_docks[index]->show();
+            QVERIFY(!canvas_only_docks[index]->isHidden());
+        }
+        auto* layers = window.findChild<QDockWidget*>(QStringLiteral("LayersDock"));
+        QVERIFY(layers != nullptr);
+        layers->show();
+
+        workspace->setCurrentIndex(1);
+        QApplication::processEvents();
+        for (QDockWidget* dock : canvas_only_docks) QVERIFY(dock->isHidden());
+        QVERIFY(!layers->isHidden());
+
+        workspace->setCurrentIndex(0);
+        QApplication::processEvents();
+        for (QDockWidget* dock : canvas_only_docks) QVERIFY(!dock->isHidden());
+        QVERIFY(!layers->isHidden());
+
+        // A panel already hidden by the user stays hidden after a round trip.
+        canvas_only_docks[3]->hide();
+        workspace->setCurrentIndex(1);
+        QApplication::processEvents();
+        workspace->setCurrentIndex(0);
+        QApplication::processEvents();
+        QVERIFY(canvas_only_docks[3]->isHidden());
+        for (std::size_t index = 0; index < canvas_only_docks.size(); ++index) {
+            if (index != 3U) QVERIFY(!canvas_only_docks[index]->isHidden());
+        }
+
+        // Closing on GraphEffect must persist the canvas layout, not the
+        // temporary all-hidden state.
+        for (QDockWidget* dock : canvas_only_docks) dock->show();
+        workspace->setCurrentIndex(1);
+        QApplication::processEvents();
+        QVERIFY(window.close());
+
+        QtMainWindow restored(cpu_settings());
+        for (const char* name : canvas_only_dock_names) {
+            QDockWidget* dock = restored.findChild<QDockWidget*>(QString::fromLatin1(name));
+            QVERIFY2(dock != nullptr, name);
+            QVERIFY2(!dock->isHidden(), name);
+        }
+    }
+
     void canvas_reports_pointer_and_live_rectangular_selection() {
         QtMainWindow window(cpu_settings());
         Document document = patterned_document();
@@ -95,7 +164,8 @@ private slots:
         window.show();
         QApplication::processEvents();
 
-        auto* canvas = static_cast<QtCanvasWidget*>(window.centralWidget());
+        auto* canvas = dynamic_cast<QtCanvasWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("CanvasWidget")));
         auto* pointer = window.findChild<QLabel*>(QStringLiteral("PointerCoordinatesLabel"));
         auto* selection = window.findChild<QLabel*>(QStringLiteral("SelectionGeometryLabel"));
         QVERIFY(canvas != nullptr);
@@ -208,16 +278,196 @@ private slots:
             QVERIFY(graph != nullptr);
             QCOMPARE(graph->property("curvePointCount").toInt(), 3);
             QCOMPARE(graph->property("curveQuarterOutput").toInt(), 250);
-            auto* red = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesChannel.red"));
+            auto* luminance = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesMode.luminance"));
+            auto* rgb = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesMode.rgb"));
+            auto* red = dialog->findChild<QCheckBox*>(QStringLiteral("CurvesChannel.red"));
+            auto* green = dialog->findChild<QCheckBox*>(QStringLiteral("CurvesChannel.green"));
+            auto* blue = dialog->findChild<QCheckBox*>(QStringLiteral("CurvesChannel.blue"));
+            QVERIFY(luminance != nullptr);
+            QVERIFY(rgb != nullptr);
             QVERIFY(red != nullptr);
-            red->click();
+            QVERIFY(green != nullptr);
+            QVERIFY(blue != nullptr);
+            QVERIFY(luminance->isChecked());
+            QVERIFY(!rgb->isChecked());
+            QVERIFY(!red->isEnabled());
+            QVERIFY(!green->isEnabled());
+            QVERIFY(!blue->isEnabled());
+            rgb->click();
+            QVERIFY(!luminance->isChecked());
+            QVERIFY(rgb->isChecked());
+            QVERIFY(red->isEnabled());
+            QVERIFY(green->isEnabled());
+            QVERIFY(blue->isEnabled());
+            green->click();
+            blue->click();
             QCOMPARE(graph->property("channel").toInt(), 1);
+            QVERIFY(graph->property("redEnabled").toBool());
+            QVERIFY(!graph->property("greenEnabled").toBool());
+            QVERIFY(!graph->property("blueEnabled").toBool());
+            red->click();
+            QVERIFY(red->isChecked());
             QTest::mouseClick(graph, Qt::LeftButton, Qt::NoModifier,
                               QPoint(graph->width() * 3 / 4, graph->height() / 3));
             QCOMPARE(graph->property("curvePointCount").toInt(), 4);
             dialog->findChild<QPushButton*>(QStringLiteral("AdjustmentCancel"))->click();
         });
         action->trigger();
+    }
+
+    void graph_effect_tab_previews_round_trips_and_applies() {
+        QtMainWindow window(cpu_settings());
+        Document document = patterned_document();
+        const std::vector<Pixel> before = document.active_cel().pixels;
+        window.replace_document_for_testing(std::move(document));
+        auto* workspace = window.findChild<QTabWidget*>(QStringLiteral("MainWorkspaceTabs"));
+        auto* graph_widget = dynamic_cast<GraphEffectWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("GraphEffectWidget")));
+        QVERIFY(workspace != nullptr);
+        QVERIFY(graph_widget != nullptr);
+        workspace->setCurrentWidget(graph_widget);
+        window.show();
+        QApplication::processEvents();
+        QTRY_VERIFY(graph_widget->preview_available());
+        QVERIFY(graph_widget->preview_pixels() == before);
+
+        const GraphEffectNodeSpec* brightness_spec = nullptr;
+        for (const GraphEffectNodeSpec& spec : graph_effect_catalog()) {
+            const bool has_brightness = std::any_of(spec.parameters.begin(), spec.parameters.end(),
+                [](const GraphEffectParameterSpec& parameter) { return parameter.id == "brightness"; });
+            if (has_brightness && spec.inputs.size() == 1U && spec.outputs.size() == 1U) {
+                brightness_spec = &spec;
+                break;
+            }
+        }
+        QVERIFY(brightness_spec != nullptr);
+        GraphEffectNodeId source_id = 0;
+        GraphEffectNodeId output_id = 0;
+        for (const GraphEffectNode& node : graph_widget->graph().nodes) {
+            const GraphEffectNodeSpec* spec = find_graph_effect_node_spec(node.type_id);
+            if (spec != nullptr && spec->category == "Input") source_id = node.id;
+            if (spec != nullptr && spec->category == "Output") output_id = node.id;
+        }
+        QVERIFY(source_id != 0);
+        QVERIFY(output_id != 0);
+
+        GraphEffectNodeId effect_id = 0;
+        QString error;
+        QVERIFY(graph_widget->add_node(brightness_spec->type_id, QPointF(0.0, 120.0), &effect_id, &error));
+        const GraphEffectNodeSpec* source_spec = find_graph_effect_node_spec(
+            find_graph_effect_node(graph_widget->graph(), source_id)->type_id);
+        const GraphEffectNodeSpec* output_spec = find_graph_effect_node_spec(
+            find_graph_effect_node(graph_widget->graph(), output_id)->type_id);
+        QVERIFY(source_spec != nullptr);
+        QVERIFY(output_spec != nullptr);
+        QVERIFY(graph_widget->connect_nodes(source_id, source_spec->outputs.front().id,
+                                            effect_id, brightness_spec->inputs.front().id, &error));
+        QVERIFY(graph_widget->connect_nodes(effect_id, brightness_spec->outputs.front().id,
+                                            output_id, output_spec->inputs.front().id, &error));
+        const int edited_revision = graph_widget->property("previewRevision").toInt();
+        QVERIFY(graph_widget->set_node_parameter(effect_id, "brightness", std::int64_t{60}, &error));
+        QTRY_VERIFY(graph_widget->property("previewRevision").toInt() > edited_revision);
+        QVERIFY(graph_widget->preview_available());
+        QVERIFY(graph_widget->preview_pixels() != before);
+
+        QTemporaryDir graph_directory;
+        QVERIFY(graph_directory.isValid());
+        const QString graph_path = graph_directory.filePath(QStringLiteral("live-preview.pxgraph"));
+        const std::size_t saved_node_count = graph_widget->graph().nodes.size();
+        QVERIFY(graph_widget->save_graph(graph_path, &error));
+        graph_widget->reset_graph();
+        QCOMPARE(graph_widget->graph().nodes.size(), std::size_t{2});
+        const int loaded_revision = graph_widget->property("previewRevision").toInt();
+        QVERIFY(graph_widget->load_graph(graph_path, &error));
+        QCOMPARE(graph_widget->graph().nodes.size(), saved_node_count);
+        QTRY_VERIFY(graph_widget->property("previewRevision").toInt() > loaded_revision);
+        QVERIFY(graph_widget->preview_available());
+        const std::vector<Pixel> expected = graph_widget->preview_pixels();
+        QVERIFY(graph_widget->apply_preview());
+        QVERIFY(window.document().active_cel().pixels == expected);
+        QCOMPARE(workspace->currentWidget(), static_cast<QWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("CanvasWidget"))));
+    }
+
+    void graph_effect_source_refresh_is_deferred_until_the_tab_is_visible() {
+        QtMainWindow window(cpu_settings());
+        auto* workspace = window.findChild<QTabWidget*>(QStringLiteral("MainWorkspaceTabs"));
+        auto* canvas = window.findChild<QWidget*>(QStringLiteral("CanvasWidget"));
+        auto* graph_widget = dynamic_cast<GraphEffectWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("GraphEffectWidget")));
+        QVERIFY(workspace != nullptr);
+        QVERIFY(canvas != nullptr);
+        QVERIFY(graph_widget != nullptr);
+
+        Document initial = patterned_document();
+        const Pixel initial_pixel = initial.active_cel().pixels.front();
+        window.replace_document_for_testing(std::move(initial));
+        workspace->setCurrentWidget(graph_widget);
+        window.show();
+        QTRY_VERIFY(graph_widget->preview_available());
+        QTRY_COMPARE(graph_widget->preview_pixels().front(), initial_pixel);
+        QTest::qWait(100);
+        const int initial_revision = graph_widget->property("previewRevision").toInt();
+
+        workspace->setCurrentWidget(canvas);
+        Document replacement = patterned_document();
+        const Pixel replacement_pixel = rgba(7, 31, 197, 255);
+        replacement.active_cel().pixels.front() = replacement_pixel;
+        window.replace_document_for_testing(std::move(replacement));
+        QTest::qWait(100);
+        QCOMPARE(graph_widget->property("previewRevision").toInt(), initial_revision);
+        QCOMPARE(graph_widget->preview_pixels().front(), initial_pixel);
+
+        workspace->setCurrentWidget(graph_widget);
+        QTRY_VERIFY(graph_widget->property("previewRevision").toInt() > initial_revision);
+        QTRY_COMPARE(graph_widget->preview_pixels().front(), replacement_pixel);
+        workspace->setCurrentWidget(canvas);
+    }
+
+    void zoom_shortcuts_only_affect_the_active_workspace_tab() {
+        QtMainWindow window(cpu_settings());
+        auto* workspace = window.findChild<QTabWidget*>(QStringLiteral("MainWorkspaceTabs"));
+        auto* canvas = dynamic_cast<QtCanvasWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("CanvasWidget")));
+        auto* graph_widget = dynamic_cast<GraphEffectWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("GraphEffectWidget")));
+        auto* graph_view = window.findChild<QGraphicsView*>(QStringLiteral("GraphEffectView"));
+        QVERIFY(workspace != nullptr);
+        QVERIFY(canvas != nullptr);
+        QVERIFY(graph_widget != nullptr);
+        QVERIFY(graph_view != nullptr);
+
+        window.show();
+        QApplication::processEvents();
+
+        workspace->setCurrentWidget(canvas);
+        canvas->setFocus();
+        const double initial_canvas_zoom = canvas->zoom();
+        const QTransform initial_graph_transform = graph_view->transform();
+
+        QTest::keySequence(canvas, QKeySequence(QKeySequence::ZoomIn));
+        QTRY_VERIFY(canvas->zoom() > initial_canvas_zoom);
+        QCOMPARE(graph_view->transform(), initial_graph_transform);
+
+        const double zoomed_canvas = canvas->zoom();
+        QTest::keySequence(canvas, QKeySequence(QKeySequence::ZoomOut));
+        QTRY_VERIFY(canvas->zoom() < zoomed_canvas);
+        QCOMPARE(graph_view->transform(), initial_graph_transform);
+
+        workspace->setCurrentWidget(graph_widget);
+        graph_view->setFocus();
+        graph_widget->actual_size();
+        const double canvas_zoom_before_graph_shortcuts = canvas->zoom();
+        const qreal initial_graph_scale = graph_view->transform().m11();
+
+        QTest::keySequence(graph_view, QKeySequence(QKeySequence::ZoomIn));
+        QTRY_VERIFY(graph_view->transform().m11() > initial_graph_scale);
+        QCOMPARE(canvas->zoom(), canvas_zoom_before_graph_shortcuts);
+
+        const qreal zoomed_graph_scale = graph_view->transform().m11();
+        QTest::keySequence(graph_view, QKeySequence(QKeySequence::ZoomOut));
+        QTRY_VERIFY(graph_view->transform().m11() < zoomed_graph_scale);
+        QCOMPARE(canvas->zoom(), canvas_zoom_before_graph_shortcuts);
     }
 
     void configurable_adjustments_preview_on_cpu_and_cancel_cleanly() {

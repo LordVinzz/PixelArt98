@@ -135,7 +135,8 @@ private slots:
         QVERIFY(selection != nullptr);
         QCOMPARE(selection->text(), QStringLiteral("Selection: (2, 3) → (6, 8) · 5 × 6"));
 
-        auto* canvas = static_cast<QtCanvasWidget*>(window.centralWidget());
+        auto* canvas = dynamic_cast<QtCanvasWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("CanvasWidget")));
         auto* pointer = window.findChild<QLabel*>(QStringLiteral("PointerCoordinatesLabel"));
         QVERIFY(canvas != nullptr);
         QVERIFY(pointer != nullptr);
@@ -404,18 +405,31 @@ private slots:
             QCOMPARE(graph->property("curvePointCount").toInt(), 3);
             QCOMPARE(graph->property("curveQuarterOutput").toInt(), 250);
 
-            auto* luma = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesChannel.luma"));
-            auto* red = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesChannel.red"));
-            auto* green = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesChannel.green"));
-            auto* blue = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesChannel.blue"));
-            QVERIFY(luma != nullptr);
+            auto* luminance = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesMode.luminance"));
+            auto* rgb = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesMode.rgb"));
+            auto* red = dialog->findChild<QCheckBox*>(QStringLiteral("CurvesChannel.red"));
+            auto* green = dialog->findChild<QCheckBox*>(QStringLiteral("CurvesChannel.green"));
+            auto* blue = dialog->findChild<QCheckBox*>(QStringLiteral("CurvesChannel.blue"));
+            QVERIFY(luminance != nullptr);
+            QVERIFY(rgb != nullptr);
             QVERIFY(red != nullptr);
             QVERIFY(green != nullptr);
             QVERIFY(blue != nullptr);
-            QVERIFY(luma->isChecked());
-            QTest::mouseClick(red, Qt::LeftButton);
+            QVERIFY(luminance->isChecked());
+            QVERIFY(!red->isEnabled());
+            QVERIFY(!green->isEnabled());
+            QVERIFY(!blue->isEnabled());
+            QTest::mouseClick(rgb, Qt::LeftButton);
+            QVERIFY(!luminance->isChecked());
+            QVERIFY(rgb->isChecked());
+            QVERIFY(red->isEnabled());
+            QVERIFY(green->isEnabled());
+            QVERIFY(blue->isEnabled());
+            QTest::mouseClick(green, Qt::LeftButton);
+            QTest::mouseClick(blue, Qt::LeftButton);
             QVERIFY(red->isChecked());
-            QVERIFY(!luma->isChecked());
+            QVERIFY(!green->isChecked());
+            QVERIFY(!blue->isChecked());
             QCOMPARE(graph->property("channel").toInt(), 1);
 
             const QPoint middle(graph->width() / 2, graph->height() / 2);
@@ -458,12 +472,24 @@ private slots:
             auto* dialog = window.findChild<QDialog*>(QStringLiteral("AdjustmentDialog.curves"));
             QVERIFY(dialog != nullptr);
             auto* graph = dialog->findChild<QWidget*>(QStringLiteral("CurvesGraph"));
-            auto* green = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesChannel.green"));
+            auto* rgb = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesMode.rgb"));
+            auto* red = dialog->findChild<QCheckBox*>(QStringLiteral("CurvesChannel.red"));
+            auto* green = dialog->findChild<QCheckBox*>(QStringLiteral("CurvesChannel.green"));
+            auto* blue = dialog->findChild<QCheckBox*>(QStringLiteral("CurvesChannel.blue"));
             auto* cancel = dialog->findChild<QPushButton*>(QStringLiteral("AdjustmentCancel"));
             QVERIFY(graph != nullptr);
+            QVERIFY(rgb != nullptr);
+            QVERIFY(red != nullptr);
             QVERIFY(green != nullptr);
+            QVERIFY(blue != nullptr);
             QVERIFY(cancel != nullptr);
-            QTest::mouseClick(green, Qt::LeftButton);
+            QTest::mouseClick(rgb, Qt::LeftButton);
+            QTest::mouseClick(red, Qt::LeftButton);
+            QTest::mouseClick(blue, Qt::LeftButton);
+            QVERIFY(green->isChecked());
+            QVERIFY(!red->isChecked());
+            QVERIFY(!blue->isChecked());
+            QCOMPARE(graph->property("channel").toInt(), 2);
             const QPoint middle(graph->width() / 2, graph->height() / 2);
             const QPoint lowered(graph->width() / 2, graph->height() * 3 / 4);
             QTest::mousePress(graph, Qt::LeftButton, Qt::NoModifier, middle);
@@ -571,7 +597,8 @@ private slots:
         QVERIFY(timeline->visualItemRect(timeline->item(0)).width() < stretched_rect.width());
 
         auto* onion = window.findChild<QCheckBox*>(QStringLiteral("animation.onionSkin"));
-        auto* canvas = dynamic_cast<QtCanvasWidget*>(window.centralWidget());
+        auto* canvas = dynamic_cast<QtCanvasWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("CanvasWidget")));
         QVERIFY(onion != nullptr);
         QVERIFY(canvas != nullptr);
         QVERIFY(onion->isChecked());

@@ -631,10 +631,11 @@ vec4 apply_effect(vec2 uv, vec4 src) {
             } else {
                 color = vec3(mapped_lum);
             }
+        } else {
+            if (u_params2.y > 0.5) color.r = evaluate_point_curve(color.r);
+            if (u_params2.z > 0.5) color.g = evaluate_point_curve(color.g);
+            if (u_params2.w > 0.5) color.b = evaluate_point_curve(color.b);
         }
-        if (u_params2.y > 0.5) color.r = evaluate_point_curve(color.r);
-        if (u_params2.z > 0.5) color.g = evaluate_point_curve(color.g);
-        if (u_params2.w > 0.5) color.b = evaluate_point_curve(color.b);
         return vec4(clamp(color, 0.0, 1.0), src.a);
     }
     if (mode == 46) {

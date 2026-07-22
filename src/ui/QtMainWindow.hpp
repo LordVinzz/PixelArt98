@@ -26,6 +26,7 @@ class QListWidget;
 class QNetworkAccessManager;
 class QVBoxLayout;
 class QSpinBox;
+class QTabWidget;
 class QTimer;
 class QToolButton;
 
@@ -34,6 +35,7 @@ namespace px {
 class QtCanvasWidget;
 class QtColorPanel;
 class QtModelPreviewWidget;
+class GraphEffectWidget;
 
 class QtMainWindow final : public QMainWindow {
 public:
@@ -81,7 +83,14 @@ private:
     void rebuild_tool_options();
     void restore_ui_state();
     void save_ui_state();
-    void refresh_all();
+    void refresh_all(bool graph_source_changed = true);
+    void mark_graph_effect_source_changed();
+    void sync_graph_effect_source();
+    void update_workspace_dock_visibility();
+    void zoom_active_workspace(bool zoom_in);
+    void actual_size_active_workspace();
+    void fit_active_workspace();
+    void refresh_zoom_label();
     void refresh_layers();
     void refresh_frames();
     void refresh_model();
@@ -91,6 +100,7 @@ private:
     void set_status(const QString& status);
     void report_error(const QString& operation, const std::string& error);
     [[nodiscard]] bool confirm_discard();
+    [[nodiscard]] bool confirm_graph_discard();
 
     void new_document();
     [[nodiscard]] bool copy_selection_to_clipboard();
@@ -120,7 +130,9 @@ private:
 
     EditorController controller_;
     AppSettings settings_;
+    QTabWidget* workspace_tabs_ = nullptr;
     QtCanvasWidget* canvas_ = nullptr;
+    GraphEffectWidget* graph_effect_widget_ = nullptr;
     QtColorPanel* color_panel_ = nullptr;
     QtModelPreviewWidget* model_preview_ = nullptr;
     QButtonGroup* tool_buttons_ = nullptr;
@@ -148,6 +160,10 @@ private:
     MpsEffectRenderer mps_effect_renderer_;
     std::string last_effect_backend_ = "none";
     std::vector<QDockWidget*> docks_;
+    std::vector<QDockWidget*> canvas_only_docks_;
+    std::vector<bool> canvas_dock_visibility_before_graph_;
+    bool canvas_docks_hidden_for_graph_ = false;
+    bool graph_effect_source_dirty_ = true;
 };
 
 } // namespace px

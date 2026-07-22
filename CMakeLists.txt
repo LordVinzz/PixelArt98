@@ -233,6 +233,7 @@ endfunction()
 add_library(pixelart_core
     src/core/Document.cpp
     src/core/Filters.cpp
+    src/core/GraphEffect.cpp
     src/core/MemoryTrace.cpp
     src/core/Model.cpp
     src/core/Tools.cpp
@@ -319,6 +320,8 @@ set(PIXELART_APP_LOGO ${CMAKE_SOURCE_DIR}/res/logo.png)
 qt_add_executable(PixelArt98
     src/platform/main_qt.cpp
     src/ui/EmbeddedAssets.cpp
+    src/ui/AdjustmentWidgets.cpp
+    src/ui/GraphEffectWidget.cpp
     src/ui/QtCanvasWidget.cpp
     src/ui/QtModelPreviewWidget.cpp
     src/ui/QtMainWindow.cpp)
@@ -424,8 +427,27 @@ if(PIXELART_BUILD_TESTS)
     pixelart_configure_project_target(pixelart_document_coverage_tests)
     add_test(NAME pixelart_document_coverage_tests COMMAND pixelart_document_coverage_tests)
 
+    add_executable(pixelart_graph_effect_tests tests/graph_effect_tests.cpp)
+    target_link_libraries(pixelart_graph_effect_tests PRIVATE pixelart_core)
+    pixelart_configure_project_target(pixelart_graph_effect_tests)
+    add_test(NAME pixelart_graph_effect_tests COMMAND pixelart_graph_effect_tests)
+
+    qt_add_executable(pixelart_graph_effect_ui_tests
+        tests/graph_effect_ui_tests.cpp
+        src/ui/AdjustmentWidgets.cpp
+        src/ui/GraphEffectWidget.cpp)
+    target_link_libraries(pixelart_graph_effect_ui_tests PRIVATE
+        pixelart_core Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Test)
+    pixelart_configure_project_target(pixelart_graph_effect_ui_tests)
+    add_test(NAME pixelart_graph_effect_ui_tests COMMAND pixelart_graph_effect_ui_tests)
+    set_tests_properties(pixelart_graph_effect_ui_tests PROPERTIES
+        TIMEOUT 30
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     qt_add_executable(pixelart_qt_ui_tests
         tests/qt_ui_tests.cpp
+        src/ui/AdjustmentWidgets.cpp
+        src/ui/GraphEffectWidget.cpp
         src/ui/QtCanvasWidget.cpp
         src/ui/QtMainWindow.cpp
         src/ui/QtModelPreviewWidget.cpp)
@@ -472,6 +494,8 @@ if(PIXELART_BUILD_TESTS)
 
         qt_add_executable(pixelart_qt_mps_effects_e2e
             tests/qt_mps_effects_e2e.cpp
+            src/ui/AdjustmentWidgets.cpp
+            src/ui/GraphEffectWidget.cpp
             src/ui/QtCanvasWidget.cpp
             src/ui/QtMainWindow.cpp
             src/ui/QtModelPreviewWidget.cpp)

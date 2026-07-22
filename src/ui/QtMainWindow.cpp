@@ -5,6 +5,8 @@
 
 #include "io/ProjectIO.hpp"
 #include "depth/DepthMapExtractor.hpp"
+#include "ui/AdjustmentWidgets.hpp"
+#include "ui/GraphEffectWidget.hpp"
 #include "ui/QtCanvasWidget.hpp"
 #include "ui/QtModelPreviewWidget.hpp"
 #include "PixelArtVersion.hpp"
@@ -36,7 +38,6 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
-#include <QLineF>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenuBar>
@@ -47,7 +48,6 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPainter>
-#include <QPainterPath>
 #include <QPixmap>
 #include <QPushButton>
 #include <QProgressDialog>
@@ -59,6 +59,7 @@
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QStyledItemDelegate>
+#include <QTabWidget>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
@@ -261,302 +262,6 @@ std::optional<QColor> parse_rgba_hex(QString text) {
                   static_cast<int>((value >> 8) & 0xffU),
                   static_cast<int>(value & 0xffU));
 }
-
-class CurveEditorWidget final : public QWidget {
-public:
-    explicit CurveEditorWidget(std::array<std::array<int, 256>, 4> histograms, QWidget* parent = nullptr)
-        : QWidget(parent), histograms_(std::move(histograms)) {
-        setObjectName(QStringLiteral("CurvesGraph"));
-        setMinimumSize(420, 260);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-        setCursor(Qt::CrossCursor);
-        reset_curve();
-        setProperty("histogramBins", 256);
-        set_channel(0);
-    }
-
-    [[nodiscard]] QSize sizeHint() const override { return {560, 340}; }
-
-    void set_channel(int channel) {
-        channel_ = std::clamp(channel, 0, 3);
-        setProperty("channel", channel_);
-        const auto& histogram = histograms_[static_cast<std::size_t>(channel_)];
-        setProperty("histogramMaximum", std::max(0, *std::max_element(histogram.begin(), histogram.end())));
-        update();
-    }
-
-    void reset_curve() {
-        points_ = {{0.0, 0.0}, {0.5, 0.5}, {1.0, 1.0}};
-        setProperty("curvePointCount", static_cast<int>(points_.size()));
-        setProperty("curveQuarterOutput", qRound(evaluate(0.25) * 1000.0));
-        update();
-        if (changed) changed();
-    }
-
-    [[nodiscard]] CurvesSettings settings() const {
-        CurvesSettings result;
-        result.point_count = static_cast<int>(points_.size());
-        result.x.fill(0.0f);
-        result.y.fill(0.0f);
-        for (std::size_t index = 0; index < points_.size(); ++index) {
-            result.x[index] = static_cast<float>(points_[index].x());
-            result.y[index] = static_cast<float>(points_[index].y());
-        }
-        result.luma = channel_ == 0;
-        result.red = channel_ == 1;
-        result.green = channel_ == 2;
-        result.blue = channel_ == 3;
-        return result;
-    }
-
-    [[nodiscard]] bool is_identity() const {
-        return points_.size() == 3U && points_[0] == QPointF(0.0, 0.0) &&
-               points_[1] == QPointF(0.5, 0.5) && points_[2] == QPointF(1.0, 1.0);
-    }
-
-    std::function<void()> changed;
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.fillRect(rect(), QColor(22, 25, 30));
-        const QRectF graph = graph_rect();
-        painter.fillRect(graph, QColor(12, 14, 18));
-
-        painter.setPen(QPen(QColor(58, 63, 72), 1.0));
-        for (int step = 0; step <= 4; ++step) {
-            const qreal t = static_cast<qreal>(step) / 4.0;
-            painter.drawLine(QPointF(graph.left() + graph.width() * t, graph.top()),
-                             QPointF(graph.left() + graph.width() * t, graph.bottom()));
-            painter.drawLine(QPointF(graph.left(), graph.top() + graph.height() * t),
-                             QPointF(graph.right(), graph.top() + graph.height() * t));
-        }
-
-        const auto& histogram = histograms_[static_cast<std::size_t>(channel_)];
-        const int maximum = std::max(1, *std::max_element(histogram.begin(), histogram.end()));
-        QColor histogram_color = channel_color();
-        histogram_color.setAlpha(105);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(histogram_color);
-        const qreal bin_width = graph.width() / 256.0;
-        for (int bin = 0; bin < 256; ++bin) {
-            const qreal normalized = std::sqrt(static_cast<qreal>(histogram[static_cast<std::size_t>(bin)]) /
-                                               static_cast<qreal>(maximum));
-            const qreal height = normalized * graph.height();
-            painter.drawRect(QRectF(graph.left() + static_cast<qreal>(bin) * bin_width,
-                                    graph.bottom() - height, std::max(1.0, bin_width), height));
-        }
-
-        QPainterPath curve;
-        for (int sample = 0; sample <= 255; ++sample) {
-            const qreal x = static_cast<qreal>(sample) / 255.0;
-            const QPointF mapped = widget_point({x, evaluate(x)});
-            if (sample == 0) curve.moveTo(mapped); else curve.lineTo(mapped);
-        }
-        painter.setBrush(Qt::NoBrush);
-        painter.setPen(QPen(QColor(10, 10, 12, 180), 5.0));
-        painter.drawPath(curve);
-        painter.setPen(QPen(channel_color(), 2.5));
-        painter.drawPath(curve);
-
-        for (std::size_t index = 0; index < points_.size(); ++index) {
-            const QPointF center = widget_point(points_[index]);
-            painter.setPen(QPen(index == static_cast<std::size_t>(selected_point_) ? Qt::white : QColor(18, 20, 24), 2.0));
-            painter.setBrush(index == static_cast<std::size_t>(selected_point_) ? Qt::white : channel_color());
-            painter.drawEllipse(center, 5.5, 5.5);
-        }
-        painter.setPen(QPen(QColor(105, 110, 120), 1.0));
-        painter.setBrush(Qt::NoBrush);
-        painter.drawRect(graph);
-    }
-
-    void mousePressEvent(QMouseEvent* event) override {
-        const int nearest = nearest_point(event->position());
-        if (event->button() == Qt::RightButton) {
-            if (nearest > 0 && nearest + 1 < static_cast<int>(points_.size())) {
-                points_.erase(points_.begin() + nearest);
-                setProperty("curvePointCount", static_cast<int>(points_.size()));
-                notify_changed();
-            }
-            return;
-        }
-        if (event->button() != Qt::LeftButton) return;
-        if (nearest >= 0) {
-            selected_point_ = nearest;
-        } else if (points_.size() < static_cast<std::size_t>(kMaxCurvePoints) && graph_rect().contains(event->position())) {
-            const QPointF normalized = normalized_point(event->position());
-            const auto position = std::lower_bound(points_.begin(), points_.end(), normalized.x(),
-                [](const QPointF& point, qreal x) { return point.x() < x; });
-            selected_point_ = static_cast<int>(std::distance(points_.begin(), position));
-            points_.insert(position, normalized);
-            setProperty("curvePointCount", static_cast<int>(points_.size()));
-            notify_changed();
-        }
-        event->accept();
-    }
-
-    void mouseMoveEvent(QMouseEvent* event) override {
-        if (selected_point_ < 0 || selected_point_ >= static_cast<int>(points_.size())) return;
-        QPointF normalized = normalized_point(event->position());
-        if (selected_point_ == 0) normalized.setX(0.0);
-        else if (selected_point_ + 1 == static_cast<int>(points_.size())) normalized.setX(1.0);
-        else normalized.setX(std::clamp(normalized.x(), points_[static_cast<std::size_t>(selected_point_ - 1)].x() + 0.01,
-                                        points_[static_cast<std::size_t>(selected_point_ + 1)].x() - 0.01));
-        points_[static_cast<std::size_t>(selected_point_)] = normalized;
-        notify_changed();
-        event->accept();
-    }
-
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        if (event->button() == Qt::LeftButton) {
-            selected_point_ = -1;
-            update();
-            event->accept();
-        }
-    }
-
-private:
-    [[nodiscard]] QRectF graph_rect() const { return QRectF(rect()).adjusted(14.0, 14.0, -14.0, -14.0); }
-
-    [[nodiscard]] QColor channel_color() const {
-        if (channel_ == 1) return QColor(245, 82, 82);
-        if (channel_ == 2) return QColor(76, 210, 112);
-        if (channel_ == 3) return QColor(78, 142, 255);
-        return QColor(225, 228, 235);
-    }
-
-    [[nodiscard]] QPointF widget_point(const QPointF& normalized) const {
-        const QRectF graph = graph_rect();
-        return {graph.left() + normalized.x() * graph.width(), graph.bottom() - normalized.y() * graph.height()};
-    }
-
-    [[nodiscard]] QPointF normalized_point(const QPointF& point) const {
-        const QRectF graph = graph_rect();
-        return {std::clamp((point.x() - graph.left()) / graph.width(), 0.0, 1.0),
-                std::clamp((graph.bottom() - point.y()) / graph.height(), 0.0, 1.0)};
-    }
-
-    [[nodiscard]] int nearest_point(const QPointF& position) const {
-        int nearest = -1;
-        qreal distance = 11.0;
-        for (std::size_t index = 0; index < points_.size(); ++index) {
-            const qreal candidate = QLineF(position, widget_point(points_[index])).length();
-            if (candidate < distance) { distance = candidate; nearest = static_cast<int>(index); }
-        }
-        return nearest;
-    }
-
-    [[nodiscard]] qreal evaluate(qreal value) const {
-        if (value <= points_.front().x()) return points_.front().y();
-        for (std::size_t index = 1; index < points_.size(); ++index) {
-            if (value <= points_[index].x() || index + 1 == points_.size()) {
-                const QPointF& left = points_[index - 1];
-                const QPointF& right = points_[index];
-                const qreal width = std::max(0.001, right.x() - left.x());
-                const qreal t = std::clamp((value - left.x()) / width, 0.0, 1.0);
-                const qreal t2 = t * t;
-                const qreal t3 = t2 * t;
-                const qreal left_tangent = tangent_at(index - 1);
-                const qreal right_tangent = tangent_at(index);
-                return std::clamp((2.0 * t3 - 3.0 * t2 + 1.0) * left.y() +
-                                  (t3 - 2.0 * t2 + t) * width * left_tangent +
-                                  (-2.0 * t3 + 3.0 * t2) * right.y() +
-                                  (t3 - t2) * width * right_tangent, 0.0, 1.0);
-            }
-        }
-        return points_.back().y();
-    }
-
-    [[nodiscard]] qreal slope_at(std::size_t segment) const {
-        const QPointF& left = points_[segment];
-        const QPointF& right = points_[segment + 1];
-        return (right.y() - left.y()) / std::max(0.001, right.x() - left.x());
-    }
-
-    [[nodiscard]] qreal tangent_at(std::size_t point) const {
-        if (point == 0) return slope_at(0);
-        if (point + 1 == points_.size()) return slope_at(points_.size() - 2);
-        const qreal left_slope = slope_at(point - 1);
-        const qreal right_slope = slope_at(point);
-        if (left_slope * right_slope <= 0.0) return 0.0;
-        const qreal left_width = points_[point].x() - points_[point - 1].x();
-        const qreal right_width = points_[point + 1].x() - points_[point].x();
-        const qreal first_weight = 2.0 * right_width + left_width;
-        const qreal second_weight = right_width + 2.0 * left_width;
-        return (first_weight + second_weight) /
-               (first_weight / left_slope + second_weight / right_slope);
-    }
-
-    void notify_changed() {
-        setProperty("curveQuarterOutput", qRound(evaluate(0.25) * 1000.0));
-        update();
-        if (changed) changed();
-    }
-
-    std::array<std::array<int, 256>, 4> histograms_{};
-    std::vector<QPointF> points_;
-    int channel_ = 0;
-    int selected_point_ = -1;
-};
-
-class LevelsHistogramWidget final : public QWidget {
-public:
-    explicit LevelsHistogramWidget(QWidget* parent = nullptr) : QWidget(parent) {
-        setMinimumSize(260, 170);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-        setProperty("histogramBins", 256);
-    }
-
-    [[nodiscard]] QSize sizeHint() const override { return {340, 210}; }
-
-    void set_histogram(std::array<int, 256> histogram) {
-        histogram_ = std::move(histogram);
-        const int maximum = std::max(0, *std::max_element(histogram_.begin(), histogram_.end()));
-        qlonglong checksum = 0;
-        for (int bin = 0; bin < 256; ++bin) {
-            checksum += static_cast<qlonglong>(bin + 1) * histogram_[static_cast<std::size_t>(bin)];
-        }
-        setProperty("histogramMaximum", maximum);
-        setProperty("histogramChecksum", checksum);
-        setProperty("histogramRevision", property("histogramRevision").toInt() + 1);
-        update();
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, false);
-        painter.fillRect(rect(), QColor(22, 25, 30));
-        const QRectF graph = QRectF(rect()).adjusted(12.0, 12.0, -12.0, -12.0);
-        painter.fillRect(graph, QColor(12, 14, 18));
-
-        painter.setPen(QPen(QColor(52, 57, 66), 1.0));
-        for (int step = 1; step < 4; ++step) {
-            const qreal x = graph.left() + graph.width() * static_cast<qreal>(step) / 4.0;
-            painter.drawLine(QPointF(x, graph.top()), QPointF(x, graph.bottom()));
-        }
-
-        const int maximum = std::max(1, *std::max_element(histogram_.begin(), histogram_.end()));
-        const qreal bin_width = graph.width() / 256.0;
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(205, 211, 222, 190));
-        for (int bin = 0; bin < 256; ++bin) {
-            const qreal normalized = std::sqrt(static_cast<qreal>(histogram_[static_cast<std::size_t>(bin)]) /
-                                               static_cast<qreal>(maximum));
-            const qreal height = normalized * graph.height();
-            painter.drawRect(QRectF(graph.left() + static_cast<qreal>(bin) * bin_width,
-                                    graph.bottom() - height, std::max(1.0, bin_width), height));
-        }
-
-        painter.setBrush(Qt::NoBrush);
-        painter.setPen(QPen(QColor(105, 110, 120), 1.0));
-        painter.drawRect(graph);
-    }
-
-private:
-    std::array<int, 256> histogram_{};
-};
 
 } // namespace
 
@@ -953,6 +658,7 @@ public:
     }
 
     std::function<void()> changed;
+    std::function<void()> document_changed;
 
 private:
     static QSlider* component_slider(int maximum) {
@@ -1076,6 +782,7 @@ private:
         controller_.document().commit_palette_edit(name, before);
         controller_.mark_changed(name);
         rebuild_palette();
+        if (document_changed) document_changed();
         notify_changed();
     }
 
@@ -1176,7 +883,13 @@ QtMainWindow::QtMainWindow(AppSettings settings, QWidget* parent)
     resize(1440, 900);
 
     network_manager_ = new QNetworkAccessManager(this);
-    canvas_ = new QtCanvasWidget(controller_, this);
+    workspace_tabs_ = new QTabWidget(this);
+    workspace_tabs_->setObjectName(QStringLiteral("MainWorkspaceTabs"));
+    workspace_tabs_->setTabPosition(QTabWidget::North);
+    workspace_tabs_->setDocumentMode(true);
+
+    canvas_ = new QtCanvasWidget(controller_, workspace_tabs_);
+    canvas_->setObjectName(QStringLiteral("CanvasWidget"));
     canvas_->editor_changed = [this] { refresh_all(); };
     canvas_->pointer_coordinates_changed = [this](std::optional<QPoint> coordinates) {
         update_pointer_status(coordinates);
@@ -1186,7 +899,33 @@ QtMainWindow::QtMainWindow(AppSettings settings, QWidget* parent)
         if (preview.has_value()) update_selection_status(*preview);
         else refresh_selection_status();
     };
-    setCentralWidget(canvas_);
+    graph_effect_widget_ = new GraphEffectWidget(workspace_tabs_);
+    graph_effect_widget_->setObjectName(QStringLiteral("GraphEffectWidget"));
+    graph_effect_widget_->apply_requested = [this](const std::vector<Pixel>& pixels, int width, int height) {
+        Document& document = controller_.document();
+        if (!document.has_active_cel() || width != document.width || height != document.height ||
+            pixels.size() != document.active_cel().pixels.size()) {
+            set_status(tr("GraphEffect: preview dimensions no longer match the active document"));
+            return;
+        }
+        if (pixels == document.active_cel().pixels) {
+            set_status(tr("GraphEffect: the graph does not change the active layer"));
+            return;
+        }
+        document.replace_active_pixels(pixels, "Apply GraphEffect");
+        controller_.mark_changed("Apply GraphEffect");
+        workspace_tabs_->setCurrentWidget(canvas_);
+        refresh_all();
+    };
+    graph_effect_widget_->status_changed = [this](const QString& status) { set_status(status); };
+    workspace_tabs_->addTab(canvas_, tr("Canvas"));
+    workspace_tabs_->addTab(graph_effect_widget_, tr("GraphEffect"));
+    connect(workspace_tabs_, &QTabWidget::currentChanged, this, [this](int index) {
+        update_workspace_dock_visibility();
+        if (workspace_tabs_->widget(index) == graph_effect_widget_) sync_graph_effect_source();
+        refresh_zoom_label();
+    });
+    setCentralWidget(workspace_tabs_);
 
     pointer_coordinates_label_ = new QLabel(this);
     pointer_coordinates_label_->setObjectName(QStringLiteral("PointerCoordinatesLabel"));
@@ -1210,7 +949,7 @@ QtMainWindow::QtMainWindow(AppSettings settings, QWidget* parent)
     playback_timer_ = new QTimer(this);
     playback_timer_->setTimerType(Qt::PreciseTimer);
     connect(playback_timer_, &QTimer::timeout, this, [this] { update_playback(); });
-    refresh_all();
+    refresh_all(false);
 }
 
 QtMainWindow::~QtMainWindow() { save_ui_state(); }
@@ -1227,14 +966,14 @@ void QtMainWindow::build_actions() {
     add(tr("Undo"), QKeySequence::Undo, [this] { if (controller_.undo()) refresh_all(); });
     add(tr("Redo"), QKeySequence::Redo, [this] { if (controller_.redo()) refresh_all(); });
     toolbar->addSeparator();
-    add(tr("-"), QKeySequence::ZoomOut, [this] { canvas_->zoom_out(); refresh_all(); });
+    add(tr("-"), {}, [this] { zoom_active_workspace(false); });
     zoom_label_ = new QLabel(toolbar);
     zoom_label_->setMinimumWidth(82);
     zoom_label_->setAlignment(Qt::AlignCenter);
     toolbar->addWidget(zoom_label_);
-    add(tr("+"), QKeySequence::ZoomIn, [this] { canvas_->zoom_in(); refresh_all(); });
-    add(tr("1:1"), QKeySequence(QStringLiteral("Ctrl+1")), [this] { canvas_->actual_size(); refresh_all(); });
-    add(tr("Fit"), QKeySequence(QStringLiteral("Ctrl+0")), [this] { canvas_->fit_to_canvas(); refresh_all(); });
+    add(tr("+"), {}, [this] { zoom_active_workspace(true); });
+    add(tr("1:1"), {}, [this] { actual_size_active_workspace(); });
+    add(tr("Fit"), {}, [this] { fit_active_workspace(); });
 }
 
 void QtMainWindow::build_menus() {
@@ -1410,10 +1149,14 @@ void QtMainWindow::build_menus() {
     QAction* grid = add_action(view, tr("Grid"), {}, [this](bool checked) { canvas_->set_grid_visible(checked); }); grid->setCheckable(true); grid->setChecked(true);
     QAction* checker = add_action(view, tr("Checkerboard"), {}, [this](bool checked) { canvas_->set_checker_visible(checked); }); checker->setCheckable(true); checker->setChecked(true);
     view->addSeparator();
-    add_action(view, tr("Zoom In"), QKeySequence::ZoomIn, [this] { canvas_->zoom_in(); refresh_all(); });
-    add_action(view, tr("Zoom Out"), QKeySequence::ZoomOut, [this] { canvas_->zoom_out(); refresh_all(); });
-    add_action(view, tr("Actual Size"), QKeySequence(QStringLiteral("Ctrl+1")), [this] { canvas_->actual_size(); refresh_all(); });
-    add_action(view, tr("Fit to Canvas"), QKeySequence(QStringLiteral("Ctrl+0")), [this] { canvas_->fit_to_canvas(); refresh_all(); });
+    QAction* zoom_in = add_action(view, tr("Zoom In"), {}, [this] { zoom_active_workspace(true); });
+    zoom_in->setShortcuts(QKeySequence::keyBindings(QKeySequence::ZoomIn));
+    QAction* zoom_out = add_action(view, tr("Zoom Out"), {}, [this] { zoom_active_workspace(false); });
+    zoom_out->setShortcuts(QKeySequence::keyBindings(QKeySequence::ZoomOut));
+    add_action(view, tr("Actual Size"), QKeySequence(QStringLiteral("Ctrl+1")),
+               [this] { actual_size_active_workspace(); });
+    add_action(view, tr("Fit to View"), QKeySequence(QStringLiteral("Ctrl+0")),
+               [this] { fit_active_workspace(); });
 
     QMenu* options = menuBar()->addMenu(tr("&Options"));
     auto option = [this, options](const QString& label, bool& setting) {
@@ -1436,6 +1179,15 @@ void QtMainWindow::build_menus() {
 void QtMainWindow::build_docks() {
     build_tools_dock(); build_colors_dock(); build_layers_dock();
     build_animation_dock(); build_history_dock(); build_model_dock(); build_preview_docks(); build_console_dock();
+    constexpr std::array<const char*, 5> canvas_only_dock_names = {
+        "ToolsDock", "ColorsDock", "ModelPreviewDock", "TilePreviewDock", "ModelDock"};
+    canvas_only_docks_.clear();
+    canvas_only_docks_.reserve(canvas_only_dock_names.size());
+    for (const char* name : canvas_only_dock_names) {
+        if (QDockWidget* dock = findChild<QDockWidget*>(QString::fromLatin1(name)); dock != nullptr) {
+            canvas_only_docks_.push_back(dock);
+        }
+    }
     auto* window = new QMenu(tr("&Window"), this);
     menuBar()->insertMenu(menuBar()->actions().back(), window);
     for (QDockWidget* dock : docks_) window->addAction(dock->toggleViewAction());
@@ -1519,6 +1271,7 @@ void QtMainWindow::build_colors_dock() {
         set_status(tr("Primary %1  Secondary %2")
                        .arg(rgba_hex(qcolor(controller_.tool().primary)), rgba_hex(qcolor(controller_.tool().secondary))));
     };
+    color_panel_->document_changed = [this] { mark_graph_effect_source_changed(); };
     dock->setWidget(color_panel_);
     addDockWidget(Qt::RightDockWidgetArea, dock);
     docks_.push_back(dock);
@@ -1558,7 +1311,7 @@ void QtMainWindow::build_layers_dock() {
     mask_actions_layout->addWidget(selection_mask);
     mask_actions_layout->addWidget(clear_mask);
     mask_actions_layout->addStretch(1);
-    connect(layers_list_, &QListWidget::currentRowChanged, this, [this, opacity, visible, clip, mask](int row) { if (row >= 0 && row < static_cast<int>(controller_.document().layers.size())) { controller_.document().active_layer = row; const Layer& layer = controller_.document().layers[static_cast<std::size_t>(row)]; const QSignalBlocker block_blend_mode(blend_mode_); const QSignalBlocker block_opacity(opacity); const QSignalBlocker block_visible(visible); const QSignalBlocker block_clip(clip); const QSignalBlocker block_mask(mask); blend_mode_->setCurrentIndex(static_cast<int>(layer.blend_mode)); opacity->setValue(static_cast<int>(layer.opacity * 100.0f)); visible->setChecked(layer.visible); clip->setChecked(layer.clip_to_below); mask->setChecked(layer.mask_enabled); controller_.invalidate_display(); canvas_->update(); } });
+    connect(layers_list_, &QListWidget::currentRowChanged, this, [this, opacity, visible, clip, mask](int row) { if (row >= 0 && row < static_cast<int>(controller_.document().layers.size())) { controller_.document().active_layer = row; const Layer& layer = controller_.document().layers[static_cast<std::size_t>(row)]; const QSignalBlocker block_blend_mode(blend_mode_); const QSignalBlocker block_opacity(opacity); const QSignalBlocker block_visible(visible); const QSignalBlocker block_clip(clip); const QSignalBlocker block_mask(mask); blend_mode_->setCurrentIndex(static_cast<int>(layer.blend_mode)); opacity->setValue(static_cast<int>(layer.opacity * 100.0f)); visible->setChecked(layer.visible); clip->setChecked(layer.clip_to_below); mask->setChecked(layer.mask_enabled); controller_.invalidate_display(); canvas_->update(); mark_graph_effect_source_changed(); } });
     connect(layers_list_, &QListWidget::itemChanged, this, [this, visible](QListWidgetItem* item) {
         const int row = layers_list_->row(item);
         if (row < 0 || row >= static_cast<int>(controller_.document().layers.size())) return;
@@ -1725,7 +1478,7 @@ void QtMainWindow::build_animation_dock() {
         setWindowTitle(QStringLiteral("PixelArt98[*]"));
         set_status(QString::fromStdString(controller_.status()));
     };
-    connect(frames_list_, &QListWidget::currentRowChanged, this, [this](int row) { if (row >= 0) { controller_.document().active_frame = row; controller_.invalidate_display(); canvas_->update(); } });
+    connect(frames_list_, &QListWidget::currentRowChanged, this, [this](int row) { if (row >= 0) { controller_.document().active_frame = row; controller_.invalidate_display(); canvas_->update(); mark_graph_effect_source_changed(); } });
     connect(play, &QToolButton::toggled, this, [this](bool checked) { playing_ = checked; if (playing_) playback_timer_->start(std::max(20, controller_.document().frames[static_cast<std::size_t>(controller_.document().active_frame)].duration_ms)); else playback_timer_->stop(); });
     connect(stop, &QToolButton::clicked, this, [this, play] { playing_ = false; playback_timer_->stop(); play->setChecked(false); });
     connect(add, &QToolButton::clicked, this, [this] { controller_.document().add_frame(false); controller_.mark_changed("Add Frame"); refresh_all(); });
@@ -1858,9 +1611,116 @@ void QtMainWindow::rebuild_tool_options() {
     tool_options_layout_->addStretch(1);
 }
 
-void QtMainWindow::refresh_all() {
+void QtMainWindow::mark_graph_effect_source_changed() {
+    graph_effect_source_dirty_ = true;
+    sync_graph_effect_source();
+}
+
+void QtMainWindow::sync_graph_effect_source() {
+    if (!graph_effect_source_dirty_ || graph_effect_widget_ == nullptr || workspace_tabs_ == nullptr ||
+        workspace_tabs_->currentWidget() != graph_effect_widget_) {
+        return;
+    }
+
+    const Document& source = controller_.document();
+    if (!source.has_active_cel()) {
+        graph_effect_widget_->set_source_document(source);
+        graph_effect_source_dirty_ = false;
+        return;
+    }
+
+    Document snapshot;
+    snapshot.width = source.width;
+    snapshot.height = source.height;
+    snapshot.active_layer = 0;
+    snapshot.active_frame = 0;
+    snapshot.palette = source.palette;
+    snapshot.selection = source.selection;
+    snapshot.layers.push_back(Layer{});
+    Frame frame;
+    Cel cel;
+    cel.x = source.active_cel().x;
+    cel.y = source.active_cel().y;
+    cel.pixels = source.active_cel().pixels;
+    frame.cels.push_back(std::move(cel));
+    snapshot.frames.push_back(std::move(frame));
+    graph_effect_widget_->set_source_document(snapshot);
+    graph_effect_source_dirty_ = false;
+}
+
+void QtMainWindow::update_workspace_dock_visibility() {
+    const bool graph_is_active = workspace_tabs_ != nullptr && graph_effect_widget_ != nullptr &&
+                                 workspace_tabs_->currentWidget() == graph_effect_widget_;
+    if (graph_is_active) {
+        if (canvas_docks_hidden_for_graph_) return;
+        canvas_dock_visibility_before_graph_.clear();
+        canvas_dock_visibility_before_graph_.reserve(canvas_only_docks_.size());
+        for (QDockWidget* dock : canvas_only_docks_) {
+            canvas_dock_visibility_before_graph_.push_back(dock != nullptr && !dock->isHidden());
+            if (dock != nullptr) dock->hide();
+        }
+        canvas_docks_hidden_for_graph_ = true;
+        return;
+    }
+
+    if (!canvas_docks_hidden_for_graph_) return;
+    const std::size_t count = std::min(canvas_only_docks_.size(),
+                                       canvas_dock_visibility_before_graph_.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        if (QDockWidget* dock = canvas_only_docks_[index]; dock != nullptr) {
+            dock->setVisible(canvas_dock_visibility_before_graph_[index]);
+        }
+    }
+    canvas_dock_visibility_before_graph_.clear();
+    canvas_docks_hidden_for_graph_ = false;
+}
+
+void QtMainWindow::zoom_active_workspace(bool zoom_in) {
+    if (workspace_tabs_ != nullptr && graph_effect_widget_ != nullptr &&
+        workspace_tabs_->currentWidget() == graph_effect_widget_) {
+        if (zoom_in) graph_effect_widget_->zoom_in();
+        else graph_effect_widget_->zoom_out();
+    } else if (canvas_ != nullptr) {
+        if (zoom_in) canvas_->zoom_in();
+        else canvas_->zoom_out();
+    }
+    refresh_zoom_label();
+}
+
+void QtMainWindow::actual_size_active_workspace() {
+    if (workspace_tabs_ != nullptr && graph_effect_widget_ != nullptr &&
+        workspace_tabs_->currentWidget() == graph_effect_widget_) {
+        graph_effect_widget_->actual_size();
+    } else if (canvas_ != nullptr) {
+        canvas_->actual_size();
+    }
+    refresh_zoom_label();
+}
+
+void QtMainWindow::fit_active_workspace() {
+    if (workspace_tabs_ != nullptr && graph_effect_widget_ != nullptr &&
+        workspace_tabs_->currentWidget() == graph_effect_widget_) {
+        graph_effect_widget_->fit_graph();
+    } else if (canvas_ != nullptr) {
+        canvas_->fit_to_canvas();
+    }
+    refresh_zoom_label();
+}
+
+void QtMainWindow::refresh_zoom_label() {
+    if (zoom_label_ == nullptr) return;
+    const bool graph_is_active = workspace_tabs_ != nullptr && graph_effect_widget_ != nullptr &&
+                                 workspace_tabs_->currentWidget() == graph_effect_widget_;
+    const double current_zoom = graph_is_active ? graph_effect_widget_->zoom()
+                                                : (canvas_ != nullptr ? canvas_->zoom() : 1.0);
+    zoom_label_->setText(tr("%1%").arg(static_cast<int>(std::lround(current_zoom * 100.0))));
+}
+
+void QtMainWindow::refresh_all(bool graph_source_changed) {
+    if (graph_source_changed) graph_effect_source_dirty_ = true;
     controller_.invalidate_display();
     canvas_->update();
+    sync_graph_effect_source();
     if (model_preview_ != nullptr) model_preview_->update();
     refresh_layers(); refresh_frames(); refresh_model(); refresh_selection_status();
     if (color_panel_ != nullptr) color_panel_->refresh_from_tool();
@@ -1871,7 +1731,7 @@ void QtMainWindow::refresh_all() {
         }
     }
     rebuild_tool_options();
-    if (zoom_label_ != nullptr) zoom_label_->setText(tr("%1%").arg(static_cast<int>(canvas_->zoom() * 100.0)));
+    refresh_zoom_label();
     if (tile_preview_label_ != nullptr) {
         const auto& pixels = controller_.display_pixels();
         if (!pixels.empty()) {
@@ -1947,6 +1807,19 @@ void QtMainWindow::set_status(const QString& status) { statusBar()->showMessage(
 void QtMainWindow::report_error(const QString& operation, const std::string& error) { const QString text = tr("%1: %2").arg(operation, QString::fromStdString(error)); if (console_list_ != nullptr) console_list_->addItem(tr("%1. %2").arg(++error_sequence_).arg(text)); QMessageBox::critical(this, operation, text); if (settings_.auto_open_error_console && console_list_ != nullptr) console_list_->parentWidget()->show(); }
 
 bool QtMainWindow::confirm_discard() { if (!controller_.modified()) return true; const auto answer = QMessageBox::warning(this, tr("Unsaved Changes"), tr("Discard changes to the current project?"), QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel); return answer == QMessageBox::Discard; }
+
+bool QtMainWindow::confirm_graph_discard() {
+    if (graph_effect_widget_ == nullptr ||
+        !graph_effect_widget_->property("graphDirty").toBool()) {
+        return true;
+    }
+    const auto answer = QMessageBox::warning(
+        this, tr("Unsaved GraphEffect"),
+        tr("Discard changes to the current GraphEffect graph?"),
+        QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel);
+    return answer == QMessageBox::Discard;
+}
+
 void QtMainWindow::new_document() { if (!confirm_discard()) return; QDialog dialog(this); dialog.setWindowTitle(tr("New Document")); QFormLayout form(&dialog); QSpinBox width; QSpinBox height; width.setRange(1, 32768); height.setRange(1, 32768); width.setValue(64); height.setValue(64); form.addRow(tr("Width"), &width); form.addRow(tr("Height"), &height); QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); form.addRow(&buttons); connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); if (dialog.exec() == QDialog::Accepted) { controller_.new_document(width.value(), height.value()); project_path_.clear(); canvas_->fit_to_canvas(); refresh_all(); } }
 
 bool QtMainWindow::copy_selection_to_clipboard() {
@@ -2201,16 +2074,28 @@ void QtMainWindow::show_curves_dialog(const QString& name) {
     auto* channel_row = new QWidget;
     auto* channel_layout = new QHBoxLayout(channel_row);
     channel_layout->setContentsMargins(0, 0, 0, 0);
-    channel_layout->addWidget(new QLabel(tr("Channel:")));
-    QButtonGroup channel_group(&dialog);
-    const std::array<std::pair<const char*, const char*>, 4> channels = {{{"luma", "Luminosity"}, {"red", "Red"},
-                                                                          {"green", "Green"}, {"blue", "Blue"}}};
-    for (int index = 0; index < static_cast<int>(channels.size()); ++index) {
-        auto* radio = new QRadioButton(tr(channels[static_cast<std::size_t>(index)].second));
-        radio->setObjectName(QStringLiteral("CurvesChannel.") + QString::fromLatin1(channels[static_cast<std::size_t>(index)].first));
-        channel_group.addButton(radio, index);
-        channel_layout->addWidget(radio);
-        if (index == 0) radio->setChecked(true);
+    channel_layout->addWidget(new QLabel(tr("Mode:")));
+    QButtonGroup mode_group(&dialog);
+    auto* luminance_mode = new QRadioButton(tr("Luminance"));
+    auto* rgb_mode = new QRadioButton(tr("RGB"));
+    luminance_mode->setObjectName(QStringLiteral("CurvesMode.luminance"));
+    rgb_mode->setObjectName(QStringLiteral("CurvesMode.rgb"));
+    mode_group.addButton(luminance_mode, 0);
+    mode_group.addButton(rgb_mode, 1);
+    luminance_mode->setChecked(true);
+    channel_layout->addWidget(luminance_mode);
+    channel_layout->addWidget(rgb_mode);
+    channel_layout->addSpacing(12);
+    auto* red_channel = new QCheckBox(tr("R"));
+    auto* green_channel = new QCheckBox(tr("G"));
+    auto* blue_channel = new QCheckBox(tr("B"));
+    red_channel->setObjectName(QStringLiteral("CurvesChannel.red"));
+    green_channel->setObjectName(QStringLiteral("CurvesChannel.green"));
+    blue_channel->setObjectName(QStringLiteral("CurvesChannel.blue"));
+    for (QCheckBox* channel : {red_channel, green_channel, blue_channel}) {
+        channel->setChecked(true);
+        channel->setEnabled(false);
+        channel_layout->addWidget(channel);
     }
     channel_layout->addStretch(1);
     layout.addWidget(channel_row);
@@ -2252,10 +2137,27 @@ void QtMainWindow::show_curves_dialog(const QString& name) {
         canvas_->update();
     };
     editor->changed = preview;
-    connect(&channel_group, &QButtonGroup::idClicked, this, [editor, preview](int channel) {
-        editor->set_channel(channel);
+    const auto update_targets = [editor, preview, luminance_mode, red_channel, green_channel, blue_channel] {
+        const bool luminance = luminance_mode->isChecked();
+        for (QCheckBox* channel : {red_channel, green_channel, blue_channel}) {
+            channel->setEnabled(!luminance);
+        }
+        editor->set_targets(luminance, red_channel->isChecked(), green_channel->isChecked(),
+                            blue_channel->isChecked());
         preview();
-    });
+    };
+    connect(&mode_group, &QButtonGroup::idClicked, this, [update_targets](int) { update_targets(); });
+    for (QCheckBox* channel : {red_channel, green_channel, blue_channel}) {
+        connect(channel, &QCheckBox::toggled, this,
+                [channel, rgb_mode, red_channel, green_channel, blue_channel, update_targets](bool) {
+            if (rgb_mode->isChecked() && !red_channel->isChecked() &&
+                !green_channel->isChecked() && !blue_channel->isChecked()) {
+                const QSignalBlocker blocker(channel);
+                channel->setChecked(true);
+            }
+            update_targets();
+        });
+    }
     connect(reset, &QPushButton::clicked, editor, &CurveEditorWidget::reset_curve);
 
     QDialogButtonBox buttons(QDialogButtonBox::Apply | QDialogButtonBox::Cancel);
@@ -2465,7 +2367,7 @@ void QtMainWindow::replace_document_for_testing(Document document) {
     refresh_all();
 }
 
-void QtMainWindow::update_playback() { if (!playing_ || controller_.document().frames.empty()) return; int next = controller_.document().active_frame + playback_direction_; const int last = static_cast<int>(controller_.document().frames.size()) - 1; if (controller_.document().playback_mode == PlaybackMode::Loop) next = next > last ? 0 : next; else if (next > last || next < 0) { playback_direction_ *= -1; next = std::clamp(controller_.document().active_frame + playback_direction_, 0, last); } controller_.document().active_frame = next; controller_.invalidate_display(); playback_timer_->setInterval(std::max(20, controller_.document().frames[static_cast<std::size_t>(next)].duration_ms)); refresh_frames(); canvas_->update(); }
+void QtMainWindow::update_playback() { if (!playing_ || controller_.document().frames.empty()) return; int next = controller_.document().active_frame + playback_direction_; const int last = static_cast<int>(controller_.document().frames.size()) - 1; if (controller_.document().playback_mode == PlaybackMode::Loop) next = next > last ? 0 : next; else if (next > last || next < 0) { playback_direction_ *= -1; next = std::clamp(controller_.document().active_frame + playback_direction_, 0, last); } controller_.document().active_frame = next; controller_.invalidate_display(); playback_timer_->setInterval(std::max(20, controller_.document().frames[static_cast<std::size_t>(next)].duration_ms)); refresh_frames(); canvas_->update(); mark_graph_effect_source_changed(); }
 
 void QtMainWindow::show_about_dialog() {
     const QString version_text = QString::fromLatin1(version::kVersion);
@@ -2601,12 +2503,29 @@ void QtMainWindow::restore_ui_state() {
 void QtMainWindow::save_ui_state() {
     QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
     state.setValue(QStringLiteral("windowGeometry"), saveGeometry());
+    // GraphEffect temporarily hides canvas-only docks. Persist the canvas
+    // layout instead, otherwise closing from that tab would hide them on the
+    // next launch as well.
+    if (canvas_docks_hidden_for_graph_) {
+        const std::size_t count = std::min(canvas_only_docks_.size(),
+                                           canvas_dock_visibility_before_graph_.size());
+        for (std::size_t index = 0; index < count; ++index) {
+            if (QDockWidget* dock = canvas_only_docks_[index]; dock != nullptr) {
+                dock->setVisible(canvas_dock_visibility_before_graph_[index]);
+            }
+        }
+    }
     state.setValue(QStringLiteral("windowState"), saveState(kWindowStateVersion));
+    if (canvas_docks_hidden_for_graph_) {
+        for (QDockWidget* dock : canvas_only_docks_) {
+            if (dock != nullptr) dock->hide();
+        }
+    }
     std::string error;
     if (!save_app_settings(settings_, &error) && console_list_ != nullptr) {
         console_list_->addItem(QString::fromStdString(error));
     }
 }
-void QtMainWindow::closeEvent(QCloseEvent* event) { if (confirm_discard()) { save_ui_state(); event->accept(); } else event->ignore(); }
+void QtMainWindow::closeEvent(QCloseEvent* event) { if (confirm_discard() && confirm_graph_discard()) { save_ui_state(); event->accept(); } else event->ignore(); }
 
 } // namespace px

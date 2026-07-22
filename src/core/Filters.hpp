@@ -29,9 +29,9 @@ struct CurvesSettings {
     std::array<float, kMaxCurvePoints> y = {0.0f, 1.0f};
     int point_count = 2;
     bool luma = true;
-    bool red = true;
-    bool green = true;
-    bool blue = true;
+    bool red = false;
+    bool green = false;
+    bool blue = false;
 };
 
 struct DepthOfFieldSettings {

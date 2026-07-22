@@ -495,15 +495,16 @@ void apply_curves(Document& doc, const CurvesSettings& settings) {
             } else {
                 red = green = blue = mapped_luma;
             }
-        }
-        if (settings.red) {
-            red = curve_channel(red);
-        }
-        if (settings.green) {
-            green = curve_channel(green);
-        }
-        if (settings.blue) {
-            blue = curve_channel(blue);
+        } else {
+            if (settings.red) {
+                red = curve_channel(red);
+            }
+            if (settings.green) {
+                green = curve_channel(green);
+            }
+            if (settings.blue) {
+                blue = curve_channel(blue);
+            }
         }
         return rgba(to_u8(std::clamp(red, 0.0f, 1.0f) * 255.0f),
                     to_u8(std::clamp(green, 0.0f, 1.0f) * 255.0f),

@@ -210,8 +210,27 @@ static void test_filters() {
     identity_curve_settings.point_count = 3;
     identity_curve_settings.x = {0.0f, 0.5f, 1.0f};
     identity_curve_settings.y = {0.0f, 0.5f, 1.0f};
+    assert(identity_curve_settings.luma);
+    assert(!identity_curve_settings.red);
+    assert(!identity_curve_settings.green);
+    assert(!identity_curve_settings.blue);
     apply_curves(identity_curves, identity_curve_settings);
     assert(identity_curves.active_cel().pixels[0] == identity_source);
+
+    auto luminance_only = Document::create(1, 1);
+    luminance_only.active_cel().pixels[0] = rgba(48, 96, 160, 255);
+    CurvesSettings luminance_settings;
+    luminance_settings.point_count = 3;
+    luminance_settings.x = {0.0f, 0.5f, 1.0f};
+    luminance_settings.y = {0.0f, 0.8f, 1.0f};
+    auto invalid_mixed_mode = luminance_only;
+    CurvesSettings mixed_settings = luminance_settings;
+    mixed_settings.red = true;
+    mixed_settings.green = true;
+    mixed_settings.blue = true;
+    apply_curves(luminance_only, luminance_settings);
+    apply_curves(invalid_mixed_mode, mixed_settings);
+    assert(invalid_mixed_mode.active_cel().pixels == luminance_only.active_cel().pixels);
 
     auto temperature = Document::create(2, 1);
     temperature.active_cel().pixels[checked_pixel_index(temperature, 0, 0)] = rgba(100, 100, 100, 255);
