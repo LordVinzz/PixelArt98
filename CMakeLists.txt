@@ -9,6 +9,105 @@ project(PixelArt98
     DESCRIPTION "A native pixel-art editor inspired by classic Paint workflows"
     LANGUAGES C CXX)
 
+set(PIXELART_VERSION_OVERRIDE "" CACHE STRING
+    "Version embedded in PixelArt98 instead of PROJECT_VERSION")
+set(PIXELART_BUILD_COMMIT "" CACHE STRING
+    "Git commit embedded in PixelArt98 when Git metadata is unavailable")
+
+if(PIXELART_VERSION_OVERRIDE)
+    set(PIXELART_BUILD_VERSION "${PIXELART_VERSION_OVERRIDE}")
+else()
+    set(PIXELART_BUILD_VERSION "${PROJECT_VERSION}")
+endif()
+set(PIXELART_GIT_COMMIT "${PIXELART_BUILD_COMMIT}")
+set(PIXELART_GIT_SHORT_COMMIT "${PIXELART_BUILD_COMMIT}")
+set(PIXELART_GIT_DESCRIPTION "${PIXELART_BUILD_VERSION}")
+set(PIXELART_GIT_COMMIT_TIMESTAMP 0)
+set(PIXELART_IS_RELEASE false)
+find_package(Git QUIET)
+if(Git_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        RESULT_VARIABLE PIXELART_GIT_RESULT
+        OUTPUT_VARIABLE PIXELART_GIT_COMMIT_FROM_REPOSITORY
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(PIXELART_GIT_RESULT EQUAL 0)
+        set(PIXELART_GIT_COMMIT "${PIXELART_GIT_COMMIT_FROM_REPOSITORY}")
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            OUTPUT_VARIABLE PIXELART_GIT_SHORT_COMMIT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" describe --tags --always --dirty
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            OUTPUT_VARIABLE PIXELART_GIT_DESCRIPTION
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" show -s --format=%ct HEAD
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            OUTPUT_VARIABLE PIXELART_GIT_COMMIT_TIMESTAMP
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" describe --tags --exact-match
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            RESULT_VARIABLE PIXELART_GIT_TAG_RESULT
+            OUTPUT_VARIABLE PIXELART_GIT_TAG
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(PIXELART_GIT_TAG_RESULT EQUAL 0 AND
+           PIXELART_GIT_TAG MATCHES "^v?([0-9]+\\.[0-9]+\\.[0-9]+)$")
+            set(PIXELART_BUILD_VERSION "${CMAKE_MATCH_1}")
+            set(PIXELART_IS_RELEASE true)
+        endif()
+
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" rev-parse --absolute-git-dir
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            OUTPUT_VARIABLE PIXELART_GIT_DIRECTORY
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(PIXELART_GIT_DIRECTORY)
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                "${PIXELART_GIT_DIRECTORY}/HEAD")
+            execute_process(
+                COMMAND "${GIT_EXECUTABLE}" symbolic-ref -q HEAD
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                RESULT_VARIABLE PIXELART_GIT_REF_RESULT
+                OUTPUT_VARIABLE PIXELART_GIT_REF
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+            if(PIXELART_GIT_REF_RESULT EQUAL 0)
+                set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                    "${PIXELART_GIT_DIRECTORY}/${PIXELART_GIT_REF}")
+            endif()
+        endif()
+    endif()
+endif()
+
+if(NOT PIXELART_GIT_COMMIT)
+    set(PIXELART_GIT_COMMIT "unknown")
+endif()
+if(NOT PIXELART_GIT_SHORT_COMMIT)
+    set(PIXELART_GIT_SHORT_COMMIT "unknown")
+endif()
+
+configure_file(
+    cmake/PixelArtVersion.hpp.in
+    generated/PixelArtVersion.hpp
+    @ONLY)
+add_library(pixelart_version INTERFACE)
+target_include_directories(pixelart_version INTERFACE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
+message(STATUS
+    "PixelArt98 version: ${PIXELART_BUILD_VERSION} (${PIXELART_GIT_SHORT_COMMIT})")
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 23)
@@ -233,8 +332,10 @@ if(APPLE)
 endif()
 target_link_libraries(PixelArt98 PRIVATE
     pixelart_app
+    pixelart_version
     Qt6::Core
     Qt6::Gui
+    Qt6::Network
     Qt6::Widgets
     Qt6::OpenGLWidgets)
 target_compile_definitions(PixelArt98 PRIVATE GL_SILENCE_DEPRECATION)
@@ -326,7 +427,8 @@ if(PIXELART_BUILD_TESTS)
             BASE "${CMAKE_SOURCE_DIR}/res"
             FILES ${PIXELART_TOOL_ICONS})
         target_link_libraries(pixelart_qt_mps_effects_e2e PRIVATE
-            pixelart_app Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGLWidgets Qt6::Test)
+            pixelart_app pixelart_version Qt6::Core Qt6::Gui Qt6::Network
+            Qt6::Widgets Qt6::OpenGLWidgets Qt6::Test)
         target_compile_definitions(pixelart_qt_mps_effects_e2e PRIVATE GL_SILENCE_DEPRECATION)
         pixelart_configure_project_target(pixelart_qt_mps_effects_e2e)
         add_test(NAME pixelart_qt_mps_effects_e2e COMMAND pixelart_qt_mps_effects_e2e)

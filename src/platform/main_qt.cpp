@@ -4,6 +4,7 @@
 #include "ui/AppSettings.hpp"
 #include "ui/EmbeddedAssets.hpp"
 #include "ui/QtMainWindow.hpp"
+#include "PixelArtVersion.hpp"
 
 #include <QApplication>
 #include <QByteArray>
@@ -26,7 +27,7 @@ int main(int argc, char** argv) {
 
     QApplication application(argc, argv);
     QApplication::setApplicationName(QStringLiteral("PixelArt98"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QString::fromLatin1(px::version::kVersion));
     QApplication::setOrganizationName(QStringLiteral("PixelArt98"));
 
     QString import_path;

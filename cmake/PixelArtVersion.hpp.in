@@ -1,0 +1,21 @@
+// Copyright (c) 2026 DOMINGUEZ Vincent
+// Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
+
+#pragma once
+
+namespace px::version {
+
+inline constexpr char kVersion[] = "@PIXELART_BUILD_VERSION@";
+inline constexpr char kCommit[] = "@PIXELART_GIT_COMMIT@";
+inline constexpr char kShortCommit[] = "@PIXELART_GIT_SHORT_COMMIT@";
+inline constexpr char kDescription[] = "@PIXELART_GIT_DESCRIPTION@";
+inline constexpr long long kCommitTimestamp = @PIXELART_GIT_COMMIT_TIMESTAMP@LL;
+inline constexpr bool kIsRelease = @PIXELART_IS_RELEASE@;
+inline constexpr char kLatestReleaseApiUrl[] =
+    "https://api.github.com/repos/LordVinzz/PixelArt98/releases/latest";
+inline constexpr char kContinuousReleaseApiUrl[] =
+    "https://api.github.com/repos/LordVinzz/PixelArt98/releases/tags/continuous";
+inline constexpr char kReleasesUrl[] =
+    "https://github.com/LordVinzz/PixelArt98/releases";
+
+} // namespace px::version

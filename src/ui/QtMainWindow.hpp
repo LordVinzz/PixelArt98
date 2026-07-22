@@ -20,6 +20,7 @@ class QComboBox;
 class QDockWidget;
 class QLabel;
 class QListWidget;
+class QNetworkAccessManager;
 class QVBoxLayout;
 class QSpinBox;
 class QTimer;
@@ -104,6 +105,8 @@ private:
                               GpuEffectRequestFactory gpu_request = {});
     QAction* add_effect_action(QMenu* menu, AdjustmentSpec effect);
     void update_playback();
+    void show_about_dialog();
+    void check_for_updates();
 
     EditorController controller_;
     AppSettings settings_;
@@ -128,6 +131,8 @@ private:
     int playback_direction_ = 1;
     int error_sequence_ = 0;
     QString project_path_;
+    QNetworkAccessManager* network_manager_ = nullptr;
+    bool update_check_in_progress_ = false;
     MpsEffectRenderer mps_effect_renderer_;
     std::string last_effect_backend_ = "none";
     std::vector<QDockWidget*> docks_;

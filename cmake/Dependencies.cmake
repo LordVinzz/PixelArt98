@@ -4,7 +4,7 @@
 
 include(FetchContent)
 find_package(OpenGL REQUIRED)
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets OpenGLWidgets)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Network Widgets OpenGLWidgets)
 if(PIXELART_BUILD_TESTS)
     find_package(Qt6 6.8 REQUIRED COMPONENTS Test)
 endif()

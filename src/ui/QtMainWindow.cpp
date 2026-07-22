@@ -7,6 +7,7 @@
 #include "depth/DepthMapExtractor.hpp"
 #include "ui/QtCanvasWidget.hpp"
 #include "ui/QtModelPreviewWidget.hpp"
+#include "PixelArtVersion.hpp"
 
 #include <QAction>
 #include <QActionGroup>
@@ -18,6 +19,8 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDesktopServices>
+#include <QDateTime>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QEventLoop>
@@ -27,6 +30,8 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineF>
 #include <QLineEdit>
@@ -34,6 +39,9 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
@@ -52,6 +60,7 @@
 #include <QToolButton>
 #include <QTransform>
 #include <QVBoxLayout>
+#include <QVersionNumber>
 
 #include <algorithm>
 #include <atomic>
@@ -68,6 +77,11 @@ namespace {
 
 QString image_filter() { return QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp *.gif);;All files (*)"); }
 QString project_filter() { return QStringLiteral("PixelArt98 Projects (*.pixart);;All files (*)"); }
+
+QVersionNumber semantic_version(QString version) {
+    if (version.startsWith(QLatin1Char('v'), Qt::CaseInsensitive)) version.remove(0, 1);
+    return QVersionNumber::fromString(version);
+}
 
 QColor qcolor(Pixel pixel) { return QColor(r(pixel), g(pixel), b(pixel), a(pixel)); }
 Pixel pixel_color(const QColor& color) { return rgba(static_cast<std::uint8_t>(color.red()), static_cast<std::uint8_t>(color.green()), static_cast<std::uint8_t>(color.blue()), static_cast<std::uint8_t>(color.alpha())); }
@@ -1001,6 +1015,7 @@ QtMainWindow::QtMainWindow(AppSettings settings, QWidget* parent)
     setDockOptions(QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks | QMainWindow::AllowTabbedDocks | QMainWindow::GroupedDragging);
     resize(1440, 900);
 
+    network_manager_ = new QNetworkAccessManager(this);
     canvas_ = new QtCanvasWidget(controller_, this);
     canvas_->editor_changed = [this] { refresh_all(); };
     setCentralWidget(canvas_);
@@ -1218,6 +1233,11 @@ void QtMainWindow::build_menus() {
 #if defined(__APPLE__)
     option(tr("MPS Backend"), settings_.mps_backend);
 #endif
+
+    QMenu* help = menuBar()->addMenu(tr("&Help"));
+    add_action(help, tr("Check for Updates..."), {}, [this] { check_for_updates(); });
+    help->addSeparator();
+    add_action(help, tr("About PixelArt98"), {}, [this] { show_about_dialog(); });
 }
 
 void QtMainWindow::build_docks() {
@@ -1974,6 +1994,128 @@ void QtMainWindow::replace_document_for_testing(Document document) {
 }
 
 void QtMainWindow::update_playback() { if (!playing_ || controller_.document().frames.empty()) return; int next = controller_.document().active_frame + playback_direction_; const int last = static_cast<int>(controller_.document().frames.size()) - 1; if (controller_.document().playback_mode == PlaybackMode::Loop) next = next > last ? 0 : next; else if (next > last || next < 0) { playback_direction_ *= -1; next = std::clamp(controller_.document().active_frame + playback_direction_, 0, last); } controller_.document().active_frame = next; controller_.invalidate_display(); playback_timer_->setInterval(std::max(20, controller_.document().frames[static_cast<std::size_t>(next)].duration_ms)); refresh_frames(); canvas_->update(); }
+
+void QtMainWindow::show_about_dialog() {
+    const QString version_text = QString::fromLatin1(version::kVersion);
+    const QString revision_text = QString::fromLatin1(version::kShortCommit);
+    const QString build_text = QString::fromLatin1(version::kDescription);
+    QMessageBox::about(
+        this,
+        tr("About PixelArt98"),
+        tr("<h3>PixelArt98</h3>"
+           "<p>Version %1<br>Revision %2<br>Build %3</p>"
+           "<p>A native pixel-art editor inspired by classic Paint workflows.</p>")
+            .arg(version_text.toHtmlEscaped(), revision_text.toHtmlEscaped(), build_text.toHtmlEscaped()));
+}
+
+void QtMainWindow::check_for_updates() {
+    if (update_check_in_progress_) {
+        set_status(tr("An update check is already in progress"));
+        return;
+    }
+
+    update_check_in_progress_ = true;
+    set_status(tr("Checking for updates..."));
+
+    const char* api_url = version::kIsRelease
+        ? version::kLatestReleaseApiUrl
+        : version::kContinuousReleaseApiUrl;
+    QNetworkRequest request{QUrl(QString::fromLatin1(api_url))};
+    request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
+    request.setRawHeader("User-Agent", "PixelArt98-UpdateChecker");
+    request.setTransferTimeout(15'000);
+
+    QNetworkReply* reply = network_manager_->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        update_check_in_progress_ = false;
+        reply->deleteLater();
+
+        if (reply->error() != QNetworkReply::NoError) {
+            set_status(tr("Update check failed"));
+            QMessageBox::warning(
+                this, tr("Check for Updates"),
+                tr("PixelArt98 could not check for updates.\n\n%1").arg(reply->errorString()));
+            return;
+        }
+
+        QJsonParseError parse_error;
+        const QJsonDocument response = QJsonDocument::fromJson(reply->readAll(), &parse_error);
+        if (parse_error.error != QJsonParseError::NoError || !response.isObject()) {
+            set_status(tr("Invalid update response"));
+            QMessageBox::warning(
+                this, tr("Check for Updates"),
+                tr("GitHub returned an invalid update response."));
+            return;
+        }
+
+        const QJsonObject release = response.object();
+        const QString release_tag = release.value(QStringLiteral("tag_name")).toString();
+        QString available_label = release_tag;
+        bool update_available = false;
+        if (version::kIsRelease) {
+            const QVersionNumber current = semantic_version(QString::fromLatin1(version::kVersion));
+            const QVersionNumber available = semantic_version(release_tag);
+            if (release_tag.isEmpty() || current.isNull() || available.isNull()) {
+                set_status(tr("Invalid release version"));
+                QMessageBox::warning(
+                    this, tr("Check for Updates"),
+                    tr("The latest GitHub release does not contain a valid semantic version."));
+                return;
+            }
+            update_available = QVersionNumber::compare(available, current) > 0;
+        } else {
+            const QString remote_commit =
+                release.value(QStringLiteral("target_commitish")).toString();
+            if (remote_commit.isEmpty()) {
+                set_status(tr("Invalid continuous release"));
+                QMessageBox::warning(
+                    this, tr("Check for Updates"),
+                    tr("The continuous GitHub release does not identify its commit."));
+                return;
+            }
+            available_label = tr("continuous build %1").arg(remote_commit.left(12));
+            if (remote_commit.compare(
+                    QString::fromLatin1(version::kCommit), Qt::CaseInsensitive) != 0) {
+                const QDateTime updated_at = QDateTime::fromString(
+                    release.value(QStringLiteral("updated_at")).toString(), Qt::ISODate);
+                update_available = version::kCommitTimestamp == 0 || !updated_at.isValid() ||
+                    updated_at.toSecsSinceEpoch() > version::kCommitTimestamp;
+            }
+        }
+
+        if (!update_available) {
+            set_status(tr("PixelArt98 is up to date"));
+            QMessageBox::information(
+                this, tr("Check for Updates"),
+                tr("This PixelArt98 build is up to date."));
+            return;
+        }
+
+        QUrl release_url(release.value(QStringLiteral("html_url")).toString());
+        if (!release_url.isValid() || release_url.scheme() != QStringLiteral("https")) {
+            release_url = QUrl(QString::fromLatin1(version::kReleasesUrl));
+        }
+
+        set_status(tr("PixelArt98 %1 is available").arg(available_label));
+        QMessageBox message(this);
+        message.setIcon(QMessageBox::Information);
+        message.setWindowTitle(tr("Update Available"));
+        message.setText(tr("PixelArt98 %1 is available.").arg(available_label));
+        message.setInformativeText(
+            tr("You are currently using version %1 (%2).")
+                .arg(QString::fromLatin1(version::kVersion),
+                     QString::fromLatin1(version::kShortCommit)));
+        QPushButton* download = message.addButton(tr("Open Download Page"), QMessageBox::AcceptRole);
+        message.addButton(QMessageBox::Cancel);
+        message.exec();
+        if (message.clickedButton() == download && !QDesktopServices::openUrl(release_url)) {
+            QMessageBox::warning(
+                this, tr("Update Available"),
+                tr("The download page could not be opened."));
+        }
+    });
+}
 
 void QtMainWindow::restore_ui_state() { QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98")); restoreGeometry(state.value(QStringLiteral("windowGeometry")).toByteArray()); restoreState(state.value(QStringLiteral("windowState")).toByteArray()); }
 void QtMainWindow::save_ui_state() { QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98")); state.setValue(QStringLiteral("windowGeometry"), saveGeometry()); state.setValue(QStringLiteral("windowState"), saveState()); std::string error; if (!save_app_settings(settings_, &error) && console_list_ != nullptr) console_list_->addItem(QString::fromStdString(error)); }
