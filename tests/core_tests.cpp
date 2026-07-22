@@ -882,13 +882,14 @@ static void test_app_settings_roundtrip() {
     settings.show_model_uv_panel = true;
     settings.show_3d_preview = true;
     settings.show_canvas_cuboid_uv_overlay = true;
+    settings.ffmpeg_path = "/custom/tools/ffmpeg";
     assert(save_app_settings(settings, settings_path, &error));
 
     const AppSettings loaded = load_app_settings(settings_path, &error);
     assert(!loaded.show_splash_screen);
     assert(!loaded.auto_open_error_console);
     assert(!loaded.heavy_gpu_optimization);
-    assert(!loaded.mps_backend);
+    assert(loaded.mps_backend);
     assert(!loaded.depth_allow_cpu_fallback);
     assert(loaded.depth_tile_size == 768);
     assert(loaded.depth_tile_overlap == 96);
@@ -901,6 +902,7 @@ static void test_app_settings_roundtrip() {
     assert(loaded.show_model_uv_panel);
     assert(loaded.show_3d_preview);
     assert(loaded.show_canvas_cuboid_uv_overlay);
+    assert(loaded.ffmpeg_path == "/custom/tools/ffmpeg");
     const AppSettings defaults = load_app_settings(settings_path.parent_path() / "pixelart98_missing_settings_test.json", &error);
     assert(defaults.heavy_gpu_optimization);
     assert(!defaults.mps_backend);

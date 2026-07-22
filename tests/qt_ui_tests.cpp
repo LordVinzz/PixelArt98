@@ -2,6 +2,7 @@
 // Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
 
 #include "core/Document.hpp"
+#include "io/ProjectIO.hpp"
 #include "ui/GraphEffectWidget.hpp"
 #include "ui/QtCanvasWidget.hpp"
 #include "ui/QtMainWindow.hpp"
@@ -11,13 +12,18 @@
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialog>
 #include <QDockWidget>
+#include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileInfo>
 #include <QGraphicsView>
 #include <QGridLayout>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSettings>
@@ -31,6 +37,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <vector>
 
 using namespace px;
@@ -68,6 +75,8 @@ class QtUiTests final : public QObject {
 private slots:
     void initTestCase() {
         QVERIFY(settings_dir_.isValid());
+        QVERIFY(qputenv("PIXELART98_HOME",
+                        settings_dir_.filePath(QStringLiteral("pixelart98-home")).toUtf8()));
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings_dir_.path());
     }
@@ -90,11 +99,175 @@ private slots:
         QVERIFY(window.findChild<QAction*>(QStringLiteral("EditCut")) != nullptr);
         QVERIFY(window.findChild<QAction*>(QStringLiteral("EditCopy")) != nullptr);
         QVERIFY(window.findChild<QAction*>(QStringLiteral("EditPaste")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("ExportAnimationGif")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("ExportAnimationMp4")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("OptionsFfmpegExecutable")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("OptionsFfmpegAutoDetect")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("OptionsHeavyGpu")) != nullptr);
+#if defined(Q_OS_MACOS)
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("OptionsMpsBackend")) != nullptr);
+#endif
+        QVERIFY(window.property("ffmpegAvailable").isValid());
+        QVERIFY(window.property("ffmpegExecutable").isValid());
         QVERIFY(window.findChild<QAction*>(QStringLiteral("adjustment.levels")) != nullptr);
         QVERIFY(window.findChild<QAction*>(QStringLiteral("effect.gaussian-blur")) != nullptr);
         window.show();
         QApplication::processEvents();
         QVERIFY(window.isVisible());
+    }
+
+    void option_changes_are_saved_immediately_in_pixelart_home() {
+        AppSettings settings = cpu_settings();
+        QtMainWindow window(settings);
+        QAction* heavy_gpu = window.findChild<QAction*>(QStringLiteral("OptionsHeavyGpu"));
+        QVERIFY(heavy_gpu != nullptr);
+        heavy_gpu->setChecked(true);
+#if defined(Q_OS_MACOS)
+        QAction* mps = window.findChild<QAction*>(QStringLiteral("OptionsMpsBackend"));
+        QVERIFY(mps != nullptr);
+        mps->setChecked(true);
+#endif
+        const AppSettings stored = load_app_settings();
+        QVERIFY(stored.heavy_gpu_optimization);
+#if defined(Q_OS_MACOS)
+        QVERIFY(stored.mps_backend);
+#endif
+        const std::filesystem::path expected_root(
+            settings_dir_.filePath(QStringLiteral("pixelart98-home")).toStdString());
+        QVERIFY(default_app_data_directory() == expected_root);
+        QVERIFY(std::filesystem::exists(default_app_settings_path()));
+    }
+
+    void crash_recovery_restores_document_and_undo_history() {
+        const std::filesystem::path recovery_path = default_recovery_session_path();
+        std::filesystem::create_directories(recovery_path.parent_path());
+        Document document = patterned_document();
+        const Pixel before = document.active_cel().pixels[0];
+        std::vector<Pixel> edited = document.active_cel().pixels;
+        edited[0] = rgba(250, 2, 3, 255);
+        document.replace_active_pixels(std::move(edited), "Recovery test edit");
+        std::string error;
+        QVERIFY2(save_recovery_project(recovery_path, document, ModelDocument::create_default(), &error),
+                 error.c_str());
+
+        QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+        state.setValue(QStringLiteral("recovery/cleanShutdown"), false);
+        state.setValue(QStringLiteral("recovery/sourcePath"), QStringLiteral("/tmp/recovered.pixart"));
+        state.sync();
+
+        bool prompt_seen = false;
+        QTimer::singleShot(0, qApp, [&prompt_seen] {
+            auto* message = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            QVERIFY(message != nullptr);
+            QCOMPARE(message->objectName(), QStringLiteral("CrashRecoveryDialog"));
+            prompt_seen = true;
+            QVERIFY(message->defaultButton() != nullptr);
+            message->defaultButton()->click();
+        });
+        {
+            QtMainWindow window(cpu_settings());
+            QVERIFY(prompt_seen);
+            QCOMPARE(window.document().active_cel().pixels[0], rgba(250, 2, 3, 255));
+            QVERIFY(window.document().active_cel().pixels[0] != before);
+            QVERIFY(window.document().undo_history_for_recovery().size() == 1U);
+        }
+        QVERIFY(!std::filesystem::exists(recovery_path));
+        QSettings clean_state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+        QVERIFY(clean_state.value(QStringLiteral("recovery/cleanShutdown")).toBool());
+    }
+
+    void edits_are_atomically_autosaved_for_crash_recovery() {
+        const std::filesystem::path recovery_path = default_recovery_session_path();
+        std::filesystem::remove(recovery_path);
+        {
+            QtMainWindow window(cpu_settings());
+            window.replace_document_for_testing(patterned_document());
+            QAction* select_all = nullptr;
+            for (QAction* action : window.findChildren<QAction*>()) {
+                if (action->text().remove(QLatin1Char('&')) == QStringLiteral("Select All")) {
+                    select_all = action;
+                    break;
+                }
+            }
+            QVERIFY(select_all != nullptr);
+            select_all->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(std::filesystem::exists(recovery_path), 8'000);
+
+            ProjectBundle recovered;
+            std::string error;
+            QVERIFY2(load_recovery_project(recovery_path, recovered, &error), error.c_str());
+            QVERIFY(recovered.document.selection.active);
+            QVERIFY(recovered.document.undo_history_for_recovery().size() == 1U);
+        }
+        QVERIFY(!std::filesystem::exists(recovery_path));
+    }
+
+    void animation_export_dialogs_expose_format_specific_settings() {
+        QTemporaryDir executable_directory;
+        QVERIFY(executable_directory.isValid());
+#if defined(Q_OS_WIN)
+        const QString fake_ffmpeg = executable_directory.filePath(QStringLiteral("ffmpeg.exe"));
+#else
+        const QString fake_ffmpeg = executable_directory.filePath(QStringLiteral("ffmpeg"));
+#endif
+        QFile executable(fake_ffmpeg);
+        QVERIFY(executable.open(QIODevice::WriteOnly));
+        QCOMPARE(executable.write("fake"), 4);
+        executable.close();
+        QVERIFY(executable.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                          QFileDevice::ExeOwner | QFileDevice::ReadGroup |
+                                          QFileDevice::ExeGroup));
+
+        const bool had_override = qEnvironmentVariableIsSet("PIXELART_FFMPEG_PATH");
+        const QByteArray previous_override = qgetenv("PIXELART_FFMPEG_PATH");
+        QVERIFY(qputenv("PIXELART_FFMPEG_PATH", fake_ffmpeg.toUtf8()));
+
+        QtMainWindow window(cpu_settings());
+        QVERIFY(window.property("ffmpegAvailable").toBool());
+        QCOMPARE(window.property("ffmpegExecutable").toString(), QFileInfo(fake_ffmpeg).absoluteFilePath());
+
+        const auto inspect_dialog = [&window](const QString& action_name, bool gif) {
+            QAction* action = window.findChild<QAction*>(action_name);
+            QVERIFY(action != nullptr);
+            bool inspected = false;
+            QTimer::singleShot(0, &window, [&inspected, gif] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                QVERIFY(dialog != nullptr);
+                QCOMPARE(dialog->objectName(), QStringLiteral("AnimationExportDialog"));
+                QVERIFY(dialog->findChild<QSpinBox*>(QStringLiteral("AnimationExportScale")) != nullptr);
+                QVERIFY(dialog->findChild<QCheckBox*>(
+                            QStringLiteral("AnimationExportPreserveTiming")) != nullptr);
+                QVERIFY(dialog->findChild<QDoubleSpinBox*>(QStringLiteral("AnimationExportFps")) != nullptr);
+                if (gif) {
+                    QVERIFY(dialog->findChild<QSpinBox*>(
+                                QStringLiteral("AnimationExportGifColors")) != nullptr);
+                    QVERIFY(dialog->findChild<QComboBox*>(
+                                QStringLiteral("AnimationExportGifDither")) != nullptr);
+                    QVERIFY(dialog->findChild<QComboBox*>(
+                                QStringLiteral("AnimationExportGifLoop")) != nullptr);
+                    QVERIFY(dialog->findChild<QSpinBox*>(
+                                QStringLiteral("AnimationExportBitrate")) == nullptr);
+                } else {
+                    QVERIFY(dialog->findChild<QSpinBox*>(
+                                QStringLiteral("AnimationExportBitrate")) != nullptr);
+                    QVERIFY(dialog->findChild<QComboBox*>(
+                                QStringLiteral("AnimationExportPreset")) != nullptr);
+                    QVERIFY(dialog->findChild<QComboBox*>(
+                                QStringLiteral("AnimationExportBackground")) != nullptr);
+                    QVERIFY(dialog->findChild<QSpinBox*>(
+                                QStringLiteral("AnimationExportGifColors")) == nullptr);
+                }
+                inspected = true;
+                dialog->reject();
+            });
+            action->trigger();
+            QVERIFY(inspected);
+        };
+        inspect_dialog(QStringLiteral("ExportAnimationGif"), true);
+        inspect_dialog(QStringLiteral("ExportAnimationMp4"), false);
+
+        if (had_override) QVERIFY(qputenv("PIXELART_FFMPEG_PATH", previous_override));
+        else QVERIFY(qunsetenv("PIXELART_FFMPEG_PATH"));
     }
 
     void graph_workspace_hides_canvas_only_docks_and_restores_them() {

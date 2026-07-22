@@ -115,6 +115,9 @@ class QtMpsEffectsE2e final : public QObject {
 private slots:
     void initTestCase() {
         QVERIFY(settings_dir_.isValid());
+        QVERIFY(qputenv("PIXELART98_HOME",
+                        settings_dir_.filePath(QStringLiteral("pixelart98-home")).toUtf8()));
+        QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings_dir_.path());
         MpsEffectRenderer renderer;
         if (!renderer.available()) QSKIP("These end-to-end tests require an available Metal/MPS device");

@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
     QApplication::setApplicationVersion(QString::fromLatin1(px::version::kVersion));
     QApplication::setOrganizationName(QStringLiteral("PixelArt98"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/logo.png")));
+    px::configure_qt_settings_storage();
 
     QString import_path;
     const QStringList arguments = application.arguments();

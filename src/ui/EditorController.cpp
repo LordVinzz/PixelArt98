@@ -46,7 +46,10 @@ void EditorController::replace_project(Document document, ModelDocument model) {
     onion_skin_frame_ = -1;
     interaction_before_.clear();
     pasted_selection_before_.clear();
-    pasted_selection_active_ = false;
+    pasted_selection_active_ = document_.floating_selection.active;
+    if (pasted_selection_active_ && document_.has_active_cel()) {
+        pasted_selection_before_ = document_.snapshot_active_cel();
+    }
     display_dirty_ = true;
     onion_skin_dirty_ = true;
     histogram_dirty_ = true;

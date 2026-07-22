@@ -256,6 +256,7 @@ add_library(pixelart_app
     src/render/Renderer3D.cpp
     src/render/MeshUvOverlayRenderer.cpp
     src/ui/AppSettings.cpp
+    src/ui/AnimationExport.cpp
     src/ui/EditorController.cpp)
 if(APPLE)
     target_sources(pixelart_app PRIVATE src/render/MpsEffectRenderer.mm)
@@ -286,7 +287,9 @@ else()
         message(STATUS "OpenCV DNN not found; depth extraction will skip the OpenCV model backend.")
     endif()
 endif()
-target_link_libraries(pixelart_app PUBLIC pixelart_core glad_gl_core_33 PRIVATE stb_headers)
+target_link_libraries(pixelart_app
+    PUBLIC pixelart_core glad_gl_core_33 Qt6::Core Qt6::Gui
+    PRIVATE stb_headers)
 if(NOT APPLE)
     target_link_libraries(pixelart_app PUBLIC OpenGL::GL)
 endif()
@@ -431,6 +434,14 @@ if(PIXELART_BUILD_TESTS)
     target_link_libraries(pixelart_graph_effect_tests PRIVATE pixelart_core)
     pixelart_configure_project_target(pixelart_graph_effect_tests)
     add_test(NAME pixelart_graph_effect_tests COMMAND pixelart_graph_effect_tests)
+
+    qt_add_executable(pixelart_animation_export_tests tests/animation_export_tests.cpp)
+    target_link_libraries(pixelart_animation_export_tests PRIVATE pixelart_app Qt6::Core Qt6::Gui)
+    pixelart_configure_project_target(pixelart_animation_export_tests)
+    add_test(NAME pixelart_animation_export_tests COMMAND pixelart_animation_export_tests)
+    set_tests_properties(pixelart_animation_export_tests PROPERTIES
+        TIMEOUT 30
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     qt_add_executable(pixelart_graph_effect_ui_tests
         tests/graph_effect_ui_tests.cpp

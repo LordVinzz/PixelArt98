@@ -6,6 +6,7 @@
 #include "io/ProjectIO.hpp"
 #include "depth/DepthMapExtractor.hpp"
 #include "ui/AdjustmentWidgets.hpp"
+#include "ui/AnimationExport.hpp"
 #include "ui/GraphEffectWidget.hpp"
 #include "ui/QtCanvasWidget.hpp"
 #include "ui/QtModelPreviewWidget.hpp"
@@ -27,6 +28,9 @@
 #include <QDataStream>
 #include <QDateTime>
 #include <QDockWidget>
+#include <QDoubleSpinBox>
+#include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QEventLoop>
 #include <QFormLayout>
@@ -51,9 +55,11 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QProgressDialog>
+#include <QProcess>
 #include <QRadioButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSaveFile>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
@@ -61,9 +67,12 @@
 #include <QStyledItemDelegate>
 #include <QTabWidget>
 #include <QTimer>
+#include <QTemporaryDir>
+#include <QTemporaryFile>
 #include <QToolBar>
 #include <QToolButton>
 #include <QTransform>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QVersionNumber>
 
@@ -145,6 +154,16 @@ std::optional<ClipboardSelection> decode_clipboard_selection(const QByteArray& b
 
 QString image_filter() { return QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp *.gif);;All files (*)"); }
 QString project_filter() { return QStringLiteral("PixelArt98 Projects (*.pixart);;All files (*)"); }
+
+QString qstring_from_filesystem_path(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    return QString::fromStdWString(path.wstring());
+#else
+    const std::u8string text = path.u8string();
+    return QString::fromUtf8(reinterpret_cast<const char*>(text.data()),
+                             static_cast<qsizetype>(text.size()));
+#endif
+}
 
 QVersionNumber semantic_version(QString version) {
     if (version.startsWith(QLatin1Char('v'), Qt::CaseInsensitive)) version.remove(0, 1);
@@ -882,6 +901,10 @@ QtMainWindow::QtMainWindow(AppSettings settings, QWidget* parent)
     setDockOptions(dock_options);
     resize(1440, 900);
 
+    ffmpeg_executable_ = detect_ffmpeg_executable(QString::fromStdString(settings_.ffmpeg_path));
+    setProperty("ffmpegAvailable", !ffmpeg_executable_.isEmpty());
+    setProperty("ffmpegExecutable", ffmpeg_executable_);
+
     network_manager_ = new QNetworkAccessManager(this);
     workspace_tabs_ = new QTabWidget(this);
     workspace_tabs_->setObjectName(QStringLiteral("MainWorkspaceTabs"));
@@ -949,10 +972,21 @@ QtMainWindow::QtMainWindow(AppSettings settings, QWidget* parent)
     playback_timer_ = new QTimer(this);
     playback_timer_->setTimerType(Qt::PreciseTimer);
     connect(playback_timer_, &QTimer::timeout, this, [this] { update_playback(); });
+    recovery_timer_ = new QTimer(this);
+    recovery_timer_->setSingleShot(true);
+    recovery_timer_->setInterval(1'500);
+    connect(recovery_timer_, &QTimer::timeout, this, [this] { save_recovery_session_now(); });
+    initialize_crash_recovery();
     refresh_all(false);
 }
 
-QtMainWindow::~QtMainWindow() { save_ui_state(); }
+QtMainWindow::~QtMainWindow() {
+    recovery_shutting_down_ = true;
+    if (recovery_timer_ != nullptr) recovery_timer_->stop();
+    finish_recovery_worker();
+    save_ui_state();
+    mark_clean_shutdown();
+}
 
 void QtMainWindow::build_actions() {
     auto* toolbar = addToolBar(tr("Canvas"));
@@ -989,27 +1023,35 @@ void QtMainWindow::build_menus() {
     add_action(file, tr("Load Project..."), QKeySequence::Open, [this] { load_project_from(); });
     file->addSeparator();
     add_action(file, tr("Import Image as Document..."), {}, [this] {
-        const QString path = QFileDialog::getOpenFileName(this, tr("Import Image as Document"), {}, image_filter());
+        const QString path = QFileDialog::getOpenFileName(
+            this, tr("Import Image as Document"), remembered_directory(QStringLiteral("import")),
+            image_filter());
         if (!path.isEmpty()) import_image_document(path);
     });
     add_action(file, tr("Import Image as Layer..."), {}, [this] { import_layer(); });
     add_action(file, tr("Export Current PNG..."), {}, [this] { export_current_png(); });
     add_action(file, tr("Export Spritesheet..."), {}, [this] { export_spritesheet_file(); });
-    add_action(file, tr("Export GIF..."), {}, [this] {
-        const QString path = QFileDialog::getSaveFileName(this, tr("Export GIF"), QStringLiteral("animation.gif"), tr("GIF (*.gif)"));
-        std::string error; if (!path.isEmpty() && !export_gif(path.toStdString(), controller_.document(), &error)) report_error(tr("Export GIF"), error);
+    QAction* export_gif_action = add_action(file, tr("Export Animation as GIF..."), {}, [this] {
+        export_animation(AnimationExportFormat::Gif);
     });
+    export_gif_action->setObjectName(QStringLiteral("ExportAnimationGif"));
+    QAction* export_mp4_action = add_action(file, tr("Export Animation as MP4..."), {}, [this] {
+        export_animation(AnimationExportFormat::Mp4);
+    });
+    export_mp4_action->setObjectName(QStringLiteral("ExportAnimationMp4"));
     add_action(file, tr("Export APNG..."), {}, [this] {
-        const QString path = QFileDialog::getSaveFileName(this, tr("Export APNG"), QStringLiteral("animation.png"), tr("PNG (*.png)"));
-        std::string error; if (!path.isEmpty() && !export_apng(path.toStdString(), controller_.document(), &error)) report_error(tr("Export APNG"), error);
+        const QString path = QFileDialog::getSaveFileName(
+            this, tr("Export APNG"), QDir(remembered_directory(QStringLiteral("export"))).filePath(QStringLiteral("animation.png")),
+            tr("PNG (*.png)"));
+        std::string error; if (!path.isEmpty() && !export_apng(path.toStdString(), controller_.document(), &error)) report_error(tr("Export APNG"), error); else if (!path.isEmpty()) remember_file_directory(QStringLiteral("export"), path);
     });
     add_action(file, tr("Import Aseprite..."), {}, [this] {
-        const QString path = QFileDialog::getOpenFileName(this, tr("Import Aseprite"), {}, tr("Aseprite (*.ase *.aseprite)"));
-        Document document; std::string error; if (!path.isEmpty() && import_aseprite(path.toStdString(), document, &error)) { controller_.replace_document(std::move(document)); refresh_all(); } else if (!path.isEmpty()) report_error(tr("Import Aseprite"), error);
+        const QString path = QFileDialog::getOpenFileName(this, tr("Import Aseprite"), remembered_directory(QStringLiteral("import")), tr("Aseprite (*.ase *.aseprite)"));
+        Document document; std::string error; if (!path.isEmpty() && import_aseprite(path.toStdString(), document, &error)) { controller_.replace_document(std::move(document)); project_path_.clear(); has_recoverable_session_ = true; remember_file_directory(QStringLiteral("import"), path); refresh_all(); } else if (!path.isEmpty()) report_error(tr("Import Aseprite"), error);
     });
     add_action(file, tr("Export Aseprite..."), {}, [this] {
-        const QString path = QFileDialog::getSaveFileName(this, tr("Export Aseprite"), QStringLiteral("sprite.aseprite"), tr("Aseprite (*.aseprite)"));
-        std::string error; if (!path.isEmpty() && !export_aseprite(path.toStdString(), controller_.document(), &error)) report_error(tr("Export Aseprite"), error);
+        const QString path = QFileDialog::getSaveFileName(this, tr("Export Aseprite"), QDir(remembered_directory(QStringLiteral("export"))).filePath(QStringLiteral("sprite.aseprite")), tr("Aseprite (*.aseprite)"));
+        std::string error; if (!path.isEmpty() && !export_aseprite(path.toStdString(), controller_.document(), &error)) report_error(tr("Export Aseprite"), error); else if (!path.isEmpty()) remember_file_directory(QStringLiteral("export"), path);
     });
     file->addSeparator();
     for (const QString& kind : {QStringLiteral("Model JSON"), QStringLiteral("STL Model"), QStringLiteral("Minecraft Model")}) add_action(file, tr("Import %1...").arg(kind), {}, [this, kind] { import_model(kind); });
@@ -1161,14 +1203,37 @@ void QtMainWindow::build_menus() {
     QMenu* options = menuBar()->addMenu(tr("&Options"));
     auto option = [this, options](const QString& label, bool& setting) {
         QAction* action = options->addAction(label); action->setCheckable(true); action->setChecked(setting);
-        connect(action, &QAction::toggled, this, [&setting](bool checked) { setting = checked; });
+        connect(action, &QAction::toggled, this, [this, &setting](bool checked) {
+            setting = checked;
+            persist_app_settings();
+        });
+        return action;
     };
-    option(tr("Show Splash Screen"), settings_.show_splash_screen);
-    option(tr("Auto-open Error Console"), settings_.auto_open_error_console);
-    option(tr("Heavy GPU Optimization"), settings_.heavy_gpu_optimization);
+    option(tr("Show Splash Screen"), settings_.show_splash_screen)
+        ->setObjectName(QStringLiteral("OptionsShowSplash"));
+    option(tr("Auto-open Error Console"), settings_.auto_open_error_console)
+        ->setObjectName(QStringLiteral("OptionsAutoOpenErrorConsole"));
+    option(tr("Heavy GPU Optimization"), settings_.heavy_gpu_optimization)
+        ->setObjectName(QStringLiteral("OptionsHeavyGpu"));
 #if defined(__APPLE__)
-    option(tr("MPS Backend"), settings_.mps_backend);
+    option(tr("MPS Backend"), settings_.mps_backend)
+        ->setObjectName(QStringLiteral("OptionsMpsBackend"));
 #endif
+    options->addSeparator();
+    QAction* ffmpeg_path = add_action(options, tr("FFmpeg Executable..."), {},
+                                      [this] { select_ffmpeg_executable(); });
+    ffmpeg_path->setObjectName(QStringLiteral("OptionsFfmpegExecutable"));
+    QAction* ffmpeg_auto = add_action(options, tr("Use Auto-detected FFmpeg"), {}, [this] {
+        settings_.ffmpeg_path.clear();
+        ffmpeg_executable_ = detect_ffmpeg_executable();
+        setProperty("ffmpegAvailable", !ffmpeg_executable_.isEmpty());
+        setProperty("ffmpegExecutable", ffmpeg_executable_);
+        persist_app_settings();
+        set_status(ffmpeg_executable_.isEmpty()
+                       ? tr("FFmpeg was not detected")
+                       : tr("Auto-detected FFmpeg: %1").arg(ffmpeg_executable_));
+    });
+    ffmpeg_auto->setObjectName(QStringLiteral("OptionsFfmpegAutoDetect"));
 
     QMenu* help = menuBar()->addMenu(tr("&Help"));
     add_action(help, tr("Check for Updates..."), {}, [this] { check_for_updates(); });
@@ -1747,6 +1812,8 @@ void QtMainWindow::refresh_all(bool graph_source_changed) {
     setWindowModified(controller_.modified());
     setWindowTitle(QStringLiteral("PixelArt98[*]"));
     set_status(QString::fromStdString(controller_.status()));
+    if (controller_.modified()) has_recoverable_session_ = true;
+    if (has_recoverable_session_) schedule_recovery_save();
 }
 
 void QtMainWindow::refresh_layers() { if (layers_list_ == nullptr) return; const QSignalBlocker blocker(layers_list_); layers_list_->clear(); for (const Layer& layer : controller_.document().layers) { auto* item = new QListWidgetItem(QString::fromStdString(layer.name)); item->setCheckState(layer.visible ? Qt::Checked : Qt::Unchecked); layers_list_->addItem(item); } layers_list_->setCurrentRow(controller_.document().active_layer); }
@@ -1820,7 +1887,7 @@ bool QtMainWindow::confirm_graph_discard() {
     return answer == QMessageBox::Discard;
 }
 
-void QtMainWindow::new_document() { if (!confirm_discard()) return; QDialog dialog(this); dialog.setWindowTitle(tr("New Document")); QFormLayout form(&dialog); QSpinBox width; QSpinBox height; width.setRange(1, 32768); height.setRange(1, 32768); width.setValue(64); height.setValue(64); form.addRow(tr("Width"), &width); form.addRow(tr("Height"), &height); QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); form.addRow(&buttons); connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); if (dialog.exec() == QDialog::Accepted) { controller_.new_document(width.value(), height.value()); project_path_.clear(); canvas_->fit_to_canvas(); refresh_all(); } }
+void QtMainWindow::new_document() { if (!confirm_discard()) return; QDialog dialog(this); dialog.setWindowTitle(tr("New Document")); QFormLayout form(&dialog); QSpinBox width; QSpinBox height; width.setRange(1, 32768); height.setRange(1, 32768); width.setValue(64); height.setValue(64); form.addRow(tr("Width"), &width); form.addRow(tr("Height"), &height); QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); form.addRow(&buttons); connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); if (dialog.exec() == QDialog::Accepted) { controller_.new_document(width.value(), height.value()); project_path_.clear(); has_recoverable_session_ = true; canvas_->fit_to_canvas(); refresh_all(); } }
 
 bool QtMainWindow::copy_selection_to_clipboard() {
     const Document& document = controller_.document();
@@ -1945,12 +2012,401 @@ void QtMainWindow::paste_from_clipboard() {
     set_status(tr("Pasted selection at (%1, %2)").arg(source.x).arg(source.y));
 }
 
-void QtMainWindow::save_project_as() { QString path = project_path_; if (path.isEmpty()) path = QFileDialog::getSaveFileName(this, tr("Save Project"), QStringLiteral("untitled.pixart"), project_filter()); if (path.isEmpty()) return; std::string error; if (!save_project(filesystem_path(path), controller_.document(), controller_.model(), &error)) report_error(tr("Save Project"), error); else { project_path_ = path; controller_.set_modified(false); set_status(tr("Saved %1").arg(path)); refresh_all(); } }
-void QtMainWindow::load_project_from() { if (!confirm_discard()) return; const QString path = QFileDialog::getOpenFileName(this, tr("Load Project"), {}, project_filter()); if (path.isEmpty()) return; ProjectBundle bundle; std::string error; if (!load_project(filesystem_path(path), bundle, &error)) report_error(tr("Load Project"), error); else { controller_.replace_project(std::move(bundle.document), std::move(bundle.model)); project_path_ = path; canvas_->fit_to_canvas(); refresh_all(); } }
-void QtMainWindow::import_image_document(const QString& path) { if (!confirm_discard()) return; Document document; std::string error; if (!import_image(path.toStdString(), document, &error)) report_error(tr("Import Image"), error); else { controller_.replace_document(std::move(document)); project_path_.clear(); canvas_->fit_to_canvas(); refresh_all(); } }
-void QtMainWindow::import_layer() { const QString path = QFileDialog::getOpenFileName(this, tr("Import Image as Layer"), {}, image_filter()); if (path.isEmpty()) return; std::string error; if (!import_image_as_layer(path.toStdString(), controller_.document(), QFileInfo(path).baseName().toStdString(), &error)) report_error(tr("Import Layer"), error); else { controller_.mark_changed("Import Layer"); refresh_all(); } }
-void QtMainWindow::export_current_png() { const QString path = QFileDialog::getSaveFileName(this, tr("Export PNG"), QStringLiteral("export.png"), tr("PNG (*.png)")); std::string error; if (!path.isEmpty() && !export_png(path.toStdString(), controller_.document(), controller_.document().active_frame, &error)) report_error(tr("Export PNG"), error); }
-void QtMainWindow::export_spritesheet_file() { const QString path = QFileDialog::getSaveFileName(this, tr("Export Spritesheet"), QStringLiteral("spritesheet.png"), tr("PNG (*.png)")); if (path.isEmpty()) return; const QString json = QFileInfo(path).absolutePath() + QLatin1Char('/') + QFileInfo(path).completeBaseName() + QStringLiteral(".json"); std::string error; if (!export_spritesheet(path.toStdString(), json.toStdString(), controller_.document(), &error)) report_error(tr("Export Spritesheet"), error); }
+void QtMainWindow::save_project_as() {
+    QString path = project_path_;
+    if (path.isEmpty()) {
+        path = QFileDialog::getSaveFileName(
+            this, tr("Save Project"),
+            QDir(remembered_directory(QStringLiteral("save"))).filePath(QStringLiteral("untitled.pixart")),
+            project_filter());
+    }
+    if (path.isEmpty()) return;
+    std::string error;
+    if (!save_project(filesystem_path(path), controller_.document(), controller_.model(), &error)) {
+        report_error(tr("Save Project"), error);
+    } else {
+        project_path_ = path;
+        has_recoverable_session_ = true;
+        remember_file_directory(QStringLiteral("save"), path);
+        controller_.set_modified(false);
+        set_status(tr("Saved %1").arg(path));
+        refresh_all();
+    }
+}
+
+void QtMainWindow::load_project_from() {
+    if (!confirm_discard()) return;
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Load Project"), remembered_directory(QStringLiteral("open")), project_filter());
+    if (path.isEmpty()) return;
+    ProjectBundle bundle;
+    std::string error;
+    if (!load_project(filesystem_path(path), bundle, &error)) {
+        report_error(tr("Load Project"), error);
+    } else {
+        controller_.replace_project(std::move(bundle.document), std::move(bundle.model));
+        project_path_ = path;
+        has_recoverable_session_ = true;
+        remember_file_directory(QStringLiteral("open"), path);
+        canvas_->fit_to_canvas();
+        refresh_all();
+    }
+}
+
+void QtMainWindow::import_image_document(const QString& path) {
+    if (!confirm_discard()) return;
+    Document document;
+    std::string error;
+    if (!import_image(path.toStdString(), document, &error)) {
+        report_error(tr("Import Image"), error);
+    } else {
+        controller_.replace_document(std::move(document));
+        project_path_.clear();
+        has_recoverable_session_ = true;
+        remember_file_directory(QStringLiteral("import"), path);
+        canvas_->fit_to_canvas();
+        refresh_all();
+    }
+}
+
+void QtMainWindow::import_layer() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Import Image as Layer"), remembered_directory(QStringLiteral("import")),
+        image_filter());
+    if (path.isEmpty()) return;
+    std::string error;
+    if (!import_image_as_layer(path.toStdString(), controller_.document(),
+                               QFileInfo(path).baseName().toStdString(), &error)) {
+        report_error(tr("Import Layer"), error);
+    } else {
+        has_recoverable_session_ = true;
+        remember_file_directory(QStringLiteral("import"), path);
+        controller_.mark_changed("Import Layer");
+        refresh_all();
+    }
+}
+
+void QtMainWindow::export_current_png() {
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export PNG"),
+        QDir(remembered_directory(QStringLiteral("export"))).filePath(QStringLiteral("export.png")),
+        tr("PNG (*.png)"));
+    std::string error;
+    if (!path.isEmpty() && !export_png(path.toStdString(), controller_.document(),
+                                       controller_.document().active_frame, &error)) {
+        report_error(tr("Export PNG"), error);
+    } else if (!path.isEmpty()) {
+        remember_file_directory(QStringLiteral("export"), path);
+    }
+}
+
+void QtMainWindow::export_spritesheet_file() {
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export Spritesheet"),
+        QDir(remembered_directory(QStringLiteral("export"))).filePath(QStringLiteral("spritesheet.png")),
+        tr("PNG (*.png)"));
+    if (path.isEmpty()) return;
+    const QString json = QFileInfo(path).absolutePath() + QLatin1Char('/') +
+                         QFileInfo(path).completeBaseName() + QStringLiteral(".json");
+    std::string error;
+    if (!export_spritesheet(path.toStdString(), json.toStdString(), controller_.document(), &error)) {
+        report_error(tr("Export Spritesheet"), error);
+    } else {
+        remember_file_directory(QStringLiteral("export"), path);
+    }
+}
+
+bool QtMainWindow::ensure_ffmpeg_available() {
+    ffmpeg_executable_ = detect_ffmpeg_executable(QString::fromStdString(settings_.ffmpeg_path));
+    setProperty("ffmpegAvailable", !ffmpeg_executable_.isEmpty());
+    setProperty("ffmpegExecutable", ffmpeg_executable_);
+    if (!ffmpeg_executable_.isEmpty()) return true;
+
+    const QString install_command = ffmpeg_install_command();
+    while (ffmpeg_executable_.isEmpty()) {
+        QMessageBox message(this);
+        message.setObjectName(QStringLiteral("FfmpegMissingDialog"));
+        message.setIcon(QMessageBox::Information);
+        message.setWindowTitle(tr("FFmpeg is required"));
+        message.setText(tr("FFmpeg was not found on this computer."));
+        message.setInformativeText(
+            tr("PixelArt98 uses FFmpeg to encode GIF and MP4 animations. Install it, then choose "
+               "\"Detect again\" to continue the export."));
+        QPushButton* retry = message.addButton(tr("Detect again"), QMessageBox::AcceptRole);
+        QPushButton* copy_command = nullptr;
+        if (!install_command.isEmpty()) {
+            copy_command = message.addButton(tr("Copy install command"), QMessageBox::ActionRole);
+            message.setDetailedText(install_command);
+        }
+        QPushButton* download = message.addButton(tr("Open FFmpeg download page"), QMessageBox::ActionRole);
+        QPushButton* locate = message.addButton(tr("Locate FFmpeg..."), QMessageBox::ActionRole);
+        message.addButton(QMessageBox::Cancel);
+        message.exec();
+
+        if (copy_command != nullptr && message.clickedButton() == copy_command) {
+            QApplication::clipboard()->setText(install_command);
+            set_status(tr("FFmpeg install command copied to the clipboard"));
+            continue;
+        }
+        if (message.clickedButton() == download) {
+            if (!QDesktopServices::openUrl(QUrl(QStringLiteral("https://ffmpeg.org/download.html")))) {
+                report_error(tr("Open FFmpeg download page"),
+                             "Could not open the FFmpeg download page.");
+            }
+            continue;
+        }
+        if (message.clickedButton() == locate) {
+            select_ffmpeg_executable();
+            if (!ffmpeg_executable_.isEmpty()) return true;
+            continue;
+        }
+        if (message.clickedButton() != retry) return false;
+
+        ffmpeg_executable_ = detect_ffmpeg_executable(QString::fromStdString(settings_.ffmpeg_path));
+        setProperty("ffmpegAvailable", !ffmpeg_executable_.isEmpty());
+        setProperty("ffmpegExecutable", ffmpeg_executable_);
+    }
+    set_status(tr("FFmpeg detected: %1").arg(ffmpeg_executable_));
+    return true;
+}
+
+bool QtMainWindow::run_ffmpeg(const QStringList& arguments, const QString& operation, QString* error) {
+    QProcess process;
+    process.setProgram(ffmpeg_executable_);
+    process.setArguments(arguments);
+    process.setProcessChannelMode(QProcess::MergedChannels);
+
+    QProgressDialog progress(tr("FFmpeg is encoding the animation..."), tr("Cancel"), 0, 0, this);
+    progress.setObjectName(QStringLiteral("AnimationExportProgress"));
+    progress.setWindowTitle(operation);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.show();
+
+    process.start();
+    if (!process.waitForStarted(5'000)) {
+        progress.close();
+        if (error != nullptr) {
+            *error = tr("Could not start FFmpeg at %1: %2")
+                         .arg(ffmpeg_executable_, process.errorString());
+        }
+        return false;
+    }
+
+    QByteArray output;
+    while (process.state() != QProcess::NotRunning) {
+        (void)process.waitForFinished(40);
+        output += process.readAll();
+        if (output.size() > 65'536) output = output.right(65'536);
+        QApplication::processEvents();
+        if (progress.wasCanceled()) {
+            process.kill();
+            (void)process.waitForFinished(2'000);
+            progress.close();
+            if (error != nullptr) error->clear();
+            set_status(tr("Animation export cancelled"));
+            return false;
+        }
+    }
+    output += process.readAll();
+    progress.close();
+
+    if (process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0) return true;
+    if (error != nullptr) {
+        QString details = QString::fromUtf8(output).trimmed();
+        const QStringList lines = details.split(QLatin1Char('\n'));
+        if (lines.size() > 16) details = lines.sliced(lines.size() - 16).join(QLatin1Char('\n'));
+        *error = tr("FFmpeg exited with code %1.").arg(process.exitCode());
+        if (!details.isEmpty()) *error += QStringLiteral("\n\n") + details;
+    }
+    return false;
+}
+
+void QtMainWindow::export_animation(AnimationExportFormat format) {
+    if (!ensure_ffmpeg_available()) return;
+
+    const bool gif = format == AnimationExportFormat::Gif;
+    QSettings preferences;
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("AnimationExportDialog"));
+    dialog.setWindowTitle(gif ? tr("Export GIF animation") : tr("Export MP4 animation"));
+    QFormLayout form(&dialog);
+
+    auto* format_label = new QLabel(gif ? tr("Animated GIF (FFmpeg palette encoding)")
+                                        : tr("MP4 / H.264 (FFmpeg libx264)"), &dialog);
+    format_label->setWordWrap(true);
+    form.addRow(tr("Format"), format_label);
+
+    QSpinBox scale(&dialog);
+    scale.setObjectName(QStringLiteral("AnimationExportScale"));
+    scale.setRange(1, 32);
+    scale.setValue(std::clamp(preferences.value(QStringLiteral("animationExport/scale"), 1).toInt(),
+                              1, 32));
+    scale.setSuffix(QStringLiteral("×"));
+    form.addRow(tr("Pixel scale"), &scale);
+
+    QCheckBox preserve_timing(tr("Use each frame's timeline duration"), &dialog);
+    preserve_timing.setObjectName(QStringLiteral("AnimationExportPreserveTiming"));
+    preserve_timing.setChecked(
+        preferences.value(QStringLiteral("animationExport/preserveTiming"), true).toBool());
+    form.addRow(tr("Timing"), &preserve_timing);
+
+    QDoubleSpinBox frames_per_second(&dialog);
+    frames_per_second.setObjectName(QStringLiteral("AnimationExportFps"));
+    frames_per_second.setRange(1.0, 120.0);
+    frames_per_second.setDecimals(2);
+    frames_per_second.setValue(std::clamp(
+        preferences.value(QStringLiteral("animationExport/fps"), 12.0).toDouble(), 1.0, 120.0));
+    frames_per_second.setSuffix(tr(" fps"));
+    frames_per_second.setEnabled(!preserve_timing.isChecked());
+    connect(&preserve_timing, &QCheckBox::toggled, &frames_per_second,
+            [&frames_per_second](bool checked) { frames_per_second.setEnabled(!checked); });
+    form.addRow(tr("Constant frame rate"), &frames_per_second);
+
+    QSpinBox bitrate(&dialog);
+    QComboBox preset(&dialog);
+    QComboBox background(&dialog);
+    QSpinBox max_colors(&dialog);
+    QComboBox dither(&dialog);
+    QComboBox loop(&dialog);
+    if (gif) {
+        max_colors.setObjectName(QStringLiteral("AnimationExportGifColors"));
+        max_colors.setRange(2, 256);
+        max_colors.setValue(std::clamp(
+            preferences.value(QStringLiteral("animationExport/gifColors"), 256).toInt(), 2, 256));
+        form.addRow(tr("Palette colors"), &max_colors);
+
+        dither.setObjectName(QStringLiteral("AnimationExportGifDither"));
+        dither.addItem(tr("Sierra 2-4A (recommended)"), static_cast<int>(GifDither::Sierra2_4A));
+        dither.addItem(tr("Bayer"), static_cast<int>(GifDither::Bayer));
+        dither.addItem(tr("None"), static_cast<int>(GifDither::None));
+        dither.setCurrentIndex(std::clamp(
+            preferences.value(QStringLiteral("animationExport/gifDither"), 0).toInt(),
+            0, dither.count() - 1));
+        form.addRow(tr("Dithering"), &dither);
+
+        loop.setObjectName(QStringLiteral("AnimationExportGifLoop"));
+        loop.addItem(tr("Forever"), true);
+        loop.addItem(tr("Play once"), false);
+        loop.setCurrentIndex(
+            preferences.value(QStringLiteral("animationExport/gifLoop"), true).toBool() ? 0 : 1);
+        form.addRow(tr("Loop"), &loop);
+    } else {
+        bitrate.setObjectName(QStringLiteral("AnimationExportBitrate"));
+        bitrate.setRange(64, 100'000);
+        bitrate.setValue(std::clamp(
+            preferences.value(QStringLiteral("animationExport/mp4Bitrate"), 8'000).toInt(),
+            64, 100'000));
+        bitrate.setSuffix(tr(" kbps"));
+        bitrate.setSingleStep(500);
+        form.addRow(tr("Video bitrate"), &bitrate);
+
+        preset.setObjectName(QStringLiteral("AnimationExportPreset"));
+        for (const QString& value : {QStringLiteral("ultrafast"), QStringLiteral("veryfast"),
+                                     QStringLiteral("fast"), QStringLiteral("medium"),
+                                     QStringLiteral("slow"), QStringLiteral("veryslow")}) {
+            preset.addItem(value);
+        }
+        const int preset_index = preset.findText(
+            preferences.value(QStringLiteral("animationExport/mp4Preset"),
+                              QStringLiteral("medium")).toString());
+        preset.setCurrentIndex(preset_index < 0 ? 3 : preset_index);
+        form.addRow(tr("Encoding preset"), &preset);
+
+        background.setObjectName(QStringLiteral("AnimationExportBackground"));
+        background.addItem(tr("Black"), QColor(Qt::black));
+        background.addItem(tr("White"), QColor(Qt::white));
+        background.setCurrentIndex(std::clamp(
+            preferences.value(QStringLiteral("animationExport/mp4Background"), 0).toInt(), 0, 1));
+        form.addRow(tr("Transparency background"), &background);
+    }
+
+    QLabel ffmpeg_path(tr("Encoder: %1").arg(ffmpeg_executable_), &dialog);
+    ffmpeg_path.setTextInteractionFlags(Qt::TextSelectableByMouse);
+    ffmpeg_path.setWordWrap(true);
+    form.addRow(&ffmpeg_path);
+
+    QDialogButtonBox buttons(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    buttons.setObjectName(QStringLiteral("AnimationExportButtons"));
+    form.addRow(&buttons);
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    AnimationExportOptions options;
+    options.format = format;
+    options.scale = scale.value();
+    options.preserve_frame_timing = preserve_timing.isChecked();
+    options.frames_per_second = frames_per_second.value();
+    if (gif) {
+        options.gif_max_colors = max_colors.value();
+        options.gif_dither = static_cast<GifDither>(dither.currentData().toInt());
+        options.gif_loop_forever = loop.currentData().toBool();
+    } else {
+        options.video_bitrate_kbps = bitrate.value();
+        options.video_preset = preset.currentText();
+        options.video_background = background.currentData().value<QColor>();
+    }
+
+    preferences.setValue(QStringLiteral("animationExport/scale"), options.scale);
+    preferences.setValue(QStringLiteral("animationExport/preserveTiming"),
+                         options.preserve_frame_timing);
+    preferences.setValue(QStringLiteral("animationExport/fps"), options.frames_per_second);
+    if (gif) {
+        preferences.setValue(QStringLiteral("animationExport/gifColors"), options.gif_max_colors);
+        preferences.setValue(QStringLiteral("animationExport/gifDither"), dither.currentIndex());
+        preferences.setValue(QStringLiteral("animationExport/gifLoop"), options.gif_loop_forever);
+    } else {
+        preferences.setValue(QStringLiteral("animationExport/mp4Bitrate"),
+                             options.video_bitrate_kbps);
+        preferences.setValue(QStringLiteral("animationExport/mp4Preset"), options.video_preset);
+        preferences.setValue(QStringLiteral("animationExport/mp4Background"),
+                             background.currentIndex());
+    }
+
+    const QString extension = gif ? QStringLiteral("gif") : QStringLiteral("mp4");
+    QString path = QFileDialog::getSaveFileName(
+        this, gif ? tr("Export GIF animation") : tr("Export MP4 animation"),
+        QDir(remembered_directory(QStringLiteral("export"))).filePath(
+            QStringLiteral("animation.") + extension),
+        gif ? tr("GIF animation (*.gif)") : tr("MP4 video (*.mp4)"));
+    if (path.isEmpty()) return;
+    if (QFileInfo(path).suffix().compare(extension, Qt::CaseInsensitive) != 0) {
+        path += QLatin1Char('.') + extension;
+    }
+
+    QTemporaryDir temporary_directory;
+    if (!temporary_directory.isValid()) {
+        report_error(tr("Export animation"),
+                     "Could not create a temporary directory for the animation frames.");
+        return;
+    }
+    PreparedAnimationExport prepared;
+    QString error;
+    if (!prepare_animation_export(controller_.document(), temporary_directory.path(), options,
+                                  prepared, &error)) {
+        report_error(tr("Export animation"), error.toStdString());
+        return;
+    }
+
+    if (gif && !run_ffmpeg(gif_palette_ffmpeg_arguments(prepared, options),
+                           tr("Building GIF palette"), &error)) {
+        if (!error.isEmpty()) report_error(tr("Export GIF"), error.toStdString());
+        return;
+    }
+    const QStringList arguments = gif ? gif_encode_ffmpeg_arguments(prepared, path, options)
+                                      : mp4_ffmpeg_arguments(prepared, path, options);
+    if (!run_ffmpeg(arguments, gif ? tr("Encoding GIF") : tr("Encoding MP4"), &error)) {
+        if (!error.isEmpty()) {
+            report_error(gif ? tr("Export GIF") : tr("Export MP4"), error.toStdString());
+        }
+        return;
+    }
+    set_status(gif ? tr("GIF animation exported to %1").arg(path)
+                   : tr("MP4 animation exported to %1").arg(path));
+    remember_file_directory(QStringLiteral("export"), path);
+}
 
 void QtMainWindow::generate_depth_map() {
     if (controller_.document().layers.empty()) return;
@@ -2500,6 +2956,196 @@ void QtMainWindow::restore_ui_state() {
     }
 }
 
+QString QtMainWindow::remembered_directory(const QString& key) const {
+    QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+    const QString directory = state.value(QStringLiteral("paths/") + key, QDir::homePath()).toString();
+    return QDir(directory).exists() ? directory : QDir::homePath();
+}
+
+void QtMainWindow::remember_file_directory(const QString& key, const QString& path) {
+    if (path.isEmpty()) return;
+    QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+    state.setValue(QStringLiteral("paths/") + key, QFileInfo(path).absolutePath());
+    state.sync();
+}
+
+void QtMainWindow::persist_app_settings() {
+    std::string error;
+    if (!save_app_settings(settings_, &error) && console_list_ != nullptr) {
+        console_list_->addItem(QString::fromStdString(error));
+    }
+}
+
+void QtMainWindow::select_ffmpeg_executable() {
+    QString initial_path = QString::fromStdString(settings_.ffmpeg_path);
+    if (initial_path.isEmpty()) initial_path = ffmpeg_executable_;
+    if (initial_path.isEmpty()) initial_path = remembered_directory(QStringLiteral("tools"));
+#if defined(Q_OS_WIN)
+    const QString filter = tr("Executables (*.exe);;All files (*)");
+#else
+    const QString filter = tr("All files (*)");
+#endif
+    const QString selected = QFileDialog::getOpenFileName(
+        this, tr("Select FFmpeg executable"), initial_path, filter);
+    if (selected.isEmpty()) return;
+    const QFileInfo info(selected);
+    if (!info.isFile() || !info.isExecutable()) {
+        QMessageBox::warning(this, tr("FFmpeg executable"),
+                             tr("The selected file is not executable."));
+        return;
+    }
+    ffmpeg_executable_ = info.absoluteFilePath();
+    settings_.ffmpeg_path = ffmpeg_executable_.toUtf8().toStdString();
+    setProperty("ffmpegAvailable", true);
+    setProperty("ffmpegExecutable", ffmpeg_executable_);
+    remember_file_directory(QStringLiteral("tools"), ffmpeg_executable_);
+    persist_app_settings();
+    set_status(tr("Custom FFmpeg executable: %1").arg(ffmpeg_executable_));
+}
+
+void QtMainWindow::initialize_crash_recovery() {
+    QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+    const bool previous_shutdown_was_clean =
+        state.value(QStringLiteral("recovery/cleanShutdown"), true).toBool();
+    const QString recovery_path = qstring_from_filesystem_path(default_recovery_session_path());
+    if (!previous_shutdown_was_clean && QFileInfo::exists(recovery_path)) {
+        QMessageBox message(this);
+        message.setObjectName(QStringLiteral("CrashRecoveryDialog"));
+        message.setIcon(QMessageBox::Warning);
+        message.setWindowTitle(tr("Recover previous session"));
+        message.setText(tr("PixelArt98 did not close normally."));
+        message.setInformativeText(
+            tr("A recovery session containing the last edited image and its Undo/Redo history is available."));
+        QPushButton* restore = message.addButton(tr("Restore session"), QMessageBox::AcceptRole);
+        QPushButton* discard = message.addButton(tr("Discard recovery"), QMessageBox::DestructiveRole);
+        message.setDefaultButton(restore);
+        message.exec();
+        if (message.clickedButton() == restore) {
+            ProjectBundle bundle;
+            std::string error;
+            if (load_recovery_project(default_recovery_session_path(), bundle, &error)) {
+                controller_.replace_project(std::move(bundle.document), std::move(bundle.model));
+                controller_.set_modified(true);
+                project_path_ = state.value(QStringLiteral("recovery/sourcePath")).toString();
+                has_recoverable_session_ = true;
+                set_status(tr("Previous session restored"));
+            } else {
+                QMessageBox::warning(
+                    this, tr("Recover previous session"),
+                    tr("The recovery archive could not be loaded. It has been kept at:\n%1\n\n%2")
+                        .arg(recovery_path, QString::fromStdString(error)));
+            }
+        } else if (message.clickedButton() == discard) {
+            QFile::remove(recovery_path);
+            state.remove(QStringLiteral("recovery/sourcePath"));
+        }
+    }
+    state.setValue(QStringLiteral("recovery/cleanShutdown"), false);
+    state.sync();
+}
+
+void QtMainWindow::schedule_recovery_save() {
+    if (recovery_shutting_down_ || recovery_timer_ == nullptr || !has_recoverable_session_) return;
+    if (recovery_save_in_progress_) {
+        recovery_save_pending_ = true;
+        return;
+    }
+    recovery_timer_->start();
+}
+
+void QtMainWindow::finish_recovery_worker() {
+    if (recovery_worker_.joinable()) recovery_worker_.join();
+    recovery_save_in_progress_ = false;
+}
+
+void QtMainWindow::save_recovery_session_now() {
+    if (recovery_shutting_down_ || !has_recoverable_session_) return;
+    if (recovery_save_in_progress_) {
+        recovery_save_pending_ = true;
+        return;
+    }
+    finish_recovery_worker();
+    Document document = controller_.document();
+    ModelDocument model = controller_.model();
+    const QString target_path = qstring_from_filesystem_path(default_recovery_session_path());
+    const QString source_path = project_path_;
+    QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+    state.setValue(QStringLiteral("recovery/sourcePath"), source_path);
+    state.sync();
+
+    recovery_save_in_progress_ = true;
+    recovery_save_pending_ = false;
+    recovery_worker_ = std::thread(
+        [this, document = std::move(document), model = std::move(model), target_path]() mutable {
+            QString failure;
+            const QFileInfo target_info(target_path);
+            if (!QDir().mkpath(target_info.absolutePath())) {
+                failure = tr("Could not create the recovery directory.");
+            } else {
+                QFile::setPermissions(target_info.absolutePath(),
+                                      QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                          QFileDevice::ExeOwner);
+            }
+            QTemporaryFile temporary(
+                QDir(target_info.absolutePath()).filePath(QStringLiteral(".session-XXXXXX")));
+            temporary.setAutoRemove(true);
+            if (failure.isEmpty() && !temporary.open()) {
+                failure = tr("Could not create a temporary recovery archive.");
+            }
+            const QString temporary_path = temporary.fileName();
+            temporary.close();
+            if (failure.isEmpty()) {
+                std::string error;
+                if (!save_recovery_project(filesystem_path(temporary_path), document, model, &error)) {
+                    failure = QString::fromStdString(error);
+                }
+            }
+            if (failure.isEmpty()) {
+                QFile input(temporary_path);
+                QSaveFile output(target_path);
+                if (!input.open(QIODevice::ReadOnly) || !output.open(QIODevice::WriteOnly)) {
+                    failure = tr("Could not open the atomic recovery output.");
+                } else {
+                    while (!input.atEnd() && failure.isEmpty()) {
+                        const QByteArray chunk = input.read(1024 * 1024);
+                        if (chunk.isEmpty() && input.error() != QFileDevice::NoError) {
+                            failure = input.errorString();
+                        } else if (output.write(chunk) != chunk.size()) {
+                            failure = output.errorString();
+                        }
+                    }
+                    if (failure.isEmpty() && !output.commit()) failure = output.errorString();
+                }
+            }
+            if (failure.isEmpty()) {
+                QFile::setPermissions(target_path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+            }
+            QMetaObject::invokeMethod(
+                this,
+                [this, failure] {
+                    recovery_save_in_progress_ = false;
+                    if (recovery_worker_.joinable()) recovery_worker_.join();
+                    if (!failure.isEmpty() && console_list_ != nullptr) {
+                        console_list_->addItem(tr("Crash recovery: %1").arg(failure));
+                    }
+                    if (recovery_save_pending_ && !recovery_shutting_down_ && recovery_timer_ != nullptr) {
+                        recovery_save_pending_ = false;
+                        recovery_timer_->start(0);
+                    }
+                },
+                Qt::QueuedConnection);
+        });
+}
+
+void QtMainWindow::mark_clean_shutdown() {
+    const QString recovery_path = qstring_from_filesystem_path(default_recovery_session_path());
+    QFile::remove(recovery_path);
+    QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+    state.setValue(QStringLiteral("recovery/cleanShutdown"), true);
+    state.remove(QStringLiteral("recovery/sourcePath"));
+    state.sync();
+}
+
 void QtMainWindow::save_ui_state() {
     QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
     state.setValue(QStringLiteral("windowGeometry"), saveGeometry());
@@ -2521,11 +3167,19 @@ void QtMainWindow::save_ui_state() {
             if (dock != nullptr) dock->hide();
         }
     }
-    std::string error;
-    if (!save_app_settings(settings_, &error) && console_list_ != nullptr) {
-        console_list_->addItem(QString::fromStdString(error));
+    persist_app_settings();
+}
+void QtMainWindow::closeEvent(QCloseEvent* event) {
+    if (confirm_discard() && confirm_graph_discard()) {
+        recovery_shutting_down_ = true;
+        if (recovery_timer_ != nullptr) recovery_timer_->stop();
+        finish_recovery_worker();
+        save_ui_state();
+        mark_clean_shutdown();
+        event->accept();
+    } else {
+        event->ignore();
     }
 }
-void QtMainWindow::closeEvent(QCloseEvent* event) { if (confirm_discard() && confirm_graph_discard()) { save_ui_state(); event->accept(); } else event->ignore(); }
 
 } // namespace px

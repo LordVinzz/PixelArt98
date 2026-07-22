@@ -11,10 +11,12 @@
 #include <QMainWindow>
 #include <QPoint>
 #include <QRect>
+#include <QStringList>
 
 #include <functional>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 class QAction;
@@ -32,6 +34,7 @@ class QToolButton;
 
 namespace px {
 
+enum class AnimationExportFormat;
 class QtCanvasWidget;
 class QtColorPanel;
 class QtModelPreviewWidget;
@@ -83,6 +86,15 @@ private:
     void rebuild_tool_options();
     void restore_ui_state();
     void save_ui_state();
+    void persist_app_settings();
+    void select_ffmpeg_executable();
+    void initialize_crash_recovery();
+    void schedule_recovery_save();
+    void save_recovery_session_now();
+    void finish_recovery_worker();
+    void mark_clean_shutdown();
+    [[nodiscard]] QString remembered_directory(const QString& key) const;
+    void remember_file_directory(const QString& key, const QString& path);
     void refresh_all(bool graph_source_changed = true);
     void mark_graph_effect_source_changed();
     void sync_graph_effect_source();
@@ -111,6 +123,10 @@ private:
     void import_layer();
     void export_current_png();
     void export_spritesheet_file();
+    void export_animation(AnimationExportFormat format);
+    [[nodiscard]] bool ensure_ffmpeg_available();
+    [[nodiscard]] bool run_ffmpeg(const QStringList& arguments, const QString& operation,
+                                  QString* error);
     void generate_depth_map();
     void import_model(const QString& kind);
     void export_model(const QString& kind);
@@ -151,12 +167,19 @@ private:
     QLabel* clone_source_label_ = nullptr;
     QComboBox* blend_mode_ = nullptr;
     QTimer* playback_timer_ = nullptr;
+    QTimer* recovery_timer_ = nullptr;
     bool playing_ = false;
     int playback_direction_ = 1;
     int error_sequence_ = 0;
     QString project_path_;
+    QString ffmpeg_executable_;
     QNetworkAccessManager* network_manager_ = nullptr;
     bool update_check_in_progress_ = false;
+    std::thread recovery_worker_;
+    bool recovery_save_in_progress_ = false;
+    bool recovery_save_pending_ = false;
+    bool recovery_shutting_down_ = false;
+    bool has_recoverable_session_ = false;
     MpsEffectRenderer mps_effect_renderer_;
     std::string last_effect_backend_ = "none";
     std::vector<QDockWidget*> docks_;

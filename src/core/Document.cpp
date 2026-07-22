@@ -1179,6 +1179,47 @@ void Document::clear_history() {
     recent_commit_names_.clear();
 }
 
+const std::deque<UndoCommand>& Document::undo_history_for_recovery() const noexcept {
+    return undo_stack_;
+}
+
+const std::deque<UndoCommand>& Document::redo_history_for_recovery() const noexcept {
+    return redo_stack_;
+}
+
+void Document::restore_history_for_recovery(std::deque<UndoCommand> undo,
+                                            std::deque<UndoCommand> redo) {
+    while (undo.size() > 128U) undo.pop_front();
+    while (redo.size() > 128U) redo.pop_front();
+    undo_stack_ = std::move(undo);
+    redo_stack_ = std::move(redo);
+    recent_commit_names_.clear();
+}
+
+bool Document::materialize_history_payload(const HistoryPixelPayload& payload,
+                                           std::vector<Pixel>& pixels) const {
+    if (!payload.pixels.empty()) {
+        pixels = payload.pixels;
+        return payload.pixel_count == 0U ||
+               payload.pixel_count == static_cast<std::uint64_t>(pixels.size());
+    }
+    if (!payload.ref.valid()) {
+        pixels.clear();
+        return payload.pixel_count == 0U;
+    }
+    if (payload.pixel_count > static_cast<std::uint64_t>(
+                                  std::numeric_limits<std::size_t>::max())) {
+        pixels.clear();
+        return false;
+    }
+    pixels.resize(static_cast<std::size_t>(payload.pixel_count));
+    if (!read_pixels_from_history_journal(payload.ref, pixels.data(), pixels.size())) {
+        pixels.clear();
+        return false;
+    }
+    return true;
+}
+
 bool Document::has_recent_commit_names() const {
     return !recent_commit_names_.empty();
 }

@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -29,6 +30,22 @@
 using namespace px;
 
 namespace {
+
+void set_test_environment(const char* name, const std::string& value) {
+#if defined(_WIN32)
+    assert(_putenv_s(name, value.c_str()) == 0);
+#else
+    assert(setenv(name, value.c_str(), 1) == 0);
+#endif
+}
+
+void clear_test_environment(const char* name) {
+#if defined(_WIN32)
+    assert(_putenv_s(name, "") == 0);
+#else
+    assert(unsetenv(name) == 0);
+#endif
+}
 
 std::filesystem::path make_test_root() {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -261,6 +278,115 @@ void test_project_roundtrip(const std::filesystem::path& root) {
     ProjectBundle unicode_loaded;
     assert(load_project(unicode_path, unicode_loaded, &error));
     assert_document_shape(unicode_loaded.document);
+}
+
+void assert_same_recovery_state(const Document& expected, const Document& actual) {
+    assert(actual.width == expected.width);
+    assert(actual.height == expected.height);
+    assert(actual.active_layer == expected.active_layer);
+    assert(actual.active_frame == expected.active_frame);
+    assert(actual.palette.colors == expected.palette.colors);
+    assert(actual.palette.active == expected.palette.active);
+    assert(actual.selection.width == expected.selection.width);
+    assert(actual.selection.height == expected.selection.height);
+    assert(actual.selection.active == expected.selection.active);
+    assert(actual.selection.mask == expected.selection.mask);
+    assert(actual.floating_selection.active == expected.floating_selection.active);
+    assert(actual.floating_selection.source_x == expected.floating_selection.source_x);
+    assert(actual.floating_selection.source_y == expected.floating_selection.source_y);
+    assert(actual.floating_selection.offset_x == expected.floating_selection.offset_x);
+    assert(actual.floating_selection.offset_y == expected.floating_selection.offset_y);
+    assert(actual.floating_selection.pixels == expected.floating_selection.pixels);
+    assert(actual.floating_selection.mask == expected.floating_selection.mask);
+    assert(actual.layers.size() == expected.layers.size());
+    assert(actual.frames.size() == expected.frames.size());
+    assert(actual.tags.size() == expected.tags.size());
+    for (std::size_t index = 0; index < expected.layers.size(); ++index) {
+        assert(actual.layers[index].name == expected.layers[index].name);
+        assert(actual.layers[index].visible == expected.layers[index].visible);
+        assert(actual.layers[index].opacity == expected.layers[index].opacity);
+        assert(actual.layers[index].blend_mode == expected.layers[index].blend_mode);
+        assert(actual.layers[index].mask_enabled == expected.layers[index].mask_enabled);
+        assert(actual.layers[index].clip_to_below == expected.layers[index].clip_to_below);
+        assert(actual.layers[index].mask == expected.layers[index].mask);
+    }
+    for (std::size_t frame_index = 0; frame_index < expected.frames.size(); ++frame_index) {
+        assert(actual.frames[frame_index].duration_ms == expected.frames[frame_index].duration_ms);
+        assert(actual.frames[frame_index].cels.size() == expected.frames[frame_index].cels.size());
+        for (std::size_t layer_index = 0;
+             layer_index < expected.frames[frame_index].cels.size(); ++layer_index) {
+            const Cel& expected_cel = expected.frames[frame_index].cels[layer_index];
+            const Cel& actual_cel = actual.frames[frame_index].cels[layer_index];
+            assert(actual_cel.x == expected_cel.x);
+            assert(actual_cel.y == expected_cel.y);
+            assert(actual_cel.pixels == expected_cel.pixels);
+        }
+    }
+}
+
+void test_recovery_archive_preserves_complete_history(const std::filesystem::path& root) {
+    set_test_environment("PIXELART_DENSE_HISTORY_MIN_BYTES", "1");
+    set_test_environment("PIXELART_HISTORY_SPILL_BYTES", "1");
+    set_test_environment("PIXELART_HISTORY_DIR", (root / "recovery history journal").string());
+    Document source = make_document();
+    std::vector<Pixel> edited = source.active_cel().pixels;
+    edited[0] = rgba(250, 10, 20, 200);
+    source.replace_active_pixels(std::move(edited), "Recovered pixel edit");
+    assert(source.undo_stack_disk_history_pixel_count() > 0U);
+
+    const SelectionMask before_selection = source.selection;
+    source.selection.select_rect(1, 1, 3, 2, SelectionCombineMode::Replace);
+    source.commit_selection_edit("Recovered selection", before_selection);
+
+    const Palette before_palette = source.palette;
+    source.palette.active = 2;
+    source.palette.colors[0] = rgba(1, 2, 3, 4);
+    source.commit_palette_edit("Recovered palette", before_palette);
+
+    source.add_layer("Recovered layer");
+    assert(source.set_frame_duration(0, 333));
+    assert(source.undo());
+
+    source.floating_selection.active = true;
+    source.floating_selection.source_x = 1;
+    source.floating_selection.source_y = 2;
+    source.floating_selection.offset_x = 3;
+    source.floating_selection.offset_y = -1;
+    source.floating_selection.width = 1;
+    source.floating_selection.height = 1;
+    source.floating_selection.pixels = {rgba(90, 80, 70, 60)};
+    source.floating_selection.mask = {1};
+
+    const auto path = root / "crash recovery session.pixart-recovery";
+    std::string error;
+    assert(save_recovery_project(path, source, make_model(), &error));
+    assert(!read_zip_entry(path, "history.cbor").empty());
+
+    ProjectBundle recovered;
+    assert(load_recovery_project(path, recovered, &error));
+    assert_same_recovery_state(source, recovered.document);
+    assert(recovered.document.undo_history_for_recovery().size() ==
+           source.undo_history_for_recovery().size());
+    assert(recovered.document.redo_history_for_recovery().size() ==
+           source.redo_history_for_recovery().size());
+
+    while (true) {
+        const bool source_changed = source.undo();
+        const bool recovered_changed = recovered.document.undo();
+        assert(source_changed == recovered_changed);
+        assert_same_recovery_state(source, recovered.document);
+        if (!source_changed) break;
+    }
+    while (true) {
+        const bool source_changed = source.redo();
+        const bool recovered_changed = recovered.document.redo();
+        assert(source_changed == recovered_changed);
+        assert_same_recovery_state(source, recovered.document);
+        if (!source_changed) break;
+    }
+    clear_test_environment("PIXELART_DENSE_HISTORY_MIN_BYTES");
+    clear_test_environment("PIXELART_HISTORY_SPILL_BYTES");
+    clear_test_environment("PIXELART_HISTORY_DIR");
 }
 
 void write_import_fixture(const std::filesystem::path& path, int width, int height, std::string_view extension) {
@@ -577,6 +703,7 @@ void test_import_failures_are_reported(const std::filesystem::path& root) {
 int main() {
     const auto root = make_test_root();
     test_project_roundtrip(root);
+    test_recovery_archive_preserves_complete_history(root);
     test_image_import_formats(root);
     test_import_image_as_layer(root);
     test_png_export_roundtrip(root);

@@ -26,9 +26,14 @@ struct AppSettings {
     bool show_model_uv_panel = false;
     bool show_3d_preview = false;
     bool show_canvas_cuboid_uv_overlay = false;
+    std::string ffmpeg_path;
 };
 
+[[nodiscard]] std::filesystem::path default_app_data_directory();
 [[nodiscard]] std::filesystem::path default_app_settings_path();
+[[nodiscard]] std::filesystem::path default_recovery_directory();
+[[nodiscard]] std::filesystem::path default_recovery_session_path();
+void configure_qt_settings_storage();
 [[nodiscard]] AppSettings load_app_settings();
 [[nodiscard]] AppSettings load_app_settings(const std::filesystem::path& path, std::string* error = nullptr);
 [[nodiscard]] bool save_app_settings(const AppSettings& settings, std::string* error = nullptr);

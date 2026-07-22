@@ -4,7 +4,11 @@
 
 #include "ui/AppSettings.hpp"
 
+#include <QSaveFile>
+#include <QSettings>
+
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
@@ -18,19 +22,79 @@ void set_error(std::string* error, const std::string& value) {
     }
 }
 
+QString qstring_from_path(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    return QString::fromStdWString(path.wstring());
+#else
+    const std::u8string text = path.u8string();
+    return QString::fromUtf8(reinterpret_cast<const char*>(text.data()),
+                             static_cast<qsizetype>(text.size()));
+#endif
+}
+
+void apply_private_permissions(const std::filesystem::path& path, bool directory) {
+    std::error_code error;
+    const auto permissions = directory
+                                 ? std::filesystem::perms::owner_all
+                                 : (std::filesystem::perms::owner_read |
+                                    std::filesystem::perms::owner_write);
+    std::filesystem::permissions(path, permissions, std::filesystem::perm_options::replace, error);
+}
+
 } // namespace
 
-std::filesystem::path default_app_settings_path() {
-    std::error_code error;
-    const std::filesystem::path base = std::filesystem::current_path(error);
-    if (error) {
-        return std::filesystem::path("pixelart98_settings.json");
+std::filesystem::path default_app_data_directory() {
+    if (const char* override_path = std::getenv("PIXELART98_HOME");
+        override_path != nullptr && override_path[0] != '\0') {
+        return std::filesystem::path(override_path);
     }
-    return base / "pixelart98_settings.json";
+#if defined(_WIN32)
+    const char* home = std::getenv("USERPROFILE");
+#else
+    const char* home = std::getenv("HOME");
+#endif
+    if (home != nullptr && home[0] != '\0') {
+        return std::filesystem::path(home) / ".pixelart98";
+    }
+    std::error_code error;
+    const std::filesystem::path fallback = std::filesystem::temp_directory_path(error);
+    return (error ? std::filesystem::path(".") : fallback) / ".pixelart98";
+}
+
+std::filesystem::path default_app_settings_path() {
+    return default_app_data_directory() / "settings.json";
+}
+
+std::filesystem::path default_recovery_directory() {
+    return default_app_data_directory() / "recovery";
+}
+
+std::filesystem::path default_recovery_session_path() {
+    return default_recovery_directory() / "session.pixart-recovery";
+}
+
+void configure_qt_settings_storage() {
+    std::error_code error;
+    const std::filesystem::path directory = default_app_data_directory();
+    std::filesystem::create_directories(directory, error);
+    apply_private_permissions(directory, true);
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, qstring_from_path(directory));
 }
 
 AppSettings load_app_settings() {
-    return load_app_settings(default_app_settings_path());
+    const std::filesystem::path path = default_app_settings_path();
+    std::error_code error;
+    if (!std::filesystem::exists(path, error)) {
+        const std::filesystem::path legacy = std::filesystem::current_path(error) /
+                                             "pixelart98_settings.json";
+        if (!error && std::filesystem::exists(legacy, error)) {
+            AppSettings migrated = load_app_settings(legacy);
+            static_cast<void>(save_app_settings(migrated, path));
+            return migrated;
+        }
+    }
+    return load_app_settings(path);
 }
 
 AppSettings load_app_settings(const std::filesystem::path& path, std::string* error) {
@@ -93,9 +157,7 @@ AppSettings load_app_settings(const std::filesystem::path& path, std::string* er
         if (root.contains("show_canvas_cuboid_uv_overlay")) {
             settings.show_canvas_cuboid_uv_overlay = root.at("show_canvas_cuboid_uv_overlay").get<bool>();
         }
-        if (!settings.heavy_gpu_optimization) {
-            settings.mps_backend = false;
-        }
+        settings.ffmpeg_path = root.value("ffmpeg_path", std::string());
     } catch (const std::exception& exception) {
         set_error(error, std::string("Could not load settings: ") + exception.what());
     }
@@ -112,7 +174,7 @@ bool save_app_settings(const AppSettings& settings, const std::filesystem::path&
         root["show_splash_screen"] = settings.show_splash_screen;
         root["auto_open_error_console"] = settings.auto_open_error_console;
         root["heavy_gpu_optimization"] = settings.heavy_gpu_optimization;
-        root["mps_backend"] = settings.heavy_gpu_optimization && settings.mps_backend;
+        root["mps_backend"] = settings.mps_backend;
         root["depth_allow_cpu_fallback"] = settings.depth_allow_cpu_fallback;
         root["depth_tile_size"] = settings.depth_tile_size;
         root["depth_tile_overlap"] = settings.depth_tile_overlap;
@@ -125,13 +187,30 @@ bool save_app_settings(const AppSettings& settings, const std::filesystem::path&
         root["show_model_uv_panel"] = settings.show_model_uv_panel;
         root["show_3d_preview"] = settings.show_3d_preview;
         root["show_canvas_cuboid_uv_overlay"] = settings.show_canvas_cuboid_uv_overlay;
+        root["ffmpeg_path"] = settings.ffmpeg_path;
 
-        std::ofstream file(path, std::ios::trunc);
-        if (!file.is_open()) {
+        std::error_code directory_error;
+        if (!path.parent_path().empty()) {
+            std::filesystem::create_directories(path.parent_path(), directory_error);
+            if (directory_error) {
+                set_error(error, "Could not create settings directory: " + path.parent_path().string());
+                return false;
+            }
+            apply_private_permissions(path.parent_path(), true);
+        }
+        QSaveFile file(qstring_from_path(path));
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
             set_error(error, "Could not save settings: " + path.string());
             return false;
         }
-        file << root.dump(2) << '\n';
+        const std::string contents = root.dump(2) + '\n';
+        if (file.write(contents.data(), static_cast<qint64>(contents.size())) !=
+                static_cast<qint64>(contents.size()) ||
+            !file.commit()) {
+            set_error(error, "Could not atomically save settings: " + path.string());
+            return false;
+        }
+        apply_private_permissions(path, false);
     } catch (const std::exception& exception) {
         set_error(error, std::string("Could not save settings: ") + exception.what());
         return false;

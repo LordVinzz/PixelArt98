@@ -223,6 +223,12 @@ public:
     bool undo();
     bool redo();
     void clear_history();
+    [[nodiscard]] const std::deque<UndoCommand>& undo_history_for_recovery() const noexcept;
+    [[nodiscard]] const std::deque<UndoCommand>& redo_history_for_recovery() const noexcept;
+    void restore_history_for_recovery(std::deque<UndoCommand> undo,
+                                      std::deque<UndoCommand> redo);
+    [[nodiscard]] bool materialize_history_payload(const HistoryPixelPayload& payload,
+                                                   std::vector<Pixel>& pixels) const;
     bool has_recent_commit_names() const;
     std::vector<std::string> consume_recent_commit_names();
     void clear_recent_commit_names();
