@@ -9,8 +9,11 @@
 #include "render/MpsEffectRenderer.hpp"
 
 #include <QMainWindow>
+#include <QPoint>
+#include <QRect>
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -69,7 +72,7 @@ private:
     void build_tools_dock();
     void build_colors_dock();
     void build_layers_dock();
-    void build_adjustments_dock();
+    void build_adjustments_menu();
     void build_animation_dock();
     void build_history_dock();
     void build_model_dock();
@@ -82,6 +85,9 @@ private:
     void refresh_layers();
     void refresh_frames();
     void refresh_model();
+    void refresh_selection_status();
+    void update_selection_status(const QRect& bounds);
+    void update_pointer_status(std::optional<QPoint> coordinates);
     void set_status(const QString& status);
     void report_error(const QString& operation, const std::string& error);
     [[nodiscard]] bool confirm_discard();
@@ -99,6 +105,7 @@ private:
     void show_effect_preview(const QString& name, const EffectOperation& operation,
                              const GpuEffectRequestFactory& gpu_request = {});
     void show_adjustment_dialog(const AdjustmentSpec& adjustment);
+    void show_levels_dialog(const AdjustmentSpec& adjustment);
     void show_curves_dialog(const QString& name);
     bool apply_mps_preview(Document& document, const GpuEffectRequest& request);
     QAction* add_effect_action(QMenu* menu, const QString& name, EffectOperation operation,
@@ -120,6 +127,8 @@ private:
     QListWidget* model_list_ = nullptr;
     QListWidget* console_list_ = nullptr;
     QLabel* zoom_label_ = nullptr;
+    QLabel* pointer_coordinates_label_ = nullptr;
+    QLabel* selection_geometry_label_ = nullptr;
     QLabel* tile_preview_label_ = nullptr;
     QVBoxLayout* tool_options_layout_ = nullptr;
     QSpinBox* tool_size_spin_ = nullptr;

@@ -331,6 +331,40 @@ bool QtCanvasWidget::valid_pixel(const QPoint& pixel) const {
     return controller_.document().in_bounds(pixel.x(), pixel.y());
 }
 
+std::optional<QRect> QtCanvasWidget::active_selection_preview() const {
+    if (!drawing_) return std::nullopt;
+
+    const ToolType tool = controller_.tool().tool;
+    if (tool == ToolType::RectSelect) {
+        const auto endpoint = constrained_tool_endpoint(
+            tool, drag_start_pixel_.x(), drag_start_pixel_.y(),
+            drag_current_pixel_.x(), drag_current_pixel_.y(),
+            QApplication::keyboardModifiers().testFlag(Qt::ControlModifier) ||
+                QApplication::keyboardModifiers().testFlag(Qt::MetaModifier));
+        const int left = std::min(drag_start_pixel_.x(), endpoint[0]);
+        const int top = std::min(drag_start_pixel_.y(), endpoint[1]);
+        const int right = std::max(drag_start_pixel_.x(), endpoint[0]);
+        const int bottom = std::max(drag_start_pixel_.y(), endpoint[1]);
+        return QRect(left, top, right - left + 1, bottom - top + 1);
+    }
+
+    if (tool == ToolType::LassoSelect) {
+        int left = drag_current_pixel_.x();
+        int top = drag_current_pixel_.y();
+        int right = left;
+        int bottom = top;
+        for (const auto& point : controller_.lasso_points()) {
+            left = std::min(left, point[0]);
+            top = std::min(top, point[1]);
+            right = std::max(right, point[0]);
+            bottom = std::max(bottom, point[1]);
+        }
+        return QRect(left, top, right - left + 1, bottom - top + 1);
+    }
+
+    return std::nullopt;
+}
+
 SelectionCombineMode QtCanvasWidget::selection_mode(Qt::KeyboardModifiers modifiers, bool secondary) const {
     const bool action = modifiers.testFlag(Qt::ControlModifier) || modifiers.testFlag(Qt::MetaModifier);
     const bool alt = modifiers.testFlag(Qt::AltModifier);
@@ -343,6 +377,7 @@ SelectionCombineMode QtCanvasWidget::selection_mode(Qt::KeyboardModifiers modifi
 
 void QtCanvasWidget::mousePressEvent(QMouseEvent* event) {
     setFocus();
+    notify_pointer_coordinates(event->position());
     const bool space_pan = space_down_ && event->button() == Qt::LeftButton;
     if (event->button() == Qt::MiddleButton || space_pan) {
         panning_ = true;
@@ -357,25 +392,32 @@ void QtCanvasWidget::mousePressEvent(QMouseEvent* event) {
     drag_start_pixel_ = drag_current_pixel_ = pixel;
     const bool secondary = event->button() == Qt::RightButton;
     controller_.begin_stroke(pixel.x(), pixel.y(), secondary, selection_mode(event->modifiers(), secondary));
+    if (selection_geometry_changed) selection_geometry_changed();
+    notify_selection_preview();
     update();
 }
 
 void QtCanvasWidget::mouseMoveEvent(QMouseEvent* event) {
     if (panning_) {
         pan_ = pan_start_ + event->position() - pan_anchor_;
+        notify_pointer_coordinates(event->position());
         update();
         return;
     }
+    notify_pointer_coordinates(event->position());
     if (!drawing_) return;
     const QPoint pixel = pixel_at(event->position());
     if (valid_pixel(pixel)) {
         drag_current_pixel_ = pixel;
         controller_.update_stroke(pixel.x(), pixel.y(), event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::MetaModifier));
+        if (selection_geometry_changed) selection_geometry_changed();
+        notify_selection_preview();
         update();
     }
 }
 
 void QtCanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
+    notify_pointer_coordinates(event->position());
     if (panning_ && (event->button() == Qt::MiddleButton || event->button() == Qt::LeftButton)) {
         panning_ = false;
         return;
@@ -384,7 +426,23 @@ void QtCanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
     const QPoint pixel = valid_pixel(pixel_at(event->position())) ? pixel_at(event->position()) : drag_current_pixel_;
     controller_.end_stroke(pixel.x(), pixel.y(), event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::MetaModifier));
     drawing_ = false;
+    notify_selection_preview();
     notify_changed();
+}
+
+void QtCanvasWidget::leaveEvent(QEvent* event) {
+    if (pointer_coordinates_changed) pointer_coordinates_changed(std::nullopt);
+    QOpenGLWidget::leaveEvent(event);
+}
+
+void QtCanvasWidget::notify_pointer_coordinates(const QPointF& position) {
+    if (!pointer_coordinates_changed) return;
+    const QPoint pixel = pixel_at(position);
+    pointer_coordinates_changed(valid_pixel(pixel) ? std::optional<QPoint>(pixel) : std::nullopt);
+}
+
+void QtCanvasWidget::notify_selection_preview() {
+    if (selection_preview_changed) selection_preview_changed(active_selection_preview());
 }
 
 void QtCanvasWidget::wheelEvent(QWheelEvent* event) {
@@ -399,6 +457,7 @@ void QtCanvasWidget::keyPressEvent(QKeyEvent* event) {
         controller_.cancel_interaction();
         controller_.clear_selection();
         drawing_ = false;
+        notify_selection_preview();
         notify_changed();
         return;
     }

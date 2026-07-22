@@ -8,6 +8,7 @@
 
 #include <QApplication>
 #include <QByteArray>
+#include <QIcon>
 #include <QPixmap>
 #include <QScreen>
 #include <QSplashScreen>
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
     QApplication::setApplicationName(QStringLiteral("PixelArt98"));
     QApplication::setApplicationVersion(QString::fromLatin1(px::version::kVersion));
     QApplication::setOrganizationName(QStringLiteral("PixelArt98"));
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/logo.png")));
 
     QString import_path;
     const QStringList arguments = application.arguments();

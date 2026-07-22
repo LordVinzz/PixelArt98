@@ -315,6 +315,7 @@ set(PIXELART_TOOL_ICONS
     ${CMAKE_SOURCE_DIR}/res/icons/new_frame_animation.png
     ${CMAKE_SOURCE_DIR}/res/icons/play_pause_animation.png
     ${CMAKE_SOURCE_DIR}/res/icons/stop_animation.png)
+set(PIXELART_APP_LOGO ${CMAKE_SOURCE_DIR}/res/logo.png)
 qt_add_executable(PixelArt98
     src/platform/main_qt.cpp
     src/ui/EmbeddedAssets.cpp
@@ -325,10 +326,19 @@ qt_add_resources(PixelArt98 tool_icons
     PREFIX "/"
     BASE "${CMAKE_SOURCE_DIR}/res"
     FILES ${PIXELART_TOOL_ICONS})
+qt_add_resources(PixelArt98 app_branding
+    PREFIX "/"
+    BASE "${CMAKE_SOURCE_DIR}/res"
+    FILES ${PIXELART_APP_LOGO})
 if(APPLE)
-    target_sources(PixelArt98 PRIVATE ${PIXELART_TOOL_ICONS})
+    set(PIXELART_APP_ICON_MACOS ${CMAKE_SOURCE_DIR}/res/PixelArt98.icns)
+    target_sources(PixelArt98 PRIVATE ${PIXELART_TOOL_ICONS} ${PIXELART_APP_ICON_MACOS})
     set_source_files_properties(${PIXELART_TOOL_ICONS} PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources/icons")
+    set_source_files_properties(${PIXELART_APP_ICON_MACOS} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources")
+elseif(WIN32)
+    target_sources(PixelArt98 PRIVATE ${CMAKE_SOURCE_DIR}/res/PixelArt98.rc)
 endif()
 target_link_libraries(PixelArt98 PRIVATE
     pixelart_app
@@ -341,6 +351,7 @@ target_link_libraries(PixelArt98 PRIVATE
 target_compile_definitions(PixelArt98 PRIVATE GL_SILENCE_DEPRECATION)
 set_target_properties(PixelArt98 PROPERTIES
     MACOSX_BUNDLE TRUE
+    MACOSX_BUNDLE_ICON_FILE PixelArt98.icns
     WIN32_EXECUTABLE TRUE)
 pixelart_configure_project_target(PixelArt98)
 add_custom_target(pixelart DEPENDS PixelArt98)
@@ -354,6 +365,14 @@ qt_generate_deploy_app_script(
     OUTPUT_SCRIPT pixelart_deploy_script
     NO_UNSUPPORTED_PLATFORM_ERROR)
 install(SCRIPT ${pixelart_deploy_script})
+
+if(UNIX AND NOT APPLE)
+    install(FILES ${PIXELART_APP_LOGO}
+        DESTINATION share/pixmaps
+        RENAME pixelart98.png)
+    install(FILES ${CMAKE_SOURCE_DIR}/res/pixelart98.desktop
+        DESTINATION share/applications)
+endif()
 
 install(DIRECTORY res/skyboxes DESTINATION res)
 install(FILES

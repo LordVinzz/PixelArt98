@@ -75,6 +75,8 @@ namespace px {
 
 namespace {
 
+constexpr int kWindowStateVersion = 1;
+
 QString image_filter() { return QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp *.gif);;All files (*)"); }
 QString project_filter() { return QStringLiteral("PixelArt98 Projects (*.pixart);;All files (*)"); }
 
@@ -402,6 +404,64 @@ private:
     std::vector<QPointF> points_;
     int channel_ = 0;
     int selected_point_ = -1;
+};
+
+class LevelsHistogramWidget final : public QWidget {
+public:
+    explicit LevelsHistogramWidget(QWidget* parent = nullptr) : QWidget(parent) {
+        setMinimumSize(260, 170);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        setProperty("histogramBins", 256);
+    }
+
+    [[nodiscard]] QSize sizeHint() const override { return {340, 210}; }
+
+    void set_histogram(std::array<int, 256> histogram) {
+        histogram_ = std::move(histogram);
+        const int maximum = std::max(0, *std::max_element(histogram_.begin(), histogram_.end()));
+        qlonglong checksum = 0;
+        for (int bin = 0; bin < 256; ++bin) {
+            checksum += static_cast<qlonglong>(bin + 1) * histogram_[static_cast<std::size_t>(bin)];
+        }
+        setProperty("histogramMaximum", maximum);
+        setProperty("histogramChecksum", checksum);
+        setProperty("histogramRevision", property("histogramRevision").toInt() + 1);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.fillRect(rect(), QColor(22, 25, 30));
+        const QRectF graph = QRectF(rect()).adjusted(12.0, 12.0, -12.0, -12.0);
+        painter.fillRect(graph, QColor(12, 14, 18));
+
+        painter.setPen(QPen(QColor(52, 57, 66), 1.0));
+        for (int step = 1; step < 4; ++step) {
+            const qreal x = graph.left() + graph.width() * static_cast<qreal>(step) / 4.0;
+            painter.drawLine(QPointF(x, graph.top()), QPointF(x, graph.bottom()));
+        }
+
+        const int maximum = std::max(1, *std::max_element(histogram_.begin(), histogram_.end()));
+        const qreal bin_width = graph.width() / 256.0;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(205, 211, 222, 190));
+        for (int bin = 0; bin < 256; ++bin) {
+            const qreal normalized = std::sqrt(static_cast<qreal>(histogram_[static_cast<std::size_t>(bin)]) /
+                                               static_cast<qreal>(maximum));
+            const qreal height = normalized * graph.height();
+            painter.drawRect(QRectF(graph.left() + static_cast<qreal>(bin) * bin_width,
+                                    graph.bottom() - height, std::max(1.0, bin_width), height));
+        }
+
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(105, 110, 120), 1.0));
+        painter.drawRect(graph);
+    }
+
+private:
+    std::array<int, 256> histogram_{};
 };
 
 } // namespace
@@ -1013,13 +1073,41 @@ QtMainWindow::QtMainWindow(AppSettings settings, QWidget* parent)
     setObjectName(QStringLiteral("PixelArt98MainWindow"));
     setWindowTitle(QStringLiteral("PixelArt98"));
     setDockNestingEnabled(true);
-    setDockOptions(QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks | QMainWindow::AllowTabbedDocks | QMainWindow::GroupedDragging);
+    QMainWindow::DockOptions dock_options =
+        QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks | QMainWindow::AllowTabbedDocks;
+#if !defined(__APPLE__)
+    dock_options |= QMainWindow::GroupedDragging;
+#endif
+    setDockOptions(dock_options);
     resize(1440, 900);
 
     network_manager_ = new QNetworkAccessManager(this);
     canvas_ = new QtCanvasWidget(controller_, this);
     canvas_->editor_changed = [this] { refresh_all(); };
+    canvas_->pointer_coordinates_changed = [this](std::optional<QPoint> coordinates) {
+        update_pointer_status(coordinates);
+    };
+    canvas_->selection_geometry_changed = [this] { refresh_selection_status(); };
+    canvas_->selection_preview_changed = [this](std::optional<QRect> preview) {
+        if (preview.has_value()) update_selection_status(*preview);
+        else refresh_selection_status();
+    };
     setCentralWidget(canvas_);
+
+    pointer_coordinates_label_ = new QLabel(this);
+    pointer_coordinates_label_->setObjectName(QStringLiteral("PointerCoordinatesLabel"));
+    pointer_coordinates_label_->setMinimumWidth(145);
+    pointer_coordinates_label_->setToolTip(tr("Zero-based canvas coordinates"));
+    statusBar()->addPermanentWidget(pointer_coordinates_label_);
+
+    selection_geometry_label_ = new QLabel(this);
+    selection_geometry_label_->setObjectName(QStringLiteral("SelectionGeometryLabel"));
+    selection_geometry_label_->setMinimumWidth(300);
+    selection_geometry_label_->setToolTip(tr("Selection bounds and size in pixels"));
+    statusBar()->addPermanentWidget(selection_geometry_label_);
+    update_pointer_status(std::nullopt);
+    refresh_selection_status();
+
     build_actions();
     build_menus();
     build_docks();
@@ -1113,6 +1201,8 @@ void QtMainWindow::build_menus() {
     add_action(image, tr("Rotate 180"), {}, [this] { apply_transform(tr("Rotate 180"), apply_rotate_180); });
     add_action(image, tr("Straighten..."), {}, [this] { show_effect_preview(tr("Straighten"), [](Document& doc, int amount) { apply_straighten(doc, static_cast<float>(amount - 50) * 0.4f, ResamplingMode::Bicubic); }); });
     add_action(image, tr("Rotate / Zoom..."), {}, [this] { show_effect_preview(tr("Rotate / Zoom"), [](Document& doc, int amount) { apply_rotate_zoom(doc, static_cast<float>(amount - 50) * 3.6f, 1.0f, 0, 0, ResamplingMode::Bicubic); }); });
+
+    build_adjustments_menu();
 
     QMenu* effects = menuBar()->addMenu(tr("E&ffects"));
     const auto effect_control = [](const char* id, const char* label, int minimum, int maximum, int initial) {
@@ -1242,7 +1332,7 @@ void QtMainWindow::build_menus() {
 }
 
 void QtMainWindow::build_docks() {
-    build_tools_dock(); build_colors_dock(); build_layers_dock(); build_adjustments_dock();
+    build_tools_dock(); build_colors_dock(); build_layers_dock();
     build_animation_dock(); build_history_dock(); build_model_dock(); build_preview_docks(); build_console_dock();
     auto* window = new QMenu(tr("&Window"), this);
     menuBar()->insertMenu(menuBar()->actions().back(), window);
@@ -1384,7 +1474,7 @@ void QtMainWindow::build_layers_dock() {
     dock->setWidget(vertical_panel({layers_list_, layer_actions, visible, clip, blend_mode_, opacity, mask, mask_actions})); addDockWidget(Qt::RightDockWidgetArea, dock); docks_.push_back(dock);
 }
 
-void QtMainWindow::build_adjustments_dock() {
+void QtMainWindow::build_adjustments_menu() {
     auto control = [](const char* id, const char* label, int minimum, int maximum, int initial) {
         return AdjustmentControl{QString::fromLatin1(id), QString::fromUtf8(label), minimum, maximum, initial};
     };
@@ -1455,24 +1545,17 @@ void QtMainWindow::build_adjustments_dock() {
         [this](Document& document, const std::vector<int>&) { apply_palette_quantize(document, controller_.document().palette, true); },
         [this](const std::vector<int>&) { GpuEffectRequest request; request.mode = GpuEffectMode::PaletteDither; request.params[0] = static_cast<float>(std::max<std::size_t>(2, controller_.document().palette.colors.size())); return request; }});
 
-    auto* dock = new QDockWidget(tr("Adjustments"), this);
-    dock->setObjectName(QStringLiteral("AdjustmentsDock"));
-    auto* panel = new QWidget;
-    auto* grid = new QGridLayout(panel);
-    int index = 0;
+    QMenu* menu = menuBar()->addMenu(tr("&Adjustments"));
+    menu->setObjectName(QStringLiteral("AdjustmentsMenu"));
     for (const AdjustmentSpec& adjustment : adjustments) {
-        auto* button = new QPushButton(adjustment.name);
-        button->setObjectName(QStringLiteral("adjustment.") + adjustment.id);
-        grid->addWidget(button, index / 2, index % 2);
-        connect(button, &QPushButton::clicked, this, [this, adjustment] { show_adjustment_dialog(adjustment); });
-        ++index;
+        QAction* action = menu->addAction(adjustment.name);
+        action->setObjectName(QStringLiteral("adjustment.") + adjustment.id);
+        connect(action, &QAction::triggered, this, [this, adjustment] { show_adjustment_dialog(adjustment); });
     }
-    auto* depth = new QPushButton(tr("Generate Depth Map..."));
-    grid->addWidget(depth, index / 2, 0, 1, 2);
-    connect(depth, &QPushButton::clicked, this, [this] { generate_depth_map(); });
-    dock->setWidget(panel);
-    addDockWidget(Qt::RightDockWidgetArea, dock);
-    docks_.push_back(dock);
+    menu->addSeparator();
+    QAction* depth = menu->addAction(tr("Generate Depth Map..."));
+    depth->setObjectName(QStringLiteral("adjustment.generate-depth-map"));
+    connect(depth, &QAction::triggered, this, [this] { generate_depth_map(); });
 }
 
 void QtMainWindow::build_animation_dock() {
@@ -1659,7 +1742,7 @@ void QtMainWindow::refresh_all() {
     controller_.invalidate_display();
     canvas_->update();
     if (model_preview_ != nullptr) model_preview_->update();
-    refresh_layers(); refresh_frames(); refresh_model();
+    refresh_layers(); refresh_frames(); refresh_model(); refresh_selection_status();
     if (color_panel_ != nullptr) color_panel_->refresh_from_tool();
     if (tool_buttons_ != nullptr) {
         if (QAbstractButton* button = tool_buttons_->button(static_cast<int>(controller_.tool().tool)); button != nullptr) {
@@ -1700,6 +1783,46 @@ void QtMainWindow::refresh_frames() {
     frames_list_->setCurrentRow(controller_.document().active_frame);
 }
 void QtMainWindow::refresh_model() { if (model_list_ == nullptr) return; const QSignalBlocker blocker(model_list_); model_list_->clear(); for (const Cuboid& cuboid : controller_.model().cuboids) model_list_->addItem(QString::fromStdString(cuboid.name)); model_list_->setCurrentRow(controller_.model().selected_cuboid); }
+void QtMainWindow::refresh_selection_status() {
+    if (selection_geometry_label_ == nullptr) return;
+
+    const FloatingSelection& floating = controller_.document().floating_selection;
+    if (floating.active && floating.width > 0 && floating.height > 0) {
+        const int x = floating.source_x + floating.offset_x;
+        const int y = floating.source_y + floating.offset_y;
+        update_selection_status(QRect(x, y, floating.width, floating.height));
+        return;
+    }
+
+    const auto bounds = controller_.document().selection.bounds();
+    if (!bounds.has_value()) {
+        selection_geometry_label_->setText(tr("Selection: none"));
+        return;
+    }
+
+    update_selection_status(QRect((*bounds)[0], (*bounds)[1],
+                                 (*bounds)[2] - (*bounds)[0] + 1,
+                                 (*bounds)[3] - (*bounds)[1] + 1));
+}
+
+void QtMainWindow::update_selection_status(const QRect& bounds) {
+    if (selection_geometry_label_ == nullptr) return;
+    selection_geometry_label_->setText(
+        tr("Selection: (%1, %2) → (%3, %4) · %5 × %6")
+            .arg(bounds.left()).arg(bounds.top()).arg(bounds.left() + bounds.width() - 1)
+            .arg(bounds.top() + bounds.height() - 1).arg(bounds.width()).arg(bounds.height()));
+}
+
+void QtMainWindow::update_pointer_status(std::optional<QPoint> coordinates) {
+    if (pointer_coordinates_label_ == nullptr) return;
+    if (!coordinates.has_value()) {
+        pointer_coordinates_label_->setText(tr("Pointer: (—, —)"));
+        return;
+    }
+    pointer_coordinates_label_->setText(
+        tr("Pointer: (%1, %2)").arg(coordinates->x()).arg(coordinates->y()));
+}
+
 void QtMainWindow::set_status(const QString& status) { statusBar()->showMessage(status); }
 void QtMainWindow::report_error(const QString& operation, const std::string& error) { const QString text = tr("%1: %2").arg(operation, QString::fromStdString(error)); if (console_list_ != nullptr) console_list_->addItem(tr("%1. %2").arg(++error_sequence_).arg(text)); QMessageBox::critical(this, operation, text); if (settings_.auto_open_error_console && console_list_ != nullptr) console_list_->parentWidget()->show(); }
 
@@ -1918,6 +2041,10 @@ void QtMainWindow::show_curves_dialog(const QString& name) {
 }
 
 void QtMainWindow::show_adjustment_dialog(const AdjustmentSpec& adjustment) {
+    if (adjustment.id == QStringLiteral("levels")) {
+        show_levels_dialog(adjustment);
+        return;
+    }
     if (adjustment.id == QStringLiteral("curves")) {
         show_curves_dialog(adjustment.name);
         return;
@@ -1976,6 +2103,106 @@ void QtMainWindow::show_adjustment_dialog(const AdjustmentSpec& adjustment) {
     cancel_button->setDefault(false);
     cancel_button->setAutoDefault(false);
     form.addRow(&buttons);
+    connect(apply_button, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
+
+    preview();
+    if (dialog.exec() == QDialog::Accepted) {
+        controller_.mark_changed(adjustment.name.toStdString());
+    } else {
+        controller_.document() = std::move(original);
+        controller_.invalidate_display();
+    }
+    refresh_all();
+}
+
+void QtMainWindow::show_levels_dialog(const AdjustmentSpec& adjustment) {
+    Document original = controller_.document();
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("AdjustmentDialog.levels"));
+    dialog.setWindowTitle(tr("Adjustment: %1").arg(adjustment.name));
+    dialog.resize(760, 520);
+    QVBoxLayout layout(&dialog);
+
+    auto* histograms = new QWidget;
+    histograms->setObjectName(QStringLiteral("LevelsHistograms"));
+    auto* histogram_grid = new QGridLayout(histograms);
+    histogram_grid->setContentsMargins(0, 0, 0, 0);
+    histogram_grid->setColumnStretch(0, 1);
+    histogram_grid->setColumnStretch(1, 1);
+    auto* input_label = new QLabel(tr("Input histogram"));
+    auto* output_label = new QLabel(tr("Output histogram"));
+    input_label->setAlignment(Qt::AlignCenter);
+    output_label->setAlignment(Qt::AlignCenter);
+    auto* input_histogram = new LevelsHistogramWidget;
+    auto* output_histogram = new LevelsHistogramWidget;
+    input_histogram->setObjectName(QStringLiteral("LevelsInputHistogram"));
+    output_histogram->setObjectName(QStringLiteral("LevelsOutputHistogram"));
+    input_histogram->set_histogram(original.histogram_luma());
+    histogram_grid->addWidget(input_label, 0, 0);
+    histogram_grid->addWidget(output_label, 0, 1);
+    histogram_grid->addWidget(input_histogram, 1, 0);
+    histogram_grid->addWidget(output_histogram, 1, 1);
+    layout.addWidget(histograms, 1);
+
+    auto* parameters = new QWidget;
+    parameters->setObjectName(QStringLiteral("LevelsParameters"));
+    auto* parameter_grid = new QGridLayout(parameters);
+    parameter_grid->setObjectName(QStringLiteral("LevelsParametersGrid"));
+    parameter_grid->setContentsMargins(0, 8, 0, 0);
+    parameter_grid->setColumnStretch(1, 1);
+    parameter_grid->setHorizontalSpacing(10);
+    parameter_grid->setVerticalSpacing(6);
+    std::vector<QSlider*> sliders;
+    sliders.reserve(adjustment.controls.size());
+
+    const auto preview = [this, &original, &adjustment, &sliders, output_histogram] {
+        controller_.document() = original;
+        std::vector<int> values;
+        values.reserve(sliders.size());
+        for (const QSlider* slider : sliders) values.push_back(slider->value());
+        if (!adjustment.gpu_request || !apply_mps_preview(controller_.document(), adjustment.gpu_request(values))) {
+            adjustment.operation(controller_.document(), values);
+            last_effect_backend_ = "cpu";
+        }
+        output_histogram->set_histogram(controller_.document().histogram_luma());
+        controller_.invalidate_display();
+        canvas_->update();
+    };
+
+    for (int row = 0; row < static_cast<int>(adjustment.controls.size()); ++row) {
+        const AdjustmentControl& control = adjustment.controls[static_cast<std::size_t>(row)];
+        auto* label = new QLabel(control.label);
+        auto* slider = new QSlider(Qt::Horizontal);
+        slider->setObjectName(QStringLiteral("AdjustmentControl.") + control.id);
+        slider->setRange(control.minimum, control.maximum);
+        slider->setValue(control.initial);
+        auto* spin = new QSpinBox;
+        spin->setObjectName(QStringLiteral("AdjustmentValue.") + control.id);
+        spin->setRange(control.minimum, control.maximum);
+        spin->setValue(control.initial);
+        spin->setMinimumWidth(72);
+        parameter_grid->addWidget(label, row, 0);
+        parameter_grid->addWidget(slider, row, 1);
+        parameter_grid->addWidget(spin, row, 2);
+        sliders.push_back(slider);
+        connect(slider, &QSlider::valueChanged, spin, &QSpinBox::setValue);
+        connect(spin, &QSpinBox::valueChanged, slider, &QSlider::setValue);
+        connect(slider, &QSlider::valueChanged, this, [preview](int) { preview(); });
+    }
+    layout.addWidget(parameters);
+
+    QDialogButtonBox buttons(QDialogButtonBox::Apply | QDialogButtonBox::Cancel);
+    buttons.setObjectName(QStringLiteral("AdjustmentDialogButtons"));
+    QPushButton* apply_button = buttons.button(QDialogButtonBox::Apply);
+    QPushButton* cancel_button = buttons.button(QDialogButtonBox::Cancel);
+    apply_button->setObjectName(QStringLiteral("AdjustmentApply"));
+    cancel_button->setObjectName(QStringLiteral("AdjustmentCancel"));
+    apply_button->setDefault(true);
+    apply_button->setAutoDefault(true);
+    cancel_button->setDefault(false);
+    cancel_button->setAutoDefault(false);
+    layout.addWidget(&buttons);
     connect(apply_button, &QPushButton::clicked, &dialog, &QDialog::accept);
     connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
 
@@ -2118,8 +2345,24 @@ void QtMainWindow::check_for_updates() {
     });
 }
 
-void QtMainWindow::restore_ui_state() { QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98")); restoreGeometry(state.value(QStringLiteral("windowGeometry")).toByteArray()); restoreState(state.value(QStringLiteral("windowState")).toByteArray()); }
-void QtMainWindow::save_ui_state() { QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98")); state.setValue(QStringLiteral("windowGeometry"), saveGeometry()); state.setValue(QStringLiteral("windowState"), saveState()); std::string error; if (!save_app_settings(settings_, &error) && console_list_ != nullptr) console_list_->addItem(QString::fromStdString(error)); }
+void QtMainWindow::restore_ui_state() {
+    QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+    restoreGeometry(state.value(QStringLiteral("windowGeometry")).toByteArray());
+    const QByteArray window_state = state.value(QStringLiteral("windowState")).toByteArray();
+    if (!window_state.isEmpty() && !restoreState(window_state, kWindowStateVersion)) {
+        state.remove(QStringLiteral("windowState"));
+    }
+}
+
+void QtMainWindow::save_ui_state() {
+    QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+    state.setValue(QStringLiteral("windowGeometry"), saveGeometry());
+    state.setValue(QStringLiteral("windowState"), saveState(kWindowStateVersion));
+    std::string error;
+    if (!save_app_settings(settings_, &error) && console_list_ != nullptr) {
+        console_list_->addItem(QString::fromStdString(error));
+    }
+}
 void QtMainWindow::closeEvent(QCloseEvent* event) { if (confirm_discard()) { save_ui_state(); event->accept(); } else event->ignore(); }
 
 } // namespace px

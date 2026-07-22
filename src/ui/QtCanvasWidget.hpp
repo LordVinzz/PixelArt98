@@ -7,8 +7,12 @@
 
 #include <QOpenGLWidget>
 #include <QPoint>
+#include <QRect>
 
 #include <functional>
+#include <optional>
+
+class QEvent;
 
 namespace px {
 
@@ -26,6 +30,9 @@ public:
     [[nodiscard]] double zoom() const noexcept { return zoom_; }
     [[nodiscard]] bool onion_visible() const noexcept { return onion_visible_; }
     std::function<void()> editor_changed;
+    std::function<void(std::optional<QPoint>)> pointer_coordinates_changed;
+    std::function<void()> selection_geometry_changed;
+    std::function<void(std::optional<QRect>)> selection_preview_changed;
 
 protected:
     void initializeGL() override;
@@ -34,6 +41,7 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void keyReleaseEvent(QKeyEvent* event) override;
@@ -42,6 +50,9 @@ private:
     [[nodiscard]] QRectF image_rect() const;
     [[nodiscard]] QPoint pixel_at(const QPointF& position) const;
     [[nodiscard]] bool valid_pixel(const QPoint& pixel) const;
+    [[nodiscard]] std::optional<QRect> active_selection_preview() const;
+    void notify_pointer_coordinates(const QPointF& position);
+    void notify_selection_preview();
     [[nodiscard]] SelectionCombineMode selection_mode(Qt::KeyboardModifiers modifiers, bool secondary) const;
     void change_zoom(double next_zoom, const QPointF& anchor);
     void notify_changed();

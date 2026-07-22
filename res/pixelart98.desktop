@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PixelArt98
+Comment=Pixel art editor and animation tool
+Exec=PixelArt98
+Icon=pixelart98
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;

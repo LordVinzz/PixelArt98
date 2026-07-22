@@ -10,7 +10,10 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QApplication>
+#include <QButtonGroup>
 #include <QCheckBox>
+#include <QGridLayout>
+#include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
 #include <QRadioButton>
@@ -75,10 +78,10 @@ struct AdjustmentObservation {
 AdjustmentObservation use_adjustment_from_ui(
     QtMainWindow& window, const QString& id,
     const std::vector<std::pair<QString, int>>& values, bool apply) {
-    auto* adjustment_button = window.findChild<QPushButton*>(QStringLiteral("adjustment.") + id);
+    auto* adjustment_action = window.findChild<QAction*>(QStringLiteral("adjustment.") + id);
     AdjustmentObservation observation;
-    if (adjustment_button == nullptr) {
-        const QByteArray message = (QStringLiteral("Missing adjustment button: ") + id).toLocal8Bit();
+    if (adjustment_action == nullptr) {
+        const QByteArray message = (QStringLiteral("Missing adjustment action: ") + id).toLocal8Bit();
         QTest::qFail(message.constData(), __FILE__, __LINE__);
         return observation;
     }
@@ -100,7 +103,7 @@ AdjustmentObservation use_adjustment_from_ui(
         }
         QTest::mouseClick(apply ? apply_button : cancel_button, Qt::LeftButton);
     });
-    adjustment_button->click();
+    adjustment_action->trigger();
     return observation;
 }
 
@@ -115,6 +118,41 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings_dir_.path());
         MpsEffectRenderer renderer;
         if (!renderer.available()) QSKIP("These end-to-end tests require an available Metal/MPS device");
+    }
+
+    void status_bar_shows_pointer_and_selection_geometry() {
+        QtMainWindow window(mps_settings());
+#if defined(__APPLE__)
+        QVERIFY(!window.dockOptions().testFlag(QMainWindow::GroupedDragging));
+#endif
+        Document source = source_document();
+        source.selection.select_rect(2, 3, 6, 8, SelectionCombineMode::Replace);
+        window.replace_document_for_testing(std::move(source));
+        window.show();
+        QApplication::processEvents();
+
+        auto* selection = window.findChild<QLabel*>(QStringLiteral("SelectionGeometryLabel"));
+        QVERIFY(selection != nullptr);
+        QCOMPARE(selection->text(), QStringLiteral("Selection: (2, 3) → (6, 8) · 5 × 6"));
+
+        auto* canvas = static_cast<QtCanvasWidget*>(window.centralWidget());
+        auto* pointer = window.findChild<QLabel*>(QStringLiteral("PointerCoordinatesLabel"));
+        QVERIFY(canvas != nullptr);
+        QVERIFY(pointer != nullptr);
+        QTest::mouseMove(canvas, canvas->rect().center());
+        QTRY_VERIFY(!pointer->text().contains(QChar(0x2014)));
+
+        auto* tool_buttons = window.findChild<QButtonGroup*>();
+        QVERIFY(tool_buttons != nullptr);
+        QAbstractButton* rectangle_select = tool_buttons->button(static_cast<int>(ToolType::RectSelect));
+        QVERIFY(rectangle_select != nullptr);
+        rectangle_select->click();
+        const QPoint start = canvas->rect().center() - QPoint(30, 18);
+        const QPoint end = start + QPoint(48, 36);
+        QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(canvas, end);
+        QTRY_VERIFY(selection->text().endsWith(QStringLiteral("· 5 × 4")));
+        QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, end);
     }
 
     void grayscale_action_applies_pixels_through_mps() {
@@ -183,6 +221,42 @@ private slots:
         QVERIFY(window.document().active_cel().pixels == expected);
     }
 
+    void levels_uses_live_input_and_output_histograms_with_a_parameter_grid() {
+        QtMainWindow window(mps_settings());
+        window.replace_document_for_testing(source_document());
+        auto* levels_action = window.findChild<QAction*>(QStringLiteral("adjustment.levels"));
+        QVERIFY(levels_action != nullptr);
+
+        QTimer::singleShot(0, &window, [&window] {
+            auto* dialog = window.findChild<QDialog*>(QStringLiteral("AdjustmentDialog.levels"));
+            QVERIFY(dialog != nullptr);
+            auto* input = dialog->findChild<QWidget*>(QStringLiteral("LevelsInputHistogram"));
+            auto* output = dialog->findChild<QWidget*>(QStringLiteral("LevelsOutputHistogram"));
+            auto* grid = dialog->findChild<QGridLayout*>(QStringLiteral("LevelsParametersGrid"));
+            QVERIFY(input != nullptr);
+            QVERIFY(output != nullptr);
+            QVERIFY(grid != nullptr);
+            QCOMPARE(input->property("histogramBins").toInt(), 256);
+            QCOMPARE(output->property("histogramBins").toInt(), 256);
+            QVERIFY(input->property("histogramMaximum").toInt() > 0);
+            QCOMPARE(grid->rowCount(), 5);
+            QCOMPARE(grid->columnCount(), 3);
+
+            const qlonglong original_output = output->property("histogramChecksum").toLongLong();
+            const int original_revision = output->property("histogramRevision").toInt();
+            auto* input_black = dialog->findChild<QSlider*>(QStringLiteral("AdjustmentControl.input-black"));
+            QVERIFY(input_black != nullptr);
+            input_black->setValue(80);
+            QVERIFY(output->property("histogramRevision").toInt() > original_revision);
+            QVERIFY(output->property("histogramChecksum").toLongLong() != original_output);
+
+            auto* cancel = dialog->findChild<QPushButton*>(QStringLiteral("AdjustmentCancel"));
+            QVERIFY(cancel != nullptr);
+            QTest::mouseClick(cancel, Qt::LeftButton);
+        });
+        levels_action->trigger();
+    }
+
     void cancel_restores_the_original_pixels() {
         QtMainWindow window(mps_settings());
         Document source = source_document();
@@ -204,8 +278,8 @@ private slots:
         Document source = source_document();
         const std::vector<Pixel> before = source.active_cel().pixels;
         window.replace_document_for_testing(std::move(source));
-        auto* curves_button = window.findChild<QPushButton*>(QStringLiteral("adjustment.curves"));
-        QVERIFY(curves_button != nullptr);
+        auto* curves_action = window.findChild<QAction*>(QStringLiteral("adjustment.curves"));
+        QVERIFY(curves_action != nullptr);
 
         bool apply_default = false;
         QTimer::singleShot(0, &window, [&window, &apply_default] {
@@ -250,7 +324,7 @@ private slots:
             apply_default = apply->isDefault() && !cancel->isDefault();
             QTest::mouseClick(apply, Qt::LeftButton);
         });
-        curves_button->click();
+        curves_action->trigger();
 
         QVERIFY(apply_default);
         QCOMPARE(window.last_effect_backend(), std::string("mps"));
@@ -284,7 +358,7 @@ private slots:
             QTest::mouseRelease(graph, Qt::LeftButton, Qt::NoModifier, lowered);
             QTest::mouseClick(cancel, Qt::LeftButton);
         });
-        curves_button->click();
+        curves_action->trigger();
         QVERIFY(window.document().active_cel().pixels == before);
     }
 
@@ -294,8 +368,8 @@ private slots:
         const std::vector<Pixel> before = source.active_cel().pixels;
         window.replace_document_for_testing(std::move(source));
         QVERIFY(!window.isWindowModified());
-        auto* curves_button = window.findChild<QPushButton*>(QStringLiteral("adjustment.curves"));
-        QVERIFY(curves_button != nullptr);
+        auto* curves_action = window.findChild<QAction*>(QStringLiteral("adjustment.curves"));
+        QVERIFY(curves_action != nullptr);
 
         QTimer::singleShot(0, &window, [&window] {
             auto* dialog = window.findChild<QDialog*>(QStringLiteral("AdjustmentDialog.curves"));
@@ -308,7 +382,7 @@ private slots:
             QVERIFY(apply->isDefault());
             QTest::mouseClick(apply, Qt::LeftButton);
         });
-        curves_button->click();
+        curves_action->trigger();
 
         QVERIFY(window.document().active_cel().pixels == before);
         QCOMPARE(window.last_effect_backend(), std::string("none"));
