@@ -212,7 +212,10 @@ set(PIXELART_TOOL_ICONS
     ${CMAKE_SOURCE_DIR}/res/icons/mask_from_selection.png ${CMAKE_SOURCE_DIR}/res/icons/clear_from_selection.png
     ${CMAKE_SOURCE_DIR}/res/icons/move_pixels.png ${CMAKE_SOURCE_DIR}/res/icons/pencil.png
     ${CMAKE_SOURCE_DIR}/res/icons/rectangle.png ${CMAKE_SOURCE_DIR}/res/icons/rectangle_select.png
-    ${CMAKE_SOURCE_DIR}/res/icons/text.png)
+    ${CMAKE_SOURCE_DIR}/res/icons/text.png
+    ${CMAKE_SOURCE_DIR}/res/icons/new_frame_animation.png
+    ${CMAKE_SOURCE_DIR}/res/icons/play_pause_animation.png
+    ${CMAKE_SOURCE_DIR}/res/icons/stop_animation.png)
 qt_add_executable(PixelArt98
     src/platform/main_qt.cpp
     src/ui/EmbeddedAssets.cpp
@@ -281,6 +284,11 @@ if(PIXELART_BUILD_TESTS)
     pixelart_configure_project_target(pixelart_editor_controller_tests)
     add_test(NAME pixelart_editor_controller_tests COMMAND pixelart_editor_controller_tests)
 
+    add_executable(pixelart_canvas_viewport_tests tests/canvas_viewport_tests.cpp)
+    target_link_libraries(pixelart_canvas_viewport_tests PRIVATE pixelart_app)
+    pixelart_configure_project_target(pixelart_canvas_viewport_tests)
+    add_test(NAME pixelart_canvas_viewport_tests COMMAND pixelart_canvas_viewport_tests)
+
     add_executable(pixelart_shader_compile_tests tests/shader_compile_tests.cpp)
     if(APPLE)
         target_sources(pixelart_shader_compile_tests PRIVATE tests/metal_shader_compile_tests.mm)
@@ -307,6 +315,24 @@ if(PIXELART_BUILD_TESTS)
         pixelart_configure_project_target(pixelart_mps_smoke)
         add_test(NAME pixelart_mps_smoke COMMAND pixelart_mps_smoke)
         set_tests_properties(pixelart_mps_smoke PROPERTIES TIMEOUT 15)
+
+        qt_add_executable(pixelart_qt_mps_effects_e2e
+            tests/qt_mps_effects_e2e.cpp
+            src/ui/QtCanvasWidget.cpp
+            src/ui/QtMainWindow.cpp
+            src/ui/QtModelPreviewWidget.cpp)
+        qt_add_resources(pixelart_qt_mps_effects_e2e test_tool_icons
+            PREFIX "/"
+            BASE "${CMAKE_SOURCE_DIR}/res"
+            FILES ${PIXELART_TOOL_ICONS})
+        target_link_libraries(pixelart_qt_mps_effects_e2e PRIVATE
+            pixelart_app Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGLWidgets Qt6::Test)
+        target_compile_definitions(pixelart_qt_mps_effects_e2e PRIVATE GL_SILENCE_DEPRECATION)
+        pixelart_configure_project_target(pixelart_qt_mps_effects_e2e)
+        add_test(NAME pixelart_qt_mps_effects_e2e COMMAND pixelart_qt_mps_effects_e2e)
+        set_tests_properties(pixelart_qt_mps_effects_e2e PROPERTIES
+            TIMEOUT 30
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     endif()
 
     add_executable(pixelart_gpu_backend_benchmark tests/gpu_backend_benchmark.cpp)

@@ -684,10 +684,10 @@ void apply_motion_blur(Document& doc, int distance, float angle_degrees) {
     });
 }
 
-void apply_radial_blur(Document& doc, int amount) {
+void apply_radial_blur(Document& doc, int amount, int center_x_percent, int center_y_percent) {
     const int samples = std::clamp(amount, 2, 64);
-    const float cx = (static_cast<float>(doc.width) - 1.0f) * 0.5f;
-    const float cy = (static_cast<float>(doc.height) - 1.0f) * 0.5f;
+    const float cx = (static_cast<float>(doc.width) - 1.0f) * static_cast<float>(std::clamp(center_x_percent, 0, 100)) / 100.0f;
+    const float cy = (static_cast<float>(doc.height) - 1.0f) * static_cast<float>(std::clamp(center_y_percent, 0, 100)) / 100.0f;
     transform_from_source(doc, "Radial Blur", [&](int x, int y, const std::vector<Pixel>& source) {
         float red = 0.0f;
         float green = 0.0f;
@@ -710,10 +710,10 @@ void apply_radial_blur(Document& doc, int amount) {
     });
 }
 
-void apply_zoom_blur(Document& doc, int amount) {
+void apply_zoom_blur(Document& doc, int amount, int center_x_percent, int center_y_percent) {
     const int samples = std::clamp(amount, 2, 64);
-    const float cx = (static_cast<float>(doc.width) - 1.0f) * 0.5f;
-    const float cy = (static_cast<float>(doc.height) - 1.0f) * 0.5f;
+    const float cx = (static_cast<float>(doc.width) - 1.0f) * static_cast<float>(std::clamp(center_x_percent, 0, 100)) / 100.0f;
+    const float cy = (static_cast<float>(doc.height) - 1.0f) * static_cast<float>(std::clamp(center_y_percent, 0, 100)) / 100.0f;
     transform_from_source(doc, "Zoom Blur", [&](int x, int y, const std::vector<Pixel>& source) {
         float red = 0.0f;
         float green = 0.0f;
@@ -853,11 +853,11 @@ void apply_frosted_glass(Document& doc, int radius) {
     });
 }
 
-void apply_bulge(Document& doc, float strength) {
+void apply_bulge(Document& doc, float strength, int center_x_percent, int center_y_percent) {
     const float amount = std::clamp(strength, -2.0f, 2.0f);
-    const float cx = (static_cast<float>(doc.width) - 1.0f) * 0.5f;
-    const float cy = (static_cast<float>(doc.height) - 1.0f) * 0.5f;
-    const float max_radius = std::max(cx, cy);
+    const float cx = (static_cast<float>(doc.width) - 1.0f) * static_cast<float>(std::clamp(center_x_percent, 0, 100)) / 100.0f;
+    const float cy = (static_cast<float>(doc.height) - 1.0f) * static_cast<float>(std::clamp(center_y_percent, 0, 100)) / 100.0f;
+    const float max_radius = std::max({cx, cy, static_cast<float>(doc.width - 1) - cx, static_cast<float>(doc.height - 1) - cy});
     transform_from_source(doc, "Bulge", [&](int x, int y, const std::vector<Pixel>& source) {
         const float dx = static_cast<float>(x) - cx;
         const float dy = static_cast<float>(y) - cy;
@@ -867,11 +867,12 @@ void apply_bulge(Document& doc, float strength) {
     });
 }
 
-void apply_twist(Document& doc, float turns) {
+void apply_twist(Document& doc, float turns, int center_x_percent, int center_y_percent, int effect_size_percent) {
     const float amount = std::clamp(turns, -4.0f, 4.0f) * 3.14159265358979323846f;
-    const float cx = (static_cast<float>(doc.width) - 1.0f) * 0.5f;
-    const float cy = (static_cast<float>(doc.height) - 1.0f) * 0.5f;
-    const float max_radius = std::max(cx, cy);
+    const float cx = (static_cast<float>(doc.width) - 1.0f) * static_cast<float>(std::clamp(center_x_percent, 0, 100)) / 100.0f;
+    const float cy = (static_cast<float>(doc.height) - 1.0f) * static_cast<float>(std::clamp(center_y_percent, 0, 100)) / 100.0f;
+    const float base_radius = std::max({cx, cy, static_cast<float>(doc.width - 1) - cx, static_cast<float>(doc.height - 1) - cy});
+    const float max_radius = base_radius * static_cast<float>(std::clamp(effect_size_percent, 10, 200)) / 100.0f;
     transform_from_source(doc, "Twist", [&](int x, int y, const std::vector<Pixel>& source) {
         const float dx = static_cast<float>(x) - cx;
         const float dy = static_cast<float>(y) - cy;
@@ -1035,12 +1036,14 @@ void apply_soften_portrait(Document& doc, int softness, int lighting, int warmth
     });
 }
 
-void apply_vignette(Document& doc, int radius, int strength) {
+void apply_vignette(Document& doc, int radius, int strength, int center_x_percent, int center_y_percent) {
     const float radius_value = std::max(0.1f, static_cast<float>(radius) / 100.0f);
     const float amount = static_cast<float>(std::clamp(strength, 0, 100)) / 100.0f;
-    const float cx = (static_cast<float>(doc.width) - 1.0f) * 0.5f;
-    const float cy = (static_cast<float>(doc.height) - 1.0f) * 0.5f;
-    const float max_radius = std::sqrt(cx * cx + cy * cy) * radius_value;
+    const float cx = (static_cast<float>(doc.width) - 1.0f) * static_cast<float>(std::clamp(center_x_percent, 0, 100)) / 100.0f;
+    const float cy = (static_cast<float>(doc.height) - 1.0f) * static_cast<float>(std::clamp(center_y_percent, 0, 100)) / 100.0f;
+    const float far_x = std::max(cx, static_cast<float>(doc.width - 1) - cx);
+    const float far_y = std::max(cy, static_cast<float>(doc.height - 1) - cy);
+    const float max_radius = std::sqrt(far_x * far_x + far_y * far_y) * radius_value;
     transform_pixels(doc, "Vignette", [&](int x, int y, Pixel pixel) {
         if (!editable(doc, x, y, pixel)) {
             return pixel;

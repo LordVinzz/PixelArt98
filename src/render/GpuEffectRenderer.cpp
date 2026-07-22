@@ -362,7 +362,7 @@ vec4 motion_blur(vec2 uv, int radius, float angle) {
 }
 
 vec4 radial_zoom_blur(vec2 uv, int amount, bool radial) {
-    vec2 center = vec2(0.5);
+    vec2 center = clamp(u_params2.xy, vec2(0.0), vec2(1.0));
     vec2 delta = uv - center;
     vec4 sum = vec4(0.0);
     float count = 0.0;
@@ -479,16 +479,17 @@ vec4 apply_effect(vec2 uv, vec4 src) {
         return sample_source(uv + jitter * vec2(u_size.z, u_size.w) * radius);
     }
     if (mode == 23) {
-        vec2 center = vec2(0.5);
+        vec2 center = clamp(u_params2.xy, vec2(0.0), vec2(1.0));
         vec2 delta = uv - center;
         float dist = length(delta);
         vec2 sample_uv = center + delta * (1.0 - u_params.x * 0.35 * (1.0 - dist));
         return sample_source(sample_uv);
     }
     if (mode == 24) {
-        vec2 center = vec2(0.5);
+        vec2 center = clamp(u_params2.xy, vec2(0.0), vec2(1.0));
         vec2 delta = uv - center;
-        float angle = u_params.x * 6.28318 * (1.0 - length(delta));
+        float radius = length(delta) / max(0.05, u_params.y * 0.75);
+        float angle = u_params.x * 6.28318 * (1.0 - clamp(radius, 0.0, 1.0));
         vec2 sample_uv = center + mat2(cos(angle), -sin(angle), sin(angle), cos(angle)) * delta;
         return sample_source(sample_uv);
     }
@@ -542,7 +543,7 @@ vec4 apply_effect(vec2 uv, vec4 src) {
         return vec4(mix(src.rgb, b.rgb * vec3(1.05, 1.0, 0.94), clamp(u_params.y / 100.0, 0.0, 1.0)), src.a);
     }
     if (mode == 34) {
-        float d = distance(uv, vec2(0.5));
+        float d = distance(uv, clamp(u_params2.xy, vec2(0.0), vec2(1.0))) / max(0.1, u_params.x);
         float v = smoothstep(0.9, 0.2, d + u_params.y / 400.0);
         return vec4(src.rgb * v, src.a);
     }

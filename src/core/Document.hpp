@@ -84,6 +84,9 @@ struct Frame {
     std::vector<Cel> cels;
 };
 
+inline constexpr int kMinimumFrameDurationMs = 20;
+inline constexpr int kMaximumFrameDurationMs = 60'000;
+
 struct Palette {
     std::vector<Pixel> colors;
     int active = 0;
@@ -172,6 +175,8 @@ struct UndoCommand {
     std::optional<std::vector<Frame>> after_frames;
     std::optional<std::vector<AnimationTag>> before_tags;
     std::optional<std::vector<AnimationTag>> after_tags;
+    std::optional<int> before_frame_duration_ms;
+    std::optional<int> after_frame_duration_ms;
     int before_active_layer = 0;
     int before_active_frame = 0;
     int after_active_layer = 0;
@@ -235,6 +240,7 @@ public:
     bool remove_frame(int index);
     void duplicate_frame(int index);
     void move_frame(int from, int to);
+    bool set_frame_duration(int index, int duration_ms);
     void add_tag(const std::string& name, int from, int to);
     bool remove_tag(int index);
 

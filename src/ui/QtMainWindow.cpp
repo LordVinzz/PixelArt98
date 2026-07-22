@@ -28,21 +28,25 @@
 #include <QIcon>
 #include <QInputDialog>
 #include <QLabel>
+#include <QLineF>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
 #include <QPushButton>
 #include <QProgressDialog>
+#include <QRadioButton>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QStyledItemDelegate>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
@@ -52,6 +56,7 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -127,6 +132,7 @@ QToolButton* icon_button(const QIcon& icon, const QString& label) {
     button->setToolButtonStyle(Qt::ToolButtonIconOnly);
     button->setToolTip(label);
     button->setStatusTip(label);
+    button->setAccessibleName(label);
     return button;
 }
 
@@ -173,6 +179,215 @@ std::optional<QColor> parse_rgba_hex(QString text) {
                   static_cast<int>((value >> 8) & 0xffU),
                   static_cast<int>(value & 0xffU));
 }
+
+class CurveEditorWidget final : public QWidget {
+public:
+    explicit CurveEditorWidget(std::array<std::array<int, 256>, 4> histograms, QWidget* parent = nullptr)
+        : QWidget(parent), histograms_(std::move(histograms)) {
+        setObjectName(QStringLiteral("CurvesGraph"));
+        setMinimumSize(420, 260);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        setCursor(Qt::CrossCursor);
+        reset_curve();
+        setProperty("histogramBins", 256);
+        set_channel(0);
+    }
+
+    [[nodiscard]] QSize sizeHint() const override { return {560, 340}; }
+
+    void set_channel(int channel) {
+        channel_ = std::clamp(channel, 0, 3);
+        setProperty("channel", channel_);
+        const auto& histogram = histograms_[static_cast<std::size_t>(channel_)];
+        setProperty("histogramMaximum", std::max(0, *std::max_element(histogram.begin(), histogram.end())));
+        update();
+    }
+
+    void reset_curve() {
+        points_ = {{0.0, 0.0}, {0.5, 0.5}, {1.0, 1.0}};
+        setProperty("curvePointCount", static_cast<int>(points_.size()));
+        update();
+        if (changed) changed();
+    }
+
+    [[nodiscard]] CurvesSettings settings() const {
+        CurvesSettings result;
+        result.point_count = static_cast<int>(points_.size());
+        result.x.fill(0.0f);
+        result.y.fill(0.0f);
+        for (std::size_t index = 0; index < points_.size(); ++index) {
+            result.x[index] = static_cast<float>(points_[index].x());
+            result.y[index] = static_cast<float>(points_[index].y());
+        }
+        result.luma = channel_ == 0;
+        result.red = channel_ == 1;
+        result.green = channel_ == 2;
+        result.blue = channel_ == 3;
+        return result;
+    }
+
+    [[nodiscard]] bool is_identity() const {
+        return points_.size() == 3U && points_[0] == QPointF(0.0, 0.0) &&
+               points_[1] == QPointF(0.5, 0.5) && points_[2] == QPointF(1.0, 1.0);
+    }
+
+    std::function<void()> changed;
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.fillRect(rect(), QColor(22, 25, 30));
+        const QRectF graph = graph_rect();
+        painter.fillRect(graph, QColor(12, 14, 18));
+
+        painter.setPen(QPen(QColor(58, 63, 72), 1.0));
+        for (int step = 0; step <= 4; ++step) {
+            const qreal t = static_cast<qreal>(step) / 4.0;
+            painter.drawLine(QPointF(graph.left() + graph.width() * t, graph.top()),
+                             QPointF(graph.left() + graph.width() * t, graph.bottom()));
+            painter.drawLine(QPointF(graph.left(), graph.top() + graph.height() * t),
+                             QPointF(graph.right(), graph.top() + graph.height() * t));
+        }
+
+        const auto& histogram = histograms_[static_cast<std::size_t>(channel_)];
+        const int maximum = std::max(1, *std::max_element(histogram.begin(), histogram.end()));
+        QColor histogram_color = channel_color();
+        histogram_color.setAlpha(105);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(histogram_color);
+        const qreal bin_width = graph.width() / 256.0;
+        for (int bin = 0; bin < 256; ++bin) {
+            const qreal normalized = std::sqrt(static_cast<qreal>(histogram[static_cast<std::size_t>(bin)]) /
+                                               static_cast<qreal>(maximum));
+            const qreal height = normalized * graph.height();
+            painter.drawRect(QRectF(graph.left() + static_cast<qreal>(bin) * bin_width,
+                                    graph.bottom() - height, std::max(1.0, bin_width), height));
+        }
+
+        QPainterPath curve;
+        for (int sample = 0; sample <= 255; ++sample) {
+            const qreal x = static_cast<qreal>(sample) / 255.0;
+            const QPointF mapped = widget_point({x, evaluate(x)});
+            if (sample == 0) curve.moveTo(mapped); else curve.lineTo(mapped);
+        }
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(10, 10, 12, 180), 5.0));
+        painter.drawPath(curve);
+        painter.setPen(QPen(channel_color(), 2.5));
+        painter.drawPath(curve);
+
+        for (std::size_t index = 0; index < points_.size(); ++index) {
+            const QPointF center = widget_point(points_[index]);
+            painter.setPen(QPen(index == static_cast<std::size_t>(selected_point_) ? Qt::white : QColor(18, 20, 24), 2.0));
+            painter.setBrush(index == static_cast<std::size_t>(selected_point_) ? Qt::white : channel_color());
+            painter.drawEllipse(center, 5.5, 5.5);
+        }
+        painter.setPen(QPen(QColor(105, 110, 120), 1.0));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(graph);
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        const int nearest = nearest_point(event->position());
+        if (event->button() == Qt::RightButton) {
+            if (nearest > 0 && nearest + 1 < static_cast<int>(points_.size())) {
+                points_.erase(points_.begin() + nearest);
+                setProperty("curvePointCount", static_cast<int>(points_.size()));
+                notify_changed();
+            }
+            return;
+        }
+        if (event->button() != Qt::LeftButton) return;
+        if (nearest >= 0) {
+            selected_point_ = nearest;
+        } else if (points_.size() < static_cast<std::size_t>(kMaxCurvePoints) && graph_rect().contains(event->position())) {
+            const QPointF normalized = normalized_point(event->position());
+            const auto position = std::lower_bound(points_.begin(), points_.end(), normalized.x(),
+                [](const QPointF& point, qreal x) { return point.x() < x; });
+            selected_point_ = static_cast<int>(std::distance(points_.begin(), position));
+            points_.insert(position, normalized);
+            setProperty("curvePointCount", static_cast<int>(points_.size()));
+            notify_changed();
+        }
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (selected_point_ < 0 || selected_point_ >= static_cast<int>(points_.size())) return;
+        QPointF normalized = normalized_point(event->position());
+        if (selected_point_ == 0) normalized.setX(0.0);
+        else if (selected_point_ + 1 == static_cast<int>(points_.size())) normalized.setX(1.0);
+        else normalized.setX(std::clamp(normalized.x(), points_[static_cast<std::size_t>(selected_point_ - 1)].x() + 0.01,
+                                        points_[static_cast<std::size_t>(selected_point_ + 1)].x() - 0.01));
+        points_[static_cast<std::size_t>(selected_point_)] = normalized;
+        notify_changed();
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton) {
+            selected_point_ = -1;
+            update();
+            event->accept();
+        }
+    }
+
+private:
+    [[nodiscard]] QRectF graph_rect() const { return QRectF(rect()).adjusted(14.0, 14.0, -14.0, -14.0); }
+
+    [[nodiscard]] QColor channel_color() const {
+        if (channel_ == 1) return QColor(245, 82, 82);
+        if (channel_ == 2) return QColor(76, 210, 112);
+        if (channel_ == 3) return QColor(78, 142, 255);
+        return QColor(225, 228, 235);
+    }
+
+    [[nodiscard]] QPointF widget_point(const QPointF& normalized) const {
+        const QRectF graph = graph_rect();
+        return {graph.left() + normalized.x() * graph.width(), graph.bottom() - normalized.y() * graph.height()};
+    }
+
+    [[nodiscard]] QPointF normalized_point(const QPointF& point) const {
+        const QRectF graph = graph_rect();
+        return {std::clamp((point.x() - graph.left()) / graph.width(), 0.0, 1.0),
+                std::clamp((graph.bottom() - point.y()) / graph.height(), 0.0, 1.0)};
+    }
+
+    [[nodiscard]] int nearest_point(const QPointF& position) const {
+        int nearest = -1;
+        qreal distance = 11.0;
+        for (std::size_t index = 0; index < points_.size(); ++index) {
+            const qreal candidate = QLineF(position, widget_point(points_[index])).length();
+            if (candidate < distance) { distance = candidate; nearest = static_cast<int>(index); }
+        }
+        return nearest;
+    }
+
+    [[nodiscard]] qreal evaluate(qreal value) const {
+        if (value <= points_.front().x()) return points_.front().y();
+        for (std::size_t index = 1; index < points_.size(); ++index) {
+            if (value <= points_[index].x() || index + 1 == points_.size()) {
+                const QPointF& left = points_[index - 1];
+                const QPointF& right = points_[index];
+                const qreal t = std::clamp((value - left.x()) / std::max(0.001, right.x() - left.x()), 0.0, 1.0);
+                const qreal smooth = t * t * (3.0 - 2.0 * t);
+                return left.y() + (right.y() - left.y()) * smooth;
+            }
+        }
+        return points_.back().y();
+    }
+
+    void notify_changed() {
+        update();
+        if (changed) changed();
+    }
+
+    std::array<std::array<int, 256>, 4> histograms_{};
+    std::vector<QPointF> points_;
+    int channel_ = 0;
+    int selected_point_ = -1;
+};
 
 } // namespace
 
@@ -261,6 +476,158 @@ private:
     int hue_ = 0;
     int saturation_ = 0;
     int value_ = 0;
+};
+
+constexpr int kFrameDurationRole = Qt::UserRole + 1;
+constexpr int kFrameHandleWidth = 9;
+constexpr int kFrameBaseWidth = 42;
+constexpr int kFrameMaximumWidth = 600;
+constexpr int kFrameItemHeight = 54;
+constexpr int kFrameMillisecondsPerPixel = 4;
+constexpr int kFrameDurationSnapMs = 10;
+
+int frame_item_width(int duration_ms) {
+    const int duration = std::clamp(duration_ms, kMinimumFrameDurationMs, kMaximumFrameDurationMs);
+    return std::clamp(kFrameBaseWidth + duration / kFrameMillisecondsPerPixel,
+                      kFrameBaseWidth + kMinimumFrameDurationMs / kFrameMillisecondsPerPixel,
+                      kFrameMaximumWidth);
+}
+
+QString frame_item_label(int frame_index, int duration_ms) {
+    return QObject::tr("Frame %1\n%2 ms").arg(frame_index + 1).arg(duration_ms);
+}
+
+void configure_frame_item(QListWidgetItem& item, int frame_index, int duration_ms) {
+    const int duration = std::clamp(duration_ms, kMinimumFrameDurationMs, kMaximumFrameDurationMs);
+    item.setText(frame_item_label(frame_index, duration));
+    item.setData(kFrameDurationRole, duration);
+    item.setSizeHint(QSize(frame_item_width(duration), kFrameItemHeight));
+    item.setToolTip(QObject::tr("Drag the right edge to change this frame's duration"));
+    item.setTextAlignment(Qt::AlignCenter);
+}
+
+class FrameTimelineDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        QStyledItemDelegate::paint(painter, option, index);
+        painter->save();
+        QRect handle = option.rect;
+        handle.setLeft(handle.right() - kFrameHandleWidth + 1);
+        QColor handle_color = option.palette.mid().color();
+        if (option.state.testFlag(QStyle::State_Selected)) {
+            handle_color = option.palette.highlightedText().color();
+        }
+        handle_color.setAlpha(150);
+        painter->fillRect(handle, handle_color);
+        painter->setPen(QPen(option.palette.base().color(), 1.0));
+        const int center = handle.center().x();
+        painter->drawLine(center - 2, handle.top() + 10, center - 2, handle.bottom() - 10);
+        painter->drawLine(center + 1, handle.top() + 10, center + 1, handle.bottom() - 10);
+        painter->restore();
+    }
+};
+
+class FrameTimelineWidget final : public QListWidget {
+public:
+    explicit FrameTimelineWidget(QWidget* parent = nullptr) : QListWidget(parent) {
+        setFlow(QListView::LeftToRight);
+        setWrapping(false);
+        setResizeMode(QListView::Adjust);
+        setMovement(QListView::Static);
+        setSelectionMode(QAbstractItemView::SingleSelection);
+        setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setSpacing(2);
+        setMouseTracking(true);
+        setMinimumHeight(kFrameItemHeight + 12);
+        setItemDelegate(new FrameTimelineDelegate(this));
+        setAccessibleDescription(tr("Timeline. Drag the right edge of a frame to stretch or shorten it."));
+    }
+
+    std::function<void(int, int)> duration_committed;
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton) {
+            const QPoint position = event->position().toPoint();
+            if (QListWidgetItem* item = itemAt(position); item != nullptr && on_resize_handle(item, position)) {
+                resize_row_ = row(item);
+                resize_start_x_ = position.x();
+                resize_start_duration_ms_ = item->data(kFrameDurationRole).toInt();
+                resize_duration_ms_ = resize_start_duration_ms_;
+                setCurrentRow(resize_row_);
+                setCursor(Qt::SplitHCursor);
+                setProperty("resizingFrame", resize_row_);
+                setProperty("previewDurationMs", resize_duration_ms_);
+                event->accept();
+                return;
+            }
+        }
+        QListWidget::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        const QPoint position = event->position().toPoint();
+        if (resize_row_ >= 0) {
+            const double raw_duration = static_cast<double>(resize_start_duration_ms_) +
+                                        static_cast<double>(position.x() - resize_start_x_) *
+                                            static_cast<double>(kFrameMillisecondsPerPixel);
+            const int bounded = static_cast<int>(std::lround(std::clamp(
+                raw_duration,
+                static_cast<double>(kMinimumFrameDurationMs),
+                static_cast<double>(kMaximumFrameDurationMs))));
+            resize_duration_ms_ = std::clamp(
+                ((bounded + kFrameDurationSnapMs / 2) / kFrameDurationSnapMs) * kFrameDurationSnapMs,
+                kMinimumFrameDurationMs,
+                kMaximumFrameDurationMs);
+            if (QListWidgetItem* item = this->item(resize_row_); item != nullptr) {
+                configure_frame_item(*item, resize_row_, resize_duration_ms_);
+            }
+            setProperty("previewDurationMs", resize_duration_ms_);
+            viewport()->update();
+            event->accept();
+            return;
+        }
+
+        QListWidgetItem* hovered = itemAt(position);
+        setCursor(hovered != nullptr && on_resize_handle(hovered, position) ? Qt::SplitHCursor : Qt::ArrowCursor);
+        QListWidget::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (resize_row_ >= 0 && event->button() == Qt::LeftButton) {
+            const int committed_row = resize_row_;
+            const int committed_duration = resize_duration_ms_;
+            const bool changed = committed_duration != resize_start_duration_ms_;
+            resize_row_ = -1;
+            setProperty("resizingFrame", -1);
+            setProperty("lastCommittedDurationMs", committed_duration);
+            setCursor(Qt::ArrowCursor);
+            event->accept();
+            if (changed && duration_committed) duration_committed(committed_row, committed_duration);
+            return;
+        }
+        QListWidget::mouseReleaseEvent(event);
+    }
+
+    void leaveEvent(QEvent* event) override {
+        if (resize_row_ < 0) setCursor(Qt::ArrowCursor);
+        QListWidget::leaveEvent(event);
+    }
+
+private:
+    [[nodiscard]] bool on_resize_handle(const QListWidgetItem* item, const QPoint& position) const {
+        const QRect item_rect = visualItemRect(item);
+        return item_rect.contains(position) && position.x() >= item_rect.right() - kFrameHandleWidth + 1;
+    }
+
+    int resize_row_ = -1;
+    int resize_start_x_ = 0;
+    int resize_start_duration_ms_ = 0;
+    int resize_duration_ms_ = 0;
 };
 
 class PaletteList final : public QListWidget {
@@ -732,56 +1099,104 @@ void QtMainWindow::build_menus() {
     add_action(image, tr("Rotate / Zoom..."), {}, [this] { show_effect_preview(tr("Rotate / Zoom"), [](Document& doc, int amount) { apply_rotate_zoom(doc, static_cast<float>(amount - 50) * 3.6f, 1.0f, 0, 0, ResamplingMode::Bicubic); }); });
 
     QMenu* effects = menuBar()->addMenu(tr("E&ffects"));
+    const auto effect_control = [](const char* id, const char* label, int minimum, int maximum, int initial) {
+        return AdjustmentControl{QString::fromLatin1(id), QString::fromUtf8(label), minimum, maximum, initial};
+    };
+    const auto add_configurable_effect = [this](QMenu* menu, const char* id, const QString& name,
+                                                 std::vector<AdjustmentControl> controls,
+                                                 std::function<void(Document&, const std::vector<int>&)> operation,
+                                                 std::function<GpuEffectRequest(const std::vector<int>&)> gpu_request) {
+        add_effect_action(menu, AdjustmentSpec{QString::fromLatin1(id), name, std::move(controls),
+                                               std::move(operation), std::move(gpu_request)});
+    };
+    const auto request_for = [](GpuEffectMode mode) {
+        return [mode](const std::vector<int>&) { GpuEffectRequest request; request.mode = mode; return request; };
+    };
     QMenu* artistic = effects->addMenu(tr("Artistic"));
-    add_effect_action(artistic, tr("Ink Sketch"), [](Document& d, int v) { apply_ink_sketch(d, v, 50); });
-    add_effect_action(artistic, tr("Oil Painting"), [](Document& d, int v) { apply_oil_painting(d, std::max(1, v / 8), 50); });
-    add_effect_action(artistic, tr("Pencil Sketch"), [](Document& d, int v) { apply_pencil_sketch(d, std::max(1, v / 10), 50); });
+    add_configurable_effect(artistic, "ink-sketch", tr("Ink Sketch"), {effect_control("outline", "Outline", 0, 100, 50), effect_control("coloring", "Coloring", 0, 100, 50)},
+        [](Document& d, const std::vector<int>& v) { apply_ink_sketch(d, v[0], v[1]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::InkSketch; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), 0, 0}; return r; });
+    add_configurable_effect(artistic, "oil-painting", tr("Oil Painting"), {effect_control("brush-size", "Brush size", 1, 16, 6), effect_control("coarseness", "Coarseness", 0, 100, 50)},
+        [](Document& d, const std::vector<int>& v) { apply_oil_painting(d, v[0], v[1]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::OilPainting; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), 0, 0}; return r; });
+    add_configurable_effect(artistic, "pencil-sketch", tr("Pencil Sketch"), {effect_control("tip-size", "Pencil tip size", 1, 10, 5), effect_control("range", "Color range", 0, 100, 50)},
+        [](Document& d, const std::vector<int>& v) { apply_pencil_sketch(d, v[0], v[1]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::PencilSketch; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), 0, 0}; return r; });
     QMenu* blurs = effects->addMenu(tr("Blurs"));
-    add_effect_action(blurs, tr("Gaussian Blur"), [](Document& d, int v) { apply_gaussian_blur(d, std::max(1, v / 8)); });
-    add_effect_action(blurs, tr("Motion Blur"), [](Document& d, int v) { apply_motion_blur(d, std::max(1, v / 4), 0.0f); });
-    add_effect_action(blurs, tr("Radial Blur"), [](Document& d, int v) { apply_radial_blur(d, v); });
-    add_effect_action(blurs, tr("Zoom Blur"), [](Document& d, int v) { apply_zoom_blur(d, v); });
-    add_effect_action(blurs, tr("Median Blur"), [](Document& d, int v) { apply_median_blur(d, std::max(1, v / 12)); });
-    add_effect_action(blurs, tr("Surface Blur"), [](Document& d, int v) { apply_surface_blur(d, std::max(1, v / 12), 32); });
+    add_configurable_effect(blurs, "gaussian-blur", tr("Gaussian Blur"), {effect_control("radius", "Radius", 1, 32, 4)},
+        [](Document& d, const std::vector<int>& v) { apply_gaussian_blur(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::GaussianBlur; r.params[0] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(blurs, "motion-blur", tr("Motion Blur"), {effect_control("distance", "Distance", 1, 24, 8), effect_control("angle", "Angle", -180, 180, 0)},
+        [](Document& d, const std::vector<int>& v) { apply_motion_blur(d, v[0], static_cast<float>(v[1])); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::MotionBlur; r.params = {static_cast<float>(v[0]), 0, static_cast<float>(v[1]) * 3.14159265f / 180.0f, 0}; return r; });
+    add_configurable_effect(blurs, "radial-blur", tr("Radial Blur"), {effect_control("amount", "Amount", 2, 64, 20), effect_control("center-x", "Center X (%)", 0, 100, 50), effect_control("center-y", "Center Y (%)", 0, 100, 50)},
+        [](Document& d, const std::vector<int>& v) { apply_radial_blur(d, v[0], v[1], v[2]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::RadialBlur; r.params[1] = static_cast<float>(v[0]); r.params2 = {v[1] / 100.0f, v[2] / 100.0f, 0, 0}; return r; });
+    add_configurable_effect(blurs, "zoom-blur", tr("Zoom Blur"), {effect_control("amount", "Amount", 2, 64, 20), effect_control("center-x", "Center X (%)", 0, 100, 50), effect_control("center-y", "Center Y (%)", 0, 100, 50)},
+        [](Document& d, const std::vector<int>& v) { apply_zoom_blur(d, v[0], v[1], v[2]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::ZoomBlur; r.params[1] = static_cast<float>(v[0]); r.params2 = {v[1] / 100.0f, v[2] / 100.0f, 0, 0}; return r; });
+    add_configurable_effect(blurs, "median-blur", tr("Median Blur"), {effect_control("radius", "Radius", 1, 8, 2)},
+        [](Document& d, const std::vector<int>& v) { apply_median_blur(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::MedianBlur; r.params[0] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(blurs, "surface-blur", tr("Surface Blur"), {effect_control("radius", "Radius", 1, 8, 3), effect_control("threshold", "Threshold", 0, 255, 32)},
+        [](Document& d, const std::vector<int>& v) { apply_surface_blur(d, v[0], v[1]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::SurfaceBlur; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), 0, 0}; return r; });
     QMenu* color = effects->addMenu(tr("Color"));
-    add_effect_action(color, tr("Auto-Level"), [](Document& d, int) { apply_auto_level(d); });
-    add_effect_action(color, tr("Black and White"), [](Document& d, int) { apply_grayscale(d); });
-    add_effect_action(color, tr("Sepia"), [](Document& d, int) { apply_sepia(d); });
-    add_effect_action(color, tr("Invert Colors"), [](Document& d, int) { apply_invert(d, false); });
-    add_effect_action(color, tr("Invert Alpha"), [](Document& d, int) { apply_invert(d, true); });
-    add_effect_action(color, tr("Posterize"), [](Document& d, int v) { apply_posterize(d, std::clamp(v / 4, 2, 32)); });
+    add_configurable_effect(color, "auto-level-effect", tr("Auto-Level"), {}, [](Document& d, const std::vector<int>&) { apply_auto_level(d); }, request_for(GpuEffectMode::AutoLevel));
+    add_configurable_effect(color, "black-white", tr("Black and White"), {}, [](Document& d, const std::vector<int>&) { apply_grayscale(d); }, request_for(GpuEffectMode::Grayscale));
+    add_configurable_effect(color, "sepia", tr("Sepia"), {}, [](Document& d, const std::vector<int>&) { apply_sepia(d); }, request_for(GpuEffectMode::Sepia));
+    add_configurable_effect(color, "invert-colors", tr("Invert Colors"), {}, [](Document& d, const std::vector<int>&) { apply_invert(d, false); }, request_for(GpuEffectMode::InvertColors));
+    add_configurable_effect(color, "invert-alpha", tr("Invert Alpha"), {}, [](Document& d, const std::vector<int>&) { apply_invert(d, true); }, request_for(GpuEffectMode::InvertAlpha));
+    add_configurable_effect(color, "posterize-effect", tr("Posterize"), {effect_control("levels", "Levels", 2, 32, 8)}, [](Document& d, const std::vector<int>& v) { apply_posterize(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Posterize; r.params[0] = static_cast<float>(v[0]); return r; });
     QMenu* distort = effects->addMenu(tr("Distort"));
-    add_effect_action(distort, tr("Bulge"), [](Document& d, int v) { apply_bulge(d, static_cast<float>(v - 50) / 50.0f); });
-    add_effect_action(distort, tr("Crystalize"), [](Document& d, int v) { apply_crystalize(d, std::max(2, v / 4)); });
-    add_effect_action(distort, tr("Dents"), [](Document& d, int v) { apply_dents(d, 64, v); });
-    add_effect_action(distort, tr("Frosted Glass"), [](Document& d, int v) { apply_frosted_glass(d, std::max(1, v / 12)); });
-    add_effect_action(distort, tr("Pixelate"), [](Document& d, int v) { apply_pixelate(d, std::max(2, v / 4)); });
-    add_effect_action(distort, tr("Polar Inversion"), [](Document& d, int v) { apply_polar_inversion(d, static_cast<float>(v) / 50.0f); });
-    add_effect_action(distort, tr("Tile Reflection"), [](Document& d, int v) { apply_tile_reflection(d, std::max(2, v / 4)); });
-    add_effect_action(distort, tr("Twist"), [](Document& d, int v) { apply_twist(d, static_cast<float>(v - 50) / 25.0f); });
+    add_configurable_effect(distort, "bulge", tr("Bulge"), {effect_control("strength", "Strength", -200, 200, 50), effect_control("center-x", "Center X (%)", 0, 100, 50), effect_control("center-y", "Center Y (%)", 0, 100, 50)},
+        [](Document& d, const std::vector<int>& v) { apply_bulge(d, v[0] / 100.0f, v[1], v[2]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Bulge; r.params[0] = v[0] / 100.0f; r.params2 = {v[1] / 100.0f, v[2] / 100.0f, 0, 0}; return r; });
+    add_configurable_effect(distort, "crystalize", tr("Crystalize"), {effect_control("cell-size", "Cell size", 2, 64, 12)},
+        [](Document& d, const std::vector<int>& v) { apply_crystalize(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Crystalize; r.params[0] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(distort, "dents", tr("Dents"), {effect_control("scale", "Scale", 2, 256, 64), effect_control("amount", "Amount", 1, 64, 20)},
+        [](Document& d, const std::vector<int>& v) { apply_dents(d, v[0], v[1]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Dents; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), 0, 0}; return r; });
+    add_configurable_effect(distort, "frosted-glass", tr("Frosted Glass"), {effect_control("scatter-radius", "Scatter radius", 1, 32, 5)},
+        [](Document& d, const std::vector<int>& v) { apply_frosted_glass(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::FrostedGlass; r.params[0] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(distort, "pixelate", tr("Pixelate"), {effect_control("cell-size", "Cell size", 2, 64, 8)},
+        [](Document& d, const std::vector<int>& v) { apply_pixelate(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Pixelate; r.params[0] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(distort, "polar-inversion", tr("Polar Inversion"), {effect_control("scale", "Scale (%)", 10, 200, 100)},
+        [](Document& d, const std::vector<int>& v) { apply_polar_inversion(d, v[0] / 100.0f); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::PolarInversion; r.params[0] = v[0] / 100.0f; return r; });
+    add_configurable_effect(distort, "tile-reflection", tr("Tile Reflection"), {effect_control("tile-size", "Tile size", 2, 256, 32)},
+        [](Document& d, const std::vector<int>& v) { apply_tile_reflection(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::TileReflection; r.params[0] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(distort, "twist", tr("Twist"), {effect_control("turns", "Turns × 100", -400, 400, 100), effect_control("size", "Effect size (%)", 10, 200, 100), effect_control("center-x", "Center X (%)", 0, 100, 50), effect_control("center-y", "Center Y (%)", 0, 100, 50)},
+        [](Document& d, const std::vector<int>& v) { apply_twist(d, v[0] / 100.0f, v[2], v[3], v[1]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Twist; r.params = {v[0] / 100.0f, v[1] / 100.0f, 0, 0}; r.params2 = {v[2] / 100.0f, v[3] / 100.0f, 0, 0}; return r; });
     QMenu* noise = effects->addMenu(tr("Noise"));
-    add_effect_action(noise, tr("Add Noise"), [](Document& d, int v) { apply_add_noise(d, v * 2, 100, 100); });
-    add_effect_action(noise, tr("Median"), [](Document& d, int v) { apply_median_blur(d, std::max(1, v / 12)); });
-    add_effect_action(noise, tr("Reduce Noise"), [](Document& d, int v) { apply_reduce_noise(d, std::max(1, v / 12)); });
+    add_configurable_effect(noise, "add-noise", tr("Add Noise"), {effect_control("intensity", "Intensity", 0, 255, 64), effect_control("coverage", "Coverage", 0, 100, 100), effect_control("color-saturation", "Color saturation", 0, 100, 100)},
+        [](Document& d, const std::vector<int>& v) { apply_add_noise(d, v[0], v[1], v[2]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::AddNoise; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2]), 0}; return r; });
+    add_configurable_effect(noise, "median", tr("Median"), {effect_control("radius", "Radius", 1, 8, 2)},
+        [](Document& d, const std::vector<int>& v) { apply_median_blur(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::MedianBlur; r.params[0] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(noise, "reduce-noise", tr("Reduce Noise"), {effect_control("radius", "Radius", 1, 8, 2)},
+        [](Document& d, const std::vector<int>& v) { apply_reduce_noise(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::ReduceNoise; r.params[0] = static_cast<float>(v[0]); return r; });
     QMenu* object = effects->addMenu(tr("Object"));
-    add_effect_action(object, tr("Feather"), [](Document& d, int v) { apply_morphology(d, std::max(1, v / 15), true); });
-    add_effect_action(object, tr("Outline"), [](Document& d, int v) { apply_outline(d, std::max(1, v / 20), 255); });
+    add_configurable_effect(object, "feather", tr("Feather"), {effect_control("radius", "Radius", 1, 16, 3)},
+        [](Document& d, const std::vector<int>& v) { apply_morphology(d, v[0], true); }, {});
+    add_configurable_effect(object, "outline-object", tr("Outline"), {effect_control("thickness", "Thickness", 1, 16, 3), effect_control("intensity", "Intensity", 0, 255, 255)},
+        [](Document& d, const std::vector<int>& v) { apply_outline(d, v[0], v[1]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Outline; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), 0, 0}; return r; });
     QMenu* photo = effects->addMenu(tr("Photo"));
-    add_effect_action(photo, tr("Glow"), [](Document& d, int v) { apply_glow(d, std::max(1, v / 12), v, 0); });
-    add_effect_action(photo, tr("Red Eye Removal"), [](Document& d, int v) { apply_red_eye_removal(d, v); });
-    add_effect_action(photo, tr("Sharpen"), [](Document& d, int v) { apply_sharpen(d, v); });
-    add_effect_action(photo, tr("Soften Portrait"), [](Document& d, int v) { apply_soften_portrait(d, v, 0, 0); });
-    add_effect_action(photo, tr("Vignette"), [](Document& d, int v) { apply_vignette(d, 50, v); });
+    add_configurable_effect(photo, "glow", tr("Glow"), {effect_control("radius", "Radius", 1, 16, 5), effect_control("brightness", "Brightness", -100, 100, 30), effect_control("contrast", "Contrast", -100, 100, 0)},
+        [](Document& d, const std::vector<int>& v) { apply_glow(d, v[0], v[1], v[2]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Glow; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2]), 0}; return r; });
+    add_configurable_effect(photo, "red-eye-removal", tr("Red Eye Removal"), {effect_control("strength", "Strength", 0, 100, 70)},
+        [](Document& d, const std::vector<int>& v) { apply_red_eye_removal(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::RedEyeRemoval; r.params[1] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(photo, "sharpen", tr("Sharpen"), {effect_control("amount", "Amount", 0, 100, 50)},
+        [](Document& d, const std::vector<int>& v) { apply_sharpen(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Sharpen; r.params[1] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(photo, "soften-portrait", tr("Soften Portrait"), {effect_control("softness", "Softness", 0, 100, 50), effect_control("lighting", "Lighting", -100, 100, 0), effect_control("warmth", "Warmth", -100, 100, 0)},
+        [](Document& d, const std::vector<int>& v) { apply_soften_portrait(d, v[0], v[1], v[2]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::SoftenPortrait; r.params = {static_cast<float>(std::max(1, v[0] / 12)), static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2])}; return r; });
+    add_configurable_effect(photo, "vignette", tr("Vignette"), {effect_control("radius", "Radius (%)", 10, 200, 70), effect_control("strength", "Strength", 0, 100, 60), effect_control("center-x", "Center X (%)", 0, 100, 50), effect_control("center-y", "Center Y (%)", 0, 100, 50)},
+        [](Document& d, const std::vector<int>& v) { apply_vignette(d, v[0], v[1], v[2], v[3]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Vignette; r.params = {v[0] / 100.0f, static_cast<float>(v[1]), 0, 0}; r.params2 = {v[2] / 100.0f, v[3] / 100.0f, 0, 0}; return r; });
     QMenu* render = effects->addMenu(tr("Render"));
-    add_effect_action(render, tr("Clouds"), [this](Document& d, int v) { apply_clouds(d, std::max(2, v * 2), 4, controller_.tool().primary, controller_.tool().secondary); });
-    add_effect_action(render, tr("Julia Fractal"), [](Document& d, int v) { apply_julia_fractal(d, std::max(0.1f, static_cast<float>(v) / 20.0f), 0.0f); });
-    add_effect_action(render, tr("Mandelbrot Fractal"), [](Document& d, int v) { apply_mandelbrot_fractal(d, std::max(0.1f, static_cast<float>(v) / 20.0f), 0.0f, false); });
-    add_effect_action(render, tr("Turbulence"), [](Document& d, int v) { apply_turbulence(d, std::max(2, v * 2), 4); });
+    add_configurable_effect(render, "clouds", tr("Clouds"), {effect_control("scale", "Scale", 2, 512, 96), effect_control("roughness", "Roughness / octaves", 1, 8, 4)},
+        [this](Document& d, const std::vector<int>& v) { apply_clouds(d, v[0], v[1], controller_.tool().primary, controller_.tool().secondary); }, [this](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Clouds; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), 0, 0}; r.primary = controller_.tool().primary; r.secondary = controller_.tool().secondary; return r; });
+    add_configurable_effect(render, "julia-fractal", tr("Julia Fractal"), {effect_control("zoom", "Zoom × 100", 10, 1000, 100), effect_control("angle", "Angle", -180, 180, 0)},
+        [](Document& d, const std::vector<int>& v) { apply_julia_fractal(d, v[0] / 100.0f, static_cast<float>(v[1])); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::JuliaFractal; r.params = {v[0] / 100.0f, 0, static_cast<float>(v[1]) * 3.14159265f / 180.0f, 0}; return r; });
+    add_configurable_effect(render, "mandelbrot-fractal", tr("Mandelbrot Fractal"), {effect_control("zoom", "Zoom × 100", 10, 1000, 100), effect_control("angle", "Angle", -180, 180, 0), effect_control("invert", "Invert (0 / 1)", 0, 1, 0)},
+        [](Document& d, const std::vector<int>& v) { apply_mandelbrot_fractal(d, v[0] / 100.0f, static_cast<float>(v[1]), v[2] != 0); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::MandelbrotFractal; r.params = {v[0] / 100.0f, static_cast<float>(v[2]), static_cast<float>(v[1]) * 3.14159265f / 180.0f, 0}; return r; });
+    add_configurable_effect(render, "turbulence", tr("Turbulence"), {effect_control("scale", "Scale", 2, 512, 96), effect_control("octaves", "Octaves", 1, 8, 4)},
+        [](Document& d, const std::vector<int>& v) { apply_turbulence(d, v[0], v[1]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Turbulence; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), 0, 0}; return r; });
     QMenu* stylize = effects->addMenu(tr("Stylize"));
-    add_effect_action(stylize, tr("Edge Detect"), [](Document& d, int v) { apply_edge_detect(d, v); });
-    add_effect_action(stylize, tr("Emboss"), [](Document& d, int v) { apply_emboss(d, static_cast<float>(v) * 3.6f); });
-    add_effect_action(stylize, tr("Outline"), [](Document& d, int v) { apply_outline(d, std::max(1, v / 20), 255); });
-    add_effect_action(stylize, tr("Relief"), [](Document& d, int v) { apply_relief(d, static_cast<float>(v) * 3.6f); });
+    add_configurable_effect(stylize, "edge-detect", tr("Edge Detect"), {effect_control("strength", "Strength", 1, 200, 100)},
+        [](Document& d, const std::vector<int>& v) { apply_edge_detect(d, v[0]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::EdgeDetect; r.params[1] = static_cast<float>(v[0]); return r; });
+    add_configurable_effect(stylize, "emboss", tr("Emboss"), {effect_control("angle", "Angle", -180, 180, 45)},
+        [](Document& d, const std::vector<int>& v) { apply_emboss(d, static_cast<float>(v[0])); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Emboss; r.params[0] = static_cast<float>(v[0]) * 3.14159265f / 180.0f; return r; });
+    add_configurable_effect(stylize, "outline-stylize", tr("Outline"), {effect_control("thickness", "Thickness", 1, 16, 3), effect_control("intensity", "Intensity", 0, 255, 255)},
+        [](Document& d, const std::vector<int>& v) { apply_outline(d, v[0], v[1]); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Outline; r.params = {static_cast<float>(v[0]), static_cast<float>(v[1]), 0, 0}; return r; });
+    add_configurable_effect(stylize, "relief", tr("Relief"), {effect_control("angle", "Angle", -180, 180, 45)},
+        [](Document& d, const std::vector<int>& v) { apply_relief(d, static_cast<float>(v[0])); }, [](const std::vector<int>& v) { GpuEffectRequest r; r.mode = GpuEffectMode::Relief; r.params[0] = static_cast<float>(v[0]) * 3.14159265f / 180.0f; return r; });
 
     QMenu* view = menuBar()->addMenu(tr("&View"));
     QAction* grid = add_action(view, tr("Grid"), {}, [this](bool checked) { canvas_->set_grid_visible(checked); }); grid->setCheckable(true); grid->setChecked(true);
@@ -949,25 +1364,153 @@ void QtMainWindow::build_layers_dock() {
 }
 
 void QtMainWindow::build_adjustments_dock() {
-    auto* dock = new QDockWidget(tr("Adjustments"), this); dock->setObjectName(QStringLiteral("AdjustmentsDock")); auto* panel = new QWidget; auto* grid = new QGridLayout(panel);
-    struct Adjustment { const char* name; EffectOperation operation; };
-    const std::array<Adjustment, 10> adjustments = {{{"Brightness / Contrast", [](Document& d, int v) { apply_brightness_contrast(d, (v - 50) * 3, 0); }}, {"HSV", [](Document& d, int v) { apply_hsv(d, static_cast<float>(v - 50) * 3.6f, 0.0f, 0.0f); }}, {"Temperature", [](Document& d, int v) { apply_temperature(d, (v - 50) * 2); }}, {"Levels", [](Document& d, int) { apply_levels(d, LevelsSettings{}); }}, {"Tonal Range", [](Document& d, int v) { apply_tonal_range(d, 0, v - 50, 0, 0); }}, {"Curves", [](Document& d, int) { apply_curves(d, CurvesSettings{}); }}, {"Auto-Level", [](Document& d, int) { apply_auto_level(d); }}, {"Posterize", [](Document& d, int v) { apply_posterize(d, std::clamp(v / 4, 2, 32)); }}, {"Quantize", [this](Document& d, int) { apply_palette_quantize(d, controller_.document().palette, false); }}, {"Dither", [this](Document& d, int) { apply_palette_quantize(d, controller_.document().palette, true); }}}};
-    int index = 0; for (const auto& adjustment : adjustments) { auto* button = new QPushButton(QString::fromUtf8(adjustment.name)); grid->addWidget(button, index / 2, index % 2); connect(button, &QPushButton::clicked, this, [this, adjustment] { show_effect_preview(QString::fromUtf8(adjustment.name), adjustment.operation); }); ++index; }
-    auto* depth = new QPushButton(tr("Generate Depth Map...")); grid->addWidget(depth, index / 2, 0, 1, 2); connect(depth, &QPushButton::clicked, this, [this] { generate_depth_map(); });
-    dock->setWidget(panel); addDockWidget(Qt::RightDockWidgetArea, dock); docks_.push_back(dock);
+    auto control = [](const char* id, const char* label, int minimum, int maximum, int initial) {
+        return AdjustmentControl{QString::fromLatin1(id), QString::fromUtf8(label), minimum, maximum, initial};
+    };
+    std::vector<AdjustmentSpec> adjustments;
+    adjustments.push_back({QStringLiteral("brightness-contrast"), tr("Brightness / Contrast"),
+        {control("brightness", "Brightness", -255, 255, 0), control("contrast", "Contrast", -100, 100, 0)},
+        [](Document& document, const std::vector<int>& value) { apply_brightness_contrast(document, value[0], value[1]); },
+        [](const std::vector<int>& value) {
+            const float contrast = static_cast<float>(value[1]);
+            const float factor = (259.0f * (contrast + 255.0f)) / (255.0f * (259.0f - contrast));
+            GpuEffectRequest request; request.mode = GpuEffectMode::BrightnessContrast;
+            request.params = {static_cast<float>(value[0]) / 255.0f, (factor - 1.0f) * 0.5f, 0.0f, 0.0f}; return request;
+        }});
+    adjustments.push_back({QStringLiteral("hsv"), tr("HSV"),
+        {control("hue", "Hue", -180, 180, 0), control("saturation", "Saturation", -100, 100, 0),
+         control("value", "Value", -100, 100, 0)},
+        [](Document& document, const std::vector<int>& value) {
+            apply_hsv(document, static_cast<float>(value[0]), static_cast<float>(value[1]) / 100.0f,
+                      static_cast<float>(value[2]) / 100.0f);
+        },
+        [](const std::vector<int>& value) {
+            GpuEffectRequest request; request.mode = GpuEffectMode::Hsv;
+            request.params = {static_cast<float>(value[0]) / 360.0f, static_cast<float>(value[1]) / 100.0f,
+                              static_cast<float>(value[2]) / 100.0f, 0.0f}; return request;
+        }});
+    adjustments.push_back({QStringLiteral("temperature"), tr("Temperature"),
+        {control("temperature", "Temperature", -100, 100, 0)},
+        [](Document& document, const std::vector<int>& value) { apply_temperature(document, value[0]); },
+        [](const std::vector<int>& value) {
+            GpuEffectRequest request; request.mode = GpuEffectMode::Temperature;
+            request.params[0] = static_cast<float>(value[0]) / 100.0f; return request;
+        }});
+    adjustments.push_back({QStringLiteral("levels"), tr("Levels"),
+        {control("input-black", "Input black", 0, 254, 0), control("input-white", "Input white", 1, 255, 255),
+         control("gamma", "Gamma × 100", 5, 300, 100), control("output-black", "Output black", 0, 255, 0),
+         control("output-white", "Output white", 0, 255, 255)},
+        [](Document& document, const std::vector<int>& value) {
+            LevelsSettings settings; settings.in_black = value[0]; settings.in_white = value[1];
+            settings.gamma = static_cast<float>(value[2]) / 100.0f; settings.out_black = value[3]; settings.out_white = value[4];
+            apply_levels(document, settings);
+        },
+        [](const std::vector<int>& value) {
+            GpuEffectRequest request; request.mode = GpuEffectMode::Levels;
+            request.params = {static_cast<float>(value[0]) / 255.0f, static_cast<float>(value[1]) / 255.0f,
+                              static_cast<float>(value[2]) / 100.0f, static_cast<float>(value[3]) / 255.0f};
+            request.params2[0] = static_cast<float>(value[4]) / 255.0f; return request;
+        }});
+    adjustments.push_back({QStringLiteral("tonal-range"), tr("Tonal Range"),
+        {control("white-point", "White point", -100, 100, 0), control("highlights", "Highlights", -100, 100, 0),
+         control("shadows", "Shadows", -100, 100, 0), control("black-point", "Black point", -100, 100, 0)},
+        [](Document& document, const std::vector<int>& value) { apply_tonal_range(document, value[0], value[1], value[2], value[3]); },
+        [](const std::vector<int>& value) {
+            GpuEffectRequest request; request.mode = GpuEffectMode::TonalRange;
+            request.params = {static_cast<float>(value[0]) / 100.0f, static_cast<float>(value[1]) / 100.0f,
+                              static_cast<float>(value[2]) / 100.0f, static_cast<float>(value[3]) / 100.0f}; return request;
+        }});
+    adjustments.push_back({QStringLiteral("curves"), tr("Curves"), {}, {}, {}});
+    adjustments.push_back({QStringLiteral("auto-level"), tr("Auto-Level"), {},
+        [](Document& document, const std::vector<int>&) { apply_auto_level(document); },
+        [](const std::vector<int>&) { GpuEffectRequest request; request.mode = GpuEffectMode::AutoLevel; return request; }});
+    adjustments.push_back({QStringLiteral("posterize"), tr("Posterize"), {control("levels", "Levels", 2, 32, 8)},
+        [](Document& document, const std::vector<int>& value) { apply_posterize(document, value[0]); },
+        [](const std::vector<int>& value) { GpuEffectRequest request; request.mode = GpuEffectMode::Posterize; request.params[0] = static_cast<float>(value[0]); return request; }});
+    adjustments.push_back({QStringLiteral("quantize"), tr("Quantize"), {},
+        [this](Document& document, const std::vector<int>&) { apply_palette_quantize(document, controller_.document().palette, false); },
+        [this](const std::vector<int>&) { GpuEffectRequest request; request.mode = GpuEffectMode::PaletteQuantize; request.params[0] = static_cast<float>(std::max<std::size_t>(2, controller_.document().palette.colors.size())); return request; }});
+    adjustments.push_back({QStringLiteral("dither"), tr("Dither"), {},
+        [this](Document& document, const std::vector<int>&) { apply_palette_quantize(document, controller_.document().palette, true); },
+        [this](const std::vector<int>&) { GpuEffectRequest request; request.mode = GpuEffectMode::PaletteDither; request.params[0] = static_cast<float>(std::max<std::size_t>(2, controller_.document().palette.colors.size())); return request; }});
+
+    auto* dock = new QDockWidget(tr("Adjustments"), this);
+    dock->setObjectName(QStringLiteral("AdjustmentsDock"));
+    auto* panel = new QWidget;
+    auto* grid = new QGridLayout(panel);
+    int index = 0;
+    for (const AdjustmentSpec& adjustment : adjustments) {
+        auto* button = new QPushButton(adjustment.name);
+        button->setObjectName(QStringLiteral("adjustment.") + adjustment.id);
+        grid->addWidget(button, index / 2, index % 2);
+        connect(button, &QPushButton::clicked, this, [this, adjustment] { show_adjustment_dialog(adjustment); });
+        ++index;
+    }
+    auto* depth = new QPushButton(tr("Generate Depth Map..."));
+    grid->addWidget(depth, index / 2, 0, 1, 2);
+    connect(depth, &QPushButton::clicked, this, [this] { generate_depth_map(); });
+    dock->setWidget(panel);
+    addDockWidget(Qt::RightDockWidgetArea, dock);
+    docks_.push_back(dock);
 }
 
 void QtMainWindow::build_animation_dock() {
-    auto* dock = new QDockWidget(tr("Animation"), this); dock->setObjectName(QStringLiteral("AnimationDock")); frames_list_ = new QListWidget; frames_list_->setFlow(QListView::LeftToRight); frames_list_->setWrapping(false);
-    auto* play = new QPushButton(tr("Play / Pause")); auto* stop = new QPushButton(tr("Stop")); auto* add = new QPushButton(tr("New Frame")); auto* duplicate = new QPushButton(tr("Duplicate")); auto* remove = new QPushButton(tr("Delete")); auto* onion = new QCheckBox(tr("Onion Skin")); onion->setChecked(true);
+    auto* dock = new QDockWidget(tr("Animation"), this);
+    dock->setObjectName(QStringLiteral("AnimationDock"));
+    auto* timeline = new FrameTimelineWidget;
+    frames_list_ = timeline;
+    frames_list_->setObjectName(QStringLiteral("AnimationFrames"));
+
+    auto* play = icon_button(icon_resource(QStringLiteral("play_pause_animation.png")), tr("Play / Pause"));
+    auto* stop = icon_button(icon_resource(QStringLiteral("stop_animation.png")), tr("Stop"));
+    auto* add = icon_button(icon_resource(QStringLiteral("new_frame_animation.png")), tr("New Frame"));
+    auto* duplicate = icon_button(icon_resource(QStringLiteral("duplicate_layer.png")), tr("Duplicate Frame"));
+    auto* remove = icon_button(icon_resource(QStringLiteral("remove_layer.png")), tr("Delete Frame"));
+    play->setObjectName(QStringLiteral("animation.playPause"));
+    stop->setObjectName(QStringLiteral("animation.stop"));
+    add->setObjectName(QStringLiteral("animation.newFrame"));
+    duplicate->setObjectName(QStringLiteral("animation.duplicateFrame"));
+    remove->setObjectName(QStringLiteral("animation.deleteFrame"));
+    play->setCheckable(true);
+
+    auto* onion = new QCheckBox(tr("Onion Skin"));
+    onion->setObjectName(QStringLiteral("animation.onionSkin"));
+    onion->setChecked(true);
+
+    auto* actions = new QWidget;
+    actions->setObjectName(QStringLiteral("AnimationActions"));
+    auto* actions_layout = new QHBoxLayout(actions);
+    actions_layout->setContentsMargins(0, 0, 0, 0);
+    actions_layout->setSpacing(4);
+    actions_layout->addWidget(play);
+    actions_layout->addWidget(stop);
+    actions_layout->addWidget(add);
+    actions_layout->addWidget(duplicate);
+    actions_layout->addWidget(remove);
+    actions_layout->addStretch(1);
+    actions_layout->addWidget(onion);
+
+    timeline->duration_committed = [this](int frame_index, int duration_ms) {
+        if (!controller_.document().set_frame_duration(frame_index, duration_ms)) return;
+        controller_.mark_changed("Change Frame Duration");
+        if (playing_ && frame_index == controller_.document().active_frame) {
+            playback_timer_->setInterval(duration_ms);
+        }
+        refresh_frames();
+        setWindowModified(controller_.modified());
+        setWindowTitle(QStringLiteral("PixelArt98[*]"));
+        set_status(QString::fromStdString(controller_.status()));
+    };
     connect(frames_list_, &QListWidget::currentRowChanged, this, [this](int row) { if (row >= 0) { controller_.document().active_frame = row; controller_.invalidate_display(); canvas_->update(); } });
-    connect(play, &QPushButton::clicked, this, [this] { playing_ = !playing_; if (playing_) playback_timer_->start(std::max(20, controller_.document().frames[static_cast<std::size_t>(controller_.document().active_frame)].duration_ms)); else playback_timer_->stop(); });
-    connect(stop, &QPushButton::clicked, this, [this] { playing_ = false; playback_timer_->stop(); });
-    connect(add, &QPushButton::clicked, this, [this] { controller_.document().add_frame(false); controller_.mark_changed("Add Frame"); refresh_all(); });
-    connect(duplicate, &QPushButton::clicked, this, [this] { controller_.document().duplicate_frame(controller_.document().active_frame); controller_.mark_changed("Duplicate Frame"); refresh_all(); });
-    connect(remove, &QPushButton::clicked, this, [this] { if (controller_.document().remove_frame(controller_.document().active_frame)) controller_.mark_changed("Delete Frame"); refresh_all(); });
+    connect(play, &QToolButton::toggled, this, [this](bool checked) { playing_ = checked; if (playing_) playback_timer_->start(std::max(20, controller_.document().frames[static_cast<std::size_t>(controller_.document().active_frame)].duration_ms)); else playback_timer_->stop(); });
+    connect(stop, &QToolButton::clicked, this, [this, play] { playing_ = false; playback_timer_->stop(); play->setChecked(false); });
+    connect(add, &QToolButton::clicked, this, [this] { controller_.document().add_frame(false); controller_.mark_changed("Add Frame"); refresh_all(); });
+    connect(duplicate, &QToolButton::clicked, this, [this] { controller_.document().duplicate_frame(controller_.document().active_frame); controller_.mark_changed("Duplicate Frame"); refresh_all(); });
+    connect(remove, &QToolButton::clicked, this, [this] { if (controller_.document().remove_frame(controller_.document().active_frame)) controller_.mark_changed("Delete Frame"); refresh_all(); });
     connect(onion, &QCheckBox::toggled, canvas_, &QtCanvasWidget::set_onion_visible);
-    dock->setWidget(vertical_panel({frames_list_, play, stop, add, duplicate, remove, onion})); addDockWidget(Qt::BottomDockWidgetArea, dock); docks_.push_back(dock);
+    dock->setWidget(vertical_panel({frames_list_, actions}));
+    addDockWidget(Qt::BottomDockWidgetArea, dock);
+    docks_.push_back(dock);
 }
 
 void QtMainWindow::build_history_dock() {
@@ -1123,7 +1666,18 @@ void QtMainWindow::refresh_all() {
 }
 
 void QtMainWindow::refresh_layers() { if (layers_list_ == nullptr) return; const QSignalBlocker blocker(layers_list_); layers_list_->clear(); for (const Layer& layer : controller_.document().layers) { auto* item = new QListWidgetItem(QString::fromStdString(layer.name)); item->setCheckState(layer.visible ? Qt::Checked : Qt::Unchecked); layers_list_->addItem(item); } layers_list_->setCurrentRow(controller_.document().active_layer); }
-void QtMainWindow::refresh_frames() { if (frames_list_ == nullptr) return; const QSignalBlocker blocker(frames_list_); frames_list_->clear(); for (int i = 0; i < static_cast<int>(controller_.document().frames.size()); ++i) frames_list_->addItem(tr("Frame %1\n%2 ms").arg(i + 1).arg(controller_.document().frames[static_cast<std::size_t>(i)].duration_ms)); frames_list_->setCurrentRow(controller_.document().active_frame); }
+void QtMainWindow::refresh_frames() {
+    if (frames_list_ == nullptr) return;
+    const QSignalBlocker blocker(frames_list_);
+    frames_list_->clear();
+    for (int index = 0; index < static_cast<int>(controller_.document().frames.size()); ++index) {
+        const int duration = controller_.document().frames[static_cast<std::size_t>(index)].duration_ms;
+        auto* item = new QListWidgetItem;
+        configure_frame_item(*item, index, duration);
+        frames_list_->addItem(item);
+    }
+    frames_list_->setCurrentRow(controller_.document().active_frame);
+}
 void QtMainWindow::refresh_model() { if (model_list_ == nullptr) return; const QSignalBlocker blocker(model_list_); model_list_->clear(); for (const Cuboid& cuboid : controller_.model().cuboids) model_list_->addItem(QString::fromStdString(cuboid.name)); model_list_->setCurrentRow(controller_.model().selected_cuboid); }
 void QtMainWindow::set_status(const QString& status) { statusBar()->showMessage(status); }
 void QtMainWindow::report_error(const QString& operation, const std::string& error) { const QString text = tr("%1: %2").arg(operation, QString::fromStdString(error)); if (console_list_ != nullptr) console_list_->addItem(tr("%1. %2").arg(++error_sequence_).arg(text)); QMessageBox::critical(this, operation, text); if (settings_.auto_open_error_console && console_list_ != nullptr) console_list_->parentWidget()->show(); }
@@ -1166,8 +1720,258 @@ void QtMainWindow::import_model(const QString& kind) { const QString filter = ki
 void QtMainWindow::export_model(const QString& kind) { QString extension = QStringLiteral("json"); if (kind.startsWith(QStringLiteral("glTF"))) extension = QStringLiteral("gltf"); if (kind.startsWith(QStringLiteral("Three"))) extension = QStringLiteral("zip"); if (kind.startsWith(QStringLiteral("STL"))) extension = QStringLiteral("stl"); const QString path = QFileDialog::getSaveFileName(this, tr("Export %1").arg(kind), QStringLiteral("model.") + extension); if (path.isEmpty()) return; std::string error; bool ok = false; if (kind.startsWith(QStringLiteral("glTF"))) ok = export_gltf_model(path.toStdString(), controller_.model(), "texture.png", &error); else if (kind.startsWith(QStringLiteral("Three"))) ok = export_threejs_pack(path.toStdString(), controller_.document(), controller_.model(), &error); else if (kind.startsWith(QStringLiteral("STL"))) ok = export_stl_model(path.toStdString(), controller_.model(), &error); else if (kind.startsWith(QStringLiteral("Minecraft"))) ok = export_minecraft_model(path.toStdString(), controller_.model(), "texture.png", &error); else ok = export_model_json(path.toStdString(), controller_.model(), &error); if (!ok) report_error(tr("Export %1").arg(kind), error); }
 
 void QtMainWindow::apply_transform(const QString& name, const std::function<void(Document&)>& operation) { operation(controller_.document()); controller_.mark_changed(name.toStdString()); refresh_all(); }
-QAction* QtMainWindow::add_effect_action(QMenu* menu, const QString& name, EffectOperation operation) { QAction* action = menu->addAction(name); connect(action, &QAction::triggered, this, [this, name, operation] { show_effect_preview(name, operation); }); return action; }
-void QtMainWindow::show_effect_preview(const QString& name, const EffectOperation& operation) { Document original = controller_.document(); QDialog dialog(this); dialog.setWindowTitle(tr("Effect Preview: %1").arg(name)); QVBoxLayout layout(&dialog); auto* amount = new QSlider(Qt::Horizontal); amount->setRange(0, 100); amount->setValue(50); auto* value = new QLabel(QStringLiteral("50")); layout.addWidget(new QLabel(name)); layout.addWidget(amount); layout.addWidget(value); QDialogButtonBox buttons(QDialogButtonBox::Apply | QDialogButtonBox::Cancel); layout.addWidget(&buttons); const auto preview = [this, &original, operation](int setting) { controller_.document() = original; operation(controller_.document(), setting); controller_.invalidate_display(); canvas_->update(); }; connect(amount, &QSlider::valueChanged, this, [preview, value](int setting) { value->setText(QString::number(setting)); preview(setting); }); connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); preview(50); if (dialog.exec() == QDialog::Accepted) { controller_.mark_changed(name.toStdString()); } else { controller_.document() = std::move(original); controller_.invalidate_display(); } refresh_all(); }
+QAction* QtMainWindow::add_effect_action(QMenu* menu, const QString& name, EffectOperation operation,
+                                         GpuEffectRequestFactory gpu_request) {
+    QAction* action = menu->addAction(name);
+    action->setObjectName(QStringLiteral("effect.") + name);
+    connect(action, &QAction::triggered, this, [this, name, operation, gpu_request] {
+        show_effect_preview(name, operation, gpu_request);
+    });
+    return action;
+}
+
+QAction* QtMainWindow::add_effect_action(QMenu* menu, AdjustmentSpec effect) {
+    QAction* action = menu->addAction(effect.name);
+    action->setObjectName(QStringLiteral("effect.") + effect.id);
+    connect(action, &QAction::triggered, this, [this, effect] { show_adjustment_dialog(effect); });
+    return action;
+}
+
+void QtMainWindow::show_effect_preview(const QString& name, const EffectOperation& operation,
+                                       const GpuEffectRequestFactory& gpu_request) {
+    Document original = controller_.document();
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("EffectPreviewDialog"));
+    dialog.setWindowTitle(tr("Effect Preview: %1").arg(name));
+    QVBoxLayout layout(&dialog);
+    auto* amount = new QSlider(Qt::Horizontal);
+    amount->setObjectName(QStringLiteral("EffectAmountSlider"));
+    amount->setRange(0, 100);
+    amount->setValue(50);
+    auto* value = new QLabel(QStringLiteral("50"));
+    layout.addWidget(new QLabel(name));
+    layout.addWidget(amount);
+    layout.addWidget(value);
+    QDialogButtonBox buttons(QDialogButtonBox::Apply | QDialogButtonBox::Cancel);
+    buttons.setObjectName(QStringLiteral("EffectDialogButtons"));
+    layout.addWidget(&buttons);
+    QPushButton* apply_button = buttons.button(QDialogButtonBox::Apply);
+    QPushButton* cancel_button = buttons.button(QDialogButtonBox::Cancel);
+    apply_button->setDefault(true);
+    apply_button->setAutoDefault(true);
+    cancel_button->setDefault(false);
+    cancel_button->setAutoDefault(false);
+    const auto preview = [this, &original, operation, gpu_request](int setting) {
+        controller_.document() = original;
+        if (!gpu_request || !apply_mps_preview(controller_.document(), gpu_request(setting))) {
+            operation(controller_.document(), setting);
+            last_effect_backend_ = "cpu";
+        }
+        controller_.invalidate_display();
+        canvas_->update();
+    };
+    connect(amount, &QSlider::valueChanged, this, [preview, value](int setting) {
+        value->setText(QString::number(setting));
+        preview(setting);
+    });
+    connect(apply_button, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
+    preview(50);
+    if (dialog.exec() == QDialog::Accepted) {
+        controller_.mark_changed(name.toStdString());
+    } else {
+        controller_.document() = std::move(original);
+        controller_.invalidate_display();
+    }
+    refresh_all();
+}
+
+bool QtMainWindow::apply_mps_preview(Document& document, const GpuEffectRequest& request) {
+    if (!settings_.heavy_gpu_optimization || !settings_.mps_backend) return false;
+    std::vector<Pixel> output;
+    const bool rendered = mps_effect_renderer_.render_active_cel(document, request) &&
+                          mps_effect_renderer_.read_output_pixels(output) &&
+                          output.size() == document.active_cel().pixels.size();
+    if (!rendered) return false;
+    document.active_cel().pixels = std::move(output);
+    last_effect_backend_ = "mps";
+    return true;
+}
+
+void QtMainWindow::show_curves_dialog(const QString& name) {
+    Document original = controller_.document();
+    std::array<std::array<int, 256>, 4> histograms = {
+        original.histogram_luma(), original.histogram_channel(0),
+        original.histogram_channel(1), original.histogram_channel(2)};
+
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("AdjustmentDialog.curves"));
+    dialog.setWindowTitle(tr("Adjustment: %1").arg(name));
+    dialog.resize(640, 500);
+    QVBoxLayout layout(&dialog);
+
+    auto* channel_row = new QWidget;
+    auto* channel_layout = new QHBoxLayout(channel_row);
+    channel_layout->setContentsMargins(0, 0, 0, 0);
+    channel_layout->addWidget(new QLabel(tr("Channel:")));
+    QButtonGroup channel_group(&dialog);
+    const std::array<std::pair<const char*, const char*>, 4> channels = {{{"luma", "Luminosity"}, {"red", "Red"},
+                                                                          {"green", "Green"}, {"blue", "Blue"}}};
+    for (int index = 0; index < static_cast<int>(channels.size()); ++index) {
+        auto* radio = new QRadioButton(tr(channels[static_cast<std::size_t>(index)].second));
+        radio->setObjectName(QStringLiteral("CurvesChannel.") + QString::fromLatin1(channels[static_cast<std::size_t>(index)].first));
+        channel_group.addButton(radio, index);
+        channel_layout->addWidget(radio);
+        if (index == 0) radio->setChecked(true);
+    }
+    channel_layout->addStretch(1);
+    layout.addWidget(channel_row);
+
+    auto* editor = new CurveEditorWidget(std::move(histograms));
+    layout.addWidget(editor, 1);
+    auto* help_row = new QWidget;
+    auto* help_layout = new QHBoxLayout(help_row);
+    help_layout->setContentsMargins(0, 0, 0, 0);
+    auto* help = new QLabel(tr("Drag points to shape the curve. Click to add a point; right-click an interior point to remove it."));
+    help->setWordWrap(true);
+    auto* reset = new QPushButton(tr("Reset"));
+    reset->setObjectName(QStringLiteral("CurvesReset"));
+    help_layout->addWidget(help, 1);
+    help_layout->addWidget(reset);
+    layout.addWidget(help_row);
+
+    const auto preview = [this, &original, editor] {
+        controller_.document() = original;
+        if (editor->is_identity()) {
+            last_effect_backend_ = "none";
+            controller_.invalidate_display();
+            canvas_->update();
+            return;
+        }
+        const CurvesSettings settings = editor->settings();
+        GpuEffectRequest request;
+        request.mode = GpuEffectMode::Curves;
+        request.curve_x = settings.x;
+        request.curve_y = settings.y;
+        request.curve_point_count = settings.point_count;
+        request.params2 = {settings.luma ? 1.0f : 0.0f, settings.red ? 1.0f : 0.0f,
+                           settings.green ? 1.0f : 0.0f, settings.blue ? 1.0f : 0.0f};
+        if (!apply_mps_preview(controller_.document(), request)) {
+            apply_curves(controller_.document(), settings);
+            last_effect_backend_ = "cpu";
+        }
+        controller_.invalidate_display();
+        canvas_->update();
+    };
+    editor->changed = preview;
+    connect(&channel_group, &QButtonGroup::idClicked, this, [editor, preview](int channel) {
+        editor->set_channel(channel);
+        preview();
+    });
+    connect(reset, &QPushButton::clicked, editor, &CurveEditorWidget::reset_curve);
+
+    QDialogButtonBox buttons(QDialogButtonBox::Apply | QDialogButtonBox::Cancel);
+    buttons.setObjectName(QStringLiteral("AdjustmentDialogButtons"));
+    QPushButton* apply_button = buttons.button(QDialogButtonBox::Apply);
+    QPushButton* cancel_button = buttons.button(QDialogButtonBox::Cancel);
+    apply_button->setObjectName(QStringLiteral("AdjustmentApply"));
+    cancel_button->setObjectName(QStringLiteral("AdjustmentCancel"));
+    apply_button->setDefault(true);
+    apply_button->setAutoDefault(true);
+    cancel_button->setDefault(false);
+    cancel_button->setAutoDefault(false);
+    layout.addWidget(&buttons);
+    connect(apply_button, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
+
+    preview();
+    if (dialog.exec() == QDialog::Accepted) {
+        if (controller_.document().active_cel().pixels != original.active_cel().pixels) {
+            controller_.mark_changed(name.toStdString());
+        }
+    } else {
+        controller_.document() = std::move(original);
+        controller_.invalidate_display();
+    }
+    refresh_all();
+}
+
+void QtMainWindow::show_adjustment_dialog(const AdjustmentSpec& adjustment) {
+    if (adjustment.id == QStringLiteral("curves")) {
+        show_curves_dialog(adjustment.name);
+        return;
+    }
+    Document original = controller_.document();
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("AdjustmentDialog.") + adjustment.id);
+    dialog.setWindowTitle(tr("Adjustment: %1").arg(adjustment.name));
+    QFormLayout form(&dialog);
+    std::vector<QSlider*> sliders;
+    sliders.reserve(adjustment.controls.size());
+
+    const auto preview = [this, &original, &adjustment, &sliders] {
+        controller_.document() = original;
+        std::vector<int> values;
+        values.reserve(sliders.size());
+        for (const QSlider* slider : sliders) values.push_back(slider->value());
+        if (!adjustment.gpu_request || !apply_mps_preview(controller_.document(), adjustment.gpu_request(values))) {
+            adjustment.operation(controller_.document(), values);
+            last_effect_backend_ = "cpu";
+        }
+        controller_.invalidate_display();
+        canvas_->update();
+    };
+
+    for (const AdjustmentControl& control : adjustment.controls) {
+        auto* row = new QWidget;
+        auto* row_layout = new QHBoxLayout(row);
+        row_layout->setContentsMargins(0, 0, 0, 0);
+        auto* slider = new QSlider(Qt::Horizontal);
+        slider->setObjectName(QStringLiteral("AdjustmentControl.") + control.id);
+        slider->setRange(control.minimum, control.maximum);
+        slider->setValue(control.initial);
+        auto* spin = new QSpinBox;
+        spin->setObjectName(QStringLiteral("AdjustmentValue.") + control.id);
+        spin->setRange(control.minimum, control.maximum);
+        spin->setValue(control.initial);
+        spin->setMinimumWidth(72);
+        row_layout->addWidget(slider, 1);
+        row_layout->addWidget(spin);
+        form.addRow(control.label, row);
+        sliders.push_back(slider);
+        connect(slider, &QSlider::valueChanged, spin, &QSpinBox::setValue);
+        connect(spin, &QSpinBox::valueChanged, slider, &QSlider::setValue);
+        connect(slider, &QSlider::valueChanged, this, [preview](int) { preview(); });
+    }
+
+    QDialogButtonBox buttons(QDialogButtonBox::Apply | QDialogButtonBox::Cancel);
+    buttons.setObjectName(QStringLiteral("AdjustmentDialogButtons"));
+    QPushButton* apply_button = buttons.button(QDialogButtonBox::Apply);
+    QPushButton* cancel_button = buttons.button(QDialogButtonBox::Cancel);
+    apply_button->setObjectName(QStringLiteral("AdjustmentApply"));
+    cancel_button->setObjectName(QStringLiteral("AdjustmentCancel"));
+    apply_button->setDefault(true);
+    apply_button->setAutoDefault(true);
+    cancel_button->setDefault(false);
+    cancel_button->setAutoDefault(false);
+    form.addRow(&buttons);
+    connect(apply_button, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
+
+    preview();
+    if (dialog.exec() == QDialog::Accepted) {
+        controller_.mark_changed(adjustment.name.toStdString());
+    } else {
+        controller_.document() = std::move(original);
+        controller_.invalidate_display();
+    }
+    refresh_all();
+}
+
+void QtMainWindow::replace_document_for_testing(Document document) {
+    controller_.replace_document(std::move(document));
+    refresh_all();
+}
 
 void QtMainWindow::update_playback() { if (!playing_ || controller_.document().frames.empty()) return; int next = controller_.document().active_frame + playback_direction_; const int last = static_cast<int>(controller_.document().frames.size()) - 1; if (controller_.document().playback_mode == PlaybackMode::Loop) next = next > last ? 0 : next; else if (next > last || next < 0) { playback_direction_ *= -1; next = std::clamp(controller_.document().active_frame + playback_direction_, 0, last); } controller_.document().active_frame = next; controller_.invalidate_display(); playback_timer_->setInterval(std::max(20, controller_.document().frames[static_cast<std::size_t>(next)].duration_ms)); refresh_frames(); canvas_->update(); }
 

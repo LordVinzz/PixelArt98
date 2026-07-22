@@ -3,6 +3,8 @@
 
 #include "ui/QtCanvasWidget.hpp"
 
+#include "ui/CanvasViewport.hpp"
+
 #include <QApplication>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -30,19 +32,58 @@ QRectF pixel_rect(const QRectF& target, double zoom, int x, int y, int w = 1, in
                   static_cast<double>(h) * zoom);
 }
 
-void draw_selection_mask(QPainter& painter, const QRectF& target, double zoom, const SelectionMask& selection) {
+void draw_pixel_buffer(QPainter& painter,
+                       const QRectF& target,
+                       double zoom,
+                       const CanvasPixelBounds& visible,
+                       const std::vector<Pixel>& pixels,
+                       int image_width,
+                       int image_height,
+                       qreal opacity = 1.0) {
+    const std::size_t expected_size = static_cast<std::size_t>(std::max(0, image_width)) *
+                                      static_cast<std::size_t>(std::max(0, image_height));
+    if (pixels.size() != expected_size || visible.empty()) return;
+
+    const QImage image(reinterpret_cast<const uchar*>(pixels.data()),
+                       image_width,
+                       image_height,
+                       image_width * static_cast<int>(sizeof(Pixel)),
+                       QImage::Format_RGBA8888);
+    const QRectF source(static_cast<double>(visible.left),
+                        static_cast<double>(visible.top),
+                        static_cast<double>(visible.width()),
+                        static_cast<double>(visible.height()));
+    painter.save();
+    painter.setOpacity(opacity);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    painter.drawImage(pixel_rect(target, zoom, visible.left, visible.top, visible.width(), visible.height()),
+                      image,
+                      source);
+    painter.restore();
+}
+
+void draw_selection_mask(QPainter& painter,
+                         const QRectF& target,
+                         double zoom,
+                         const SelectionMask& selection,
+                         const CanvasPixelBounds& visible) {
     if (!selection.active || selection.width <= 0 || selection.height <= 0 ||
-        selection.mask.size() != static_cast<std::size_t>(selection.width * selection.height)) {
+        selection.mask.size() != static_cast<std::size_t>(selection.width) * static_cast<std::size_t>(selection.height)) {
         return;
     }
 
-    painter.fillRect(target, Qt::transparent);
+    const int left = std::clamp(visible.left, 0, selection.width);
+    const int top = std::clamp(visible.top, 0, selection.height);
+    const int right = std::clamp(visible.right, left, selection.width);
+    const int bottom = std::clamp(visible.bottom, top, selection.height);
+    if (left >= right || top >= bottom) return;
+
     painter.setPen(Qt::NoPen);
     painter.setBrush(kSelectionFill);
-    for (int y = 0; y < selection.height; ++y) {
+    for (int y = top; y < bottom; ++y) {
         int run_start = -1;
-        for (int x = 0; x <= selection.width; ++x) {
-            const bool selected = x < selection.width && selection.mask[static_cast<std::size_t>(y * selection.width + x)] != 0;
+        for (int x = left; x <= right; ++x) {
+            const bool selected = x < right && selection.mask[static_cast<std::size_t>(y * selection.width + x)] != 0;
             if (selected && run_start < 0) {
                 run_start = x;
             } else if (!selected && run_start >= 0) {
@@ -54,8 +95,8 @@ void draw_selection_mask(QPainter& painter, const QRectF& target, double zoom, c
 
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QPen(kSelectionStroke, 1.25));
-    for (int y = 0; y < selection.height; ++y) {
-        for (int x = 0; x < selection.width; ++x) {
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
             if (selection.mask[static_cast<std::size_t>(y * selection.width + x)] == 0) {
                 continue;
             }
@@ -132,11 +173,25 @@ void QtCanvasWidget::paintGL() {
     QPainter painter(this);
     painter.fillRect(rect(), QColor(25, 28, 33));
     const QRectF target = image_rect();
+    const auto visible = visible_canvas_pixels(target.left(),
+                                               target.top(),
+                                               zoom_,
+                                               controller_.document().width,
+                                               controller_.document().height,
+                                               width(),
+                                               height());
+    if (visible.empty()) return;
+
+    const QRectF visible_target = target.intersected(QRectF(rect()));
+    painter.save();
+    painter.setClipRect(visible_target, Qt::IntersectClip);
     if (checker_visible_) {
         const int group = std::max(1, static_cast<int>(std::ceil(4.0 / zoom_)));
-        for (int py = 0; py < controller_.document().height; py += group) {
+        const int start_y = (visible.top / group) * group;
+        const int start_x = (visible.left / group) * group;
+        for (int py = start_y; py < visible.bottom; py += group) {
             const int h = std::min(group, controller_.document().height - py);
-            for (int px = 0; px < controller_.document().width; px += group) {
+            for (int px = start_x; px < visible.right; px += group) {
                 const int w = std::min(group, controller_.document().width - px);
                 const QRectF cell(target.left() + static_cast<double>(px) * zoom_,
                                   target.top() + static_cast<double>(py) * zoom_,
@@ -146,18 +201,29 @@ void QtCanvasWidget::paintGL() {
             }
         }
     } else {
-        painter.fillRect(target, Qt::white);
+        painter.fillRect(visible_target, Qt::white);
     }
 
     const auto& pixels = controller_.display_pixels();
-    if (!pixels.empty()) {
-        QImage image(reinterpret_cast<const uchar*>(pixels.data()),
-                     controller_.document().width,
-                     controller_.document().height,
-                     controller_.document().width * static_cast<int>(sizeof(Pixel)),
-                     QImage::Format_RGBA8888);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        painter.drawImage(target, image);
+    draw_pixel_buffer(painter,
+                      target,
+                      zoom_,
+                      visible,
+                      pixels,
+                      controller_.document().width,
+                      controller_.document().height);
+
+    if (onion_visible_ && controller_.document().active_frame > 0) {
+        constexpr qreal onion_opacity = 0.30;
+        const auto& onion_pixels = controller_.onion_skin_pixels();
+        draw_pixel_buffer(painter,
+                          target,
+                          zoom_,
+                          visible,
+                          onion_pixels,
+                          controller_.document().width,
+                          controller_.document().height,
+                          onion_opacity);
     }
 
     const FloatingSelection& floating = controller_.document().floating_selection;
@@ -171,23 +237,43 @@ void QtCanvasWidget::paintGL() {
                                      target.top() + static_cast<double>(floating.source_y + floating.offset_y) * zoom_,
                                      static_cast<double>(floating.width) * zoom_,
                                      static_cast<double>(floating.height) * zoom_);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        painter.drawImage(floating_target, floating_image);
+        const auto floating_visible = visible_canvas_pixels(floating_target.left(),
+                                                            floating_target.top(),
+                                                            zoom_,
+                                                            floating.width,
+                                                            floating.height,
+                                                            width(),
+                                                            height());
+        if (!floating_visible.empty()) {
+            const QRectF floating_source(static_cast<double>(floating_visible.left),
+                                         static_cast<double>(floating_visible.top),
+                                         static_cast<double>(floating_visible.width()),
+                                         static_cast<double>(floating_visible.height()));
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+            painter.drawImage(pixel_rect(floating_target,
+                                         zoom_,
+                                         floating_visible.left,
+                                         floating_visible.top,
+                                         floating_visible.width(),
+                                         floating_visible.height()),
+                              floating_image,
+                              floating_source);
+        }
     }
 
     if (grid_visible_ && zoom_ >= 4.0) {
         painter.setPen(QPen(QColor(0, 0, 0, 58), 1.0));
-        for (int x = 0; x <= controller_.document().width; ++x) {
+        for (int x = visible.left; x <= visible.right; ++x) {
             const double px = target.left() + static_cast<double>(x) * zoom_;
-            painter.drawLine(QPointF(px, target.top()), QPointF(px, target.bottom()));
+            painter.drawLine(QPointF(px, visible_target.top()), QPointF(px, visible_target.bottom()));
         }
-        for (int y = 0; y <= controller_.document().height; ++y) {
+        for (int y = visible.top; y <= visible.bottom; ++y) {
             const double py = target.top() + static_cast<double>(y) * zoom_;
-            painter.drawLine(QPointF(target.left(), py), QPointF(target.right(), py));
+            painter.drawLine(QPointF(visible_target.left(), py), QPointF(visible_target.right(), py));
         }
     }
 
-    draw_selection_mask(painter, target, zoom_, controller_.document().selection);
+    draw_selection_mask(painter, target, zoom_, controller_.document().selection, visible);
     draw_clone_source_preview(painter, target, zoom_, controller_.tool());
 
     if (drawing_) {
@@ -232,6 +318,7 @@ void QtCanvasWidget::paintGL() {
             }
         }
     }
+    painter.restore();
 }
 
 QPoint QtCanvasWidget::pixel_at(const QPointF& position) const {

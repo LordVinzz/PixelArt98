@@ -24,6 +24,7 @@ public:
     void actual_size();
     void fit_to_canvas();
     [[nodiscard]] double zoom() const noexcept { return zoom_; }
+    [[nodiscard]] bool onion_visible() const noexcept { return onion_visible_; }
     std::function<void()> editor_changed;
 
 protected:

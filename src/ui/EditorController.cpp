@@ -41,8 +41,12 @@ void EditorController::replace_project(Document document, ModelDocument model) {
     clamp_model_uvs(model_);
     display_pixels_.clear();
     display_pixels_.shrink_to_fit();
+    onion_skin_pixels_.clear();
+    onion_skin_pixels_.shrink_to_fit();
+    onion_skin_frame_ = -1;
     interaction_before_.clear();
     display_dirty_ = true;
+    onion_skin_dirty_ = true;
     histogram_dirty_ = true;
     modified_ = false;
 }
@@ -51,7 +55,12 @@ void EditorController::mark_changed(std::string status) {
     status_ = std::move(status);
     modified_ = true;
     display_dirty_ = true;
+    onion_skin_dirty_ = true;
     histogram_dirty_ = true;
+}
+
+void EditorController::invalidate_display() noexcept {
+    display_dirty_ = true;
 }
 
 const std::vector<Pixel>& EditorController::display_pixels() {
@@ -63,6 +72,28 @@ const std::vector<Pixel>& EditorController::display_pixels() {
         display_dirty_ = false;
     }
     return display_pixels_;
+}
+
+const std::vector<Pixel>& EditorController::onion_skin_pixels() {
+    const int previous_frame = document_.active_frame - 1;
+    if (previous_frame < 0 || previous_frame >= static_cast<int>(document_.frames.size())) {
+        onion_skin_pixels_.clear();
+        onion_skin_frame_ = -1;
+        onion_skin_dirty_ = false;
+        return onion_skin_pixels_;
+    }
+
+    if (huge_document_history_mode() && document_.layers.size() == 1U &&
+        !document_.frames[static_cast<std::size_t>(previous_frame)].cels.empty()) {
+        return document_.frames[static_cast<std::size_t>(previous_frame)].cels[0].pixels;
+    }
+
+    if (onion_skin_dirty_ || onion_skin_frame_ != previous_frame) {
+        onion_skin_pixels_ = document_.composite_frame(previous_frame);
+        onion_skin_frame_ = previous_frame;
+        onion_skin_dirty_ = false;
+    }
+    return onion_skin_pixels_;
 }
 
 const std::array<int, 256>& EditorController::histogram_luma() {

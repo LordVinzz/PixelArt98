@@ -36,7 +36,8 @@ public:
     void set_modified(bool modified) noexcept { modified_ = modified; }
 
     [[nodiscard]] const std::vector<Pixel>& display_pixels();
-    void invalidate_display() noexcept { display_dirty_ = true; }
+    [[nodiscard]] const std::vector<Pixel>& onion_skin_pixels();
+    void invalidate_display() noexcept;
     [[nodiscard]] const std::array<int, 256>& histogram_luma();
 
     void begin_stroke(int x, int y, bool secondary, SelectionCombineMode selection_mode);
@@ -70,11 +71,14 @@ private:
     ModelDocument model_ = ModelDocument::create_default();
     ToolContext tool_;
     std::vector<Pixel> display_pixels_;
+    std::vector<Pixel> onion_skin_pixels_;
     std::vector<Pixel> interaction_before_;
     SelectionMask selection_before_;
     std::vector<std::array<int, 2>> lasso_points_;
     std::array<int, 256> histogram_luma_{};
     bool display_dirty_ = true;
+    bool onion_skin_dirty_ = true;
+    int onion_skin_frame_ = -1;
     bool histogram_dirty_ = true;
     bool histogram_approximate_ = false;
     bool interaction_active_ = false;

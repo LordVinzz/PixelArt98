@@ -269,6 +269,19 @@ static void test_animation_layers() {
     assert(repaired.frames[0].cels.size() == 1);
     assert(repaired.active_layer == 0);
     assert(repaired.active_cel().pixels.size() == 35);
+
+    auto timing = Document::create(4, 4);
+    timing.clear_history();
+    assert(timing.set_frame_duration(0, 460));
+    assert(timing.frames[0].duration_ms == 460);
+    assert(timing.undo_stack_full_frame_pixel_capacity() == 0);
+    assert(timing.undo());
+    assert(timing.frames[0].duration_ms == 100);
+    assert(timing.redo());
+    assert(timing.frames[0].duration_ms == 460);
+    assert(timing.set_frame_duration(0, 1));
+    assert(timing.frames[0].duration_ms == kMinimumFrameDurationMs);
+    assert(!timing.set_frame_duration(-1, 100));
 }
 
 static void test_layer_masks_and_clipping() {

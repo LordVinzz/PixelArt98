@@ -1125,6 +1125,9 @@ bool Document::undo() {
     if (cmd.before_tags) tags = *cmd.before_tags;
     if (cmd.before_selection) selection = *cmd.before_selection;
     if (cmd.before_palette) palette = *cmd.before_palette;
+    if (cmd.before_frame_duration_ms && cmd.frame >= 0 && cmd.frame < static_cast<int>(frames.size())) {
+        frames[static_cast<std::size_t>(cmd.frame)].duration_ms = *cmd.before_frame_duration_ms;
+    }
     apply_tile_diffs(*this, cmd.pixel_diffs, false);
     if (cmd.dense_pixel_diff) {
         static_cast<void>(apply_history_payload(*this, *cmd.dense_pixel_diff, cmd.dense_pixel_diff->before));
@@ -1146,6 +1149,9 @@ bool Document::redo() {
     if (cmd.after_tags) tags = *cmd.after_tags;
     if (cmd.after_selection) selection = *cmd.after_selection;
     if (cmd.after_palette) palette = *cmd.after_palette;
+    if (cmd.after_frame_duration_ms && cmd.frame >= 0 && cmd.frame < static_cast<int>(frames.size())) {
+        frames[static_cast<std::size_t>(cmd.frame)].duration_ms = *cmd.after_frame_duration_ms;
+    }
     apply_tile_diffs(*this, cmd.pixel_diffs, true);
     release_after_pixels(cmd.pixel_diffs);
     if (cmd.dense_pixel_diff) {
@@ -1478,6 +1484,30 @@ void Document::move_frame(int from, int to) {
     frames.insert(frames.begin() + to, std::move(frame));
     active_frame = to;
     commit_structure_edit("Move Frame", std::move(before_layers), std::move(before_frames), std::move(before_tags), before_active_layer, before_active_frame);
+}
+
+bool Document::set_frame_duration(int index, int duration_ms) {
+    if (index < 0 || index >= static_cast<int>(frames.size())) {
+        return false;
+    }
+    const int clamped_duration = std::clamp(duration_ms, kMinimumFrameDurationMs, kMaximumFrameDurationMs);
+    Frame& frame = frames[static_cast<std::size_t>(index)];
+    if (frame.duration_ms == clamped_duration) {
+        return false;
+    }
+
+    UndoCommand command;
+    command.name = "Change Frame Duration";
+    command.frame = index;
+    command.before_frame_duration_ms = frame.duration_ms;
+    command.after_frame_duration_ms = clamped_duration;
+    command.before_active_layer = command.after_active_layer = active_layer;
+    command.before_active_frame = command.after_active_frame = active_frame;
+    frame.duration_ms = clamped_duration;
+    recent_commit_names_.push_back(command.name);
+    undo_stack_.push_back(std::move(command));
+    redo_stack_.clear();
+    return true;
 }
 
 void Document::add_tag(const std::string& name, int from, int to) {

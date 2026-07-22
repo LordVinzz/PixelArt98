@@ -5,6 +5,8 @@
 
 #include "ui/AppSettings.hpp"
 #include "ui/EditorController.hpp"
+#include "render/GpuEffectRenderer.hpp"
+#include "render/MpsEffectRenderer.hpp"
 
 #include <QMainWindow>
 
@@ -35,12 +37,30 @@ public:
     ~QtMainWindow() override;
 
     void import_image_document(const QString& path);
+    void replace_document_for_testing(Document document);
+    [[nodiscard]] const Document& document() const noexcept { return controller_.document(); }
+    [[nodiscard]] const std::string& last_effect_backend() const noexcept { return last_effect_backend_; }
 
 protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
     using EffectOperation = std::function<void(Document&, int)>;
+    using GpuEffectRequestFactory = std::function<GpuEffectRequest(int)>;
+    struct AdjustmentControl {
+        QString id;
+        QString label;
+        int minimum = 0;
+        int maximum = 100;
+        int initial = 0;
+    };
+    struct AdjustmentSpec {
+        QString id;
+        QString name;
+        std::vector<AdjustmentControl> controls;
+        std::function<void(Document&, const std::vector<int>&)> operation;
+        std::function<GpuEffectRequest(const std::vector<int>&)> gpu_request;
+    };
 
     void build_actions();
     void build_menus();
@@ -75,8 +95,14 @@ private:
     void import_model(const QString& kind);
     void export_model(const QString& kind);
     void apply_transform(const QString& name, const std::function<void(Document&)>& operation);
-    void show_effect_preview(const QString& name, const EffectOperation& operation);
-    QAction* add_effect_action(QMenu* menu, const QString& name, EffectOperation operation);
+    void show_effect_preview(const QString& name, const EffectOperation& operation,
+                             const GpuEffectRequestFactory& gpu_request = {});
+    void show_adjustment_dialog(const AdjustmentSpec& adjustment);
+    void show_curves_dialog(const QString& name);
+    bool apply_mps_preview(Document& document, const GpuEffectRequest& request);
+    QAction* add_effect_action(QMenu* menu, const QString& name, EffectOperation operation,
+                              GpuEffectRequestFactory gpu_request = {});
+    QAction* add_effect_action(QMenu* menu, AdjustmentSpec effect);
     void update_playback();
 
     EditorController controller_;
@@ -102,6 +128,8 @@ private:
     int playback_direction_ = 1;
     int error_sequence_ = 0;
     QString project_path_;
+    MpsEffectRenderer mps_effect_renderer_;
+    std::string last_effect_backend_ = "none";
     std::vector<QDockWidget*> docks_;
 };
 

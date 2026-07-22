@@ -135,6 +135,37 @@ float4 blur_box(texture2d<float, access::read> source, int2 p, constant Uniforms
     return sum / max(1.0, count);
 }
 
+float4 motion_blur(texture2d<float, access::read> source, int2 p, constant Uniforms& u) {
+    int radius = clamp(int(u.params.x), 1, 24);
+    float2 direction = float2(cos(u.params.z), sin(u.params.z));
+    float4 sum = float4(0.0);
+    float count = 0.0;
+    for (int i = -24; i <= 24; ++i) {
+        if (abs(i) <= radius) {
+            sum += read_px(source, p + int2(round(direction * float(i))), u);
+            count += 1.0;
+        }
+    }
+    return sum / max(1.0, count);
+}
+
+float4 radial_zoom_blur(texture2d<float, access::read> source, int2 p, constant Uniforms& u, bool radial) {
+    float2 center = float2(u.params2.x * float(u.width - 1), u.params2.y * float(u.height - 1));
+    float2 delta = float2(p) - center;
+    float strength = clamp(u.params.y / 100.0, 0.0, 1.0);
+    float4 sum = float4(0.0);
+    for (int i = 0; i < 16; ++i) {
+        float t = (float(i) / 15.0 - 0.5) * strength;
+        float2 sample_position = float2(p) - delta * t;
+        if (radial) {
+            sample_position = center + float2(cos(t) * delta.x - sin(t) * delta.y,
+                                               sin(t) * delta.x + cos(t) * delta.y);
+        }
+        sum += read_px(source, int2(round(sample_position)), u);
+    }
+    return sum / 16.0;
+}
+
 int depth_of_field_radius(texture2d<float, access::read> depth_tex, uint2 gid, constant Uniforms& u) {
     float depth = depth_tex.read(gid).r * 255.0;
     float focus = clamp(u.params.x, 0.0, 1.0) * 255.0;
@@ -239,6 +270,10 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
         out = float4(src.rgb, 1.0 - src.a);
     } else if (u.mode == 11 || u.mode == 14) {
         out = blur_box(source, p, u, int(u.params.x));
+    } else if (u.mode == 15) {
+        out = motion_blur(source, p, u);
+    } else if (u.mode == 16 || u.mode == 17) {
+        out = radial_zoom_blur(source, p, u, u.mode == 16);
     } else if (u.mode == 12 || u.mode == 13 || u.mode == 39 || u.mode == 41) {
         float4 edge = edge_color(source, p, u);
         out = u.mode == 39 ? edge : float4(mix(src.rgb, edge.rgb, clamp(u.params.y / 100.0, 0.0, 1.0)), src.a);
@@ -278,7 +313,8 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
         out = float4(mix(src.rgb, b.rgb * float3(1.05, 1.0, 0.94), clamp(u.params.y / 100.0, 0.0, 1.0)), src.a);
     } else if (u.mode == 34) {
         float2 uv = float2(gid) / float2(max(1u, u.width), max(1u, u.height));
-        float v = smoothstep(0.9, 0.2, distance(uv, float2(0.5)) + u.params.y / 400.0);
+        float distance_from_center = distance(uv, clamp(u.params2.xy, 0.0, 1.0)) / max(0.1, u.params.x);
+        float v = smoothstep(0.9, 0.2, distance_from_center + u.params.y / 400.0);
         out = float4(src.rgb * v, src.a);
     } else if (u.mode == 35) {
         float n = fbm(float2(gid) / max(1.0, u.params.x));
@@ -332,14 +368,15 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
         out = radius <= 0 ? src : blur_box(source, p, u, radius);
     } else {
         float2 uv = float2(gid) / float2(max(1u, u.width), max(1u, u.height));
-        float2 center = float2(0.5);
+        float2 center = (u.mode == 23 || u.mode == 24) ? clamp(u.params2.xy, 0.0, 1.0) : float2(0.5);
         float2 delta = uv - center;
         if (u.mode == 23) {
             float dist = length(delta);
             float2 sample_uv = center + delta * (1.0 - u.params.x * 0.35 * (1.0 - dist));
             out = read_px(source, int2(sample_uv * float2(u.width, u.height)), u);
         } else if (u.mode == 24) {
-            float angle = u.params.x * 6.28318 * (1.0 - length(delta));
+            float radius = length(delta) / max(0.05, u.params.y * 0.75);
+            float angle = u.params.x * 6.28318 * (1.0 - clamp(radius, 0.0, 1.0));
             float2 sample_uv = center + float2(cos(angle) * delta.x - sin(angle) * delta.y, sin(angle) * delta.x + cos(angle) * delta.y);
             out = read_px(source, int2(sample_uv * float2(u.width, u.height)), u);
         } else if (u.mode == 27) {
@@ -357,7 +394,7 @@ kernel void pixelart_effect_kernel(texture2d<float, access::read> source [[textu
                 iter += 1.0;
             }
             out = float4(0.5 + 0.5 * cos(float3(0.0, 2.0, 4.0) + iter * 0.18), src.a);
-        } else if (u.mode == 15 || u.mode == 16 || u.mode == 17 || u.mode == 25 || u.mode == 26) {
+        } else if (u.mode == 25 || u.mode == 26) {
             out = blur_box(source, p, u, max(1, int(u.params.x)));
         }
     }

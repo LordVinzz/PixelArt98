@@ -79,16 +79,17 @@ void apply_pencil_sketch(Document& doc, int tip_size, int range);
 void apply_square_blur(Document& doc, int radius);
 void apply_gaussian_blur(Document& doc, int radius);
 void apply_motion_blur(Document& doc, int distance, float angle_degrees);
-void apply_radial_blur(Document& doc, int amount);
-void apply_zoom_blur(Document& doc, int amount);
+void apply_radial_blur(Document& doc, int amount, int center_x_percent = 50, int center_y_percent = 50);
+void apply_zoom_blur(Document& doc, int amount, int center_x_percent = 50, int center_y_percent = 50);
 void apply_median_blur(Document& doc, int radius);
 void apply_surface_blur(Document& doc, int radius, int threshold);
 void apply_sketch_blur(Document& doc, int radius);
 void apply_pixelate(Document& doc, int cell_size);
 void apply_crystalize(Document& doc, int cell_size);
 void apply_frosted_glass(Document& doc, int radius);
-void apply_bulge(Document& doc, float strength);
-void apply_twist(Document& doc, float turns);
+void apply_bulge(Document& doc, float strength, int center_x_percent = 50, int center_y_percent = 50);
+void apply_twist(Document& doc, float turns, int center_x_percent = 50, int center_y_percent = 50,
+                 int effect_size_percent = 100);
 void apply_tile_reflection(Document& doc, int tile_size);
 void apply_dents(Document& doc, int scale, int amount);
 void apply_morphology(Document& doc, int radius, bool erode);
@@ -99,7 +100,7 @@ void apply_glow(Document& doc, int radius, int brightness, int contrast);
 void apply_red_eye_removal(Document& doc, int strength);
 void apply_sharpen(Document& doc, int amount);
 void apply_soften_portrait(Document& doc, int softness, int lighting, int warmth);
-void apply_vignette(Document& doc, int radius, int strength);
+void apply_vignette(Document& doc, int radius, int strength, int center_x_percent = 50, int center_y_percent = 50);
 void apply_straighten(Document& doc,
                       float angle_degrees,
                       ResamplingMode resampling = ResamplingMode::Nearest);

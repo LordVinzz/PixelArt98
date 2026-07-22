@@ -6,6 +6,7 @@
 #undef NDEBUG
 #include <cassert>
 #include <iostream>
+#include <utility>
 
 using namespace px;
 
@@ -82,6 +83,20 @@ int main() {
     mover.end_stroke(3, 1, false);
     assert(!mover.document().floating_selection.active);
     assert(b(mover.document().active_cel().pixels[static_cast<std::size_t>(mover.document().pixel_index(3, 1))]) == 255);
+
+    EditorController onion;
+    Document onion_document = Document::create(4, 4);
+    onion_document.active_cel().pixels[static_cast<std::size_t>(onion_document.pixel_index(1, 1))] = rgba(220, 30, 20, 255);
+    onion_document.add_frame(false);
+    onion.replace_document(std::move(onion_document));
+    assert(onion.document().active_frame == 1);
+    const auto& previous = onion.onion_skin_pixels();
+    assert(previous.size() == 16);
+    assert(r(previous[static_cast<std::size_t>(onion.document().pixel_index(1, 1))]) == 220);
+    assert(a(previous[static_cast<std::size_t>(onion.document().pixel_index(1, 1))]) == 255);
+    onion.document().active_frame = 0;
+    onion.invalidate_display();
+    assert(onion.onion_skin_pixels().empty());
 
     std::cout << "Qt editor controller tests passed\n";
     return 0;
