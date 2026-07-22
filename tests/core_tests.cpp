@@ -203,6 +203,16 @@ static void test_filters() {
     assert(b(curved) == 180);
     assert(a(curves.active_cel().pixels[checked_pixel_index(curves, 1, 0)]) == 0);
 
+    auto identity_curves = Document::create(1, 1);
+    const Pixel identity_source = rgba(37, 128, 219, 173);
+    identity_curves.active_cel().pixels[0] = identity_source;
+    CurvesSettings identity_curve_settings;
+    identity_curve_settings.point_count = 3;
+    identity_curve_settings.x = {0.0f, 0.5f, 1.0f};
+    identity_curve_settings.y = {0.0f, 0.5f, 1.0f};
+    apply_curves(identity_curves, identity_curve_settings);
+    assert(identity_curves.active_cel().pixels[0] == identity_source);
+
     auto temperature = Document::create(2, 1);
     temperature.active_cel().pixels[checked_pixel_index(temperature, 0, 0)] = rgba(100, 100, 100, 255);
     temperature.active_cel().pixels[checked_pixel_index(temperature, 1, 0)] = rgba(100, 100, 100, 0);

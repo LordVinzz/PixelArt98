@@ -409,6 +409,40 @@ if(PIXELART_BUILD_TESTS)
     pixelart_configure_project_target(pixelart_canvas_viewport_tests)
     add_test(NAME pixelart_canvas_viewport_tests COMMAND pixelart_canvas_viewport_tests)
 
+    add_executable(pixelart_filter_coverage_tests tests/filter_coverage_tests.cpp)
+    target_link_libraries(pixelart_filter_coverage_tests PRIVATE pixelart_app)
+    pixelart_configure_project_target(pixelart_filter_coverage_tests)
+    add_test(NAME pixelart_filter_coverage_tests COMMAND pixelart_filter_coverage_tests)
+
+    add_executable(pixelart_tools_coverage_tests tests/tools_coverage_tests.cpp)
+    target_link_libraries(pixelart_tools_coverage_tests PRIVATE pixelart_core)
+    pixelart_configure_project_target(pixelart_tools_coverage_tests)
+    add_test(NAME pixelart_tools_coverage_tests COMMAND pixelart_tools_coverage_tests)
+
+    add_executable(pixelart_document_coverage_tests tests/document_coverage_tests.cpp)
+    target_link_libraries(pixelart_document_coverage_tests PRIVATE pixelart_core)
+    pixelart_configure_project_target(pixelart_document_coverage_tests)
+    add_test(NAME pixelart_document_coverage_tests COMMAND pixelart_document_coverage_tests)
+
+    qt_add_executable(pixelart_qt_ui_tests
+        tests/qt_ui_tests.cpp
+        src/ui/QtCanvasWidget.cpp
+        src/ui/QtMainWindow.cpp
+        src/ui/QtModelPreviewWidget.cpp)
+    qt_add_resources(pixelart_qt_ui_tests ui_test_tool_icons
+        PREFIX "/"
+        BASE "${CMAKE_SOURCE_DIR}/res"
+        FILES ${PIXELART_TOOL_ICONS})
+    target_link_libraries(pixelart_qt_ui_tests PRIVATE
+        pixelart_app pixelart_version Qt6::Core Qt6::Gui Qt6::Network
+        Qt6::Widgets Qt6::OpenGLWidgets Qt6::Test)
+    target_compile_definitions(pixelart_qt_ui_tests PRIVATE GL_SILENCE_DEPRECATION)
+    pixelart_configure_project_target(pixelart_qt_ui_tests)
+    add_test(NAME pixelart_qt_ui_tests COMMAND pixelart_qt_ui_tests)
+    set_tests_properties(pixelart_qt_ui_tests PROPERTIES
+        TIMEOUT 30
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(pixelart_shader_compile_tests tests/shader_compile_tests.cpp)
     if(APPLE)
         target_sources(pixelart_shader_compile_tests PRIVATE tests/metal_shader_compile_tests.mm)

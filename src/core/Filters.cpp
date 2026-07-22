@@ -421,6 +421,30 @@ static int normalized_curve_point_count(const CurvesSettings& settings) {
     return std::clamp(settings.point_count, 2, kMaxCurvePoints);
 }
 
+static float curve_slope(const CurvesSettings& settings, int segment) {
+    const float x0 = settings.x[static_cast<std::size_t>(segment)];
+    const float x1 = settings.x[static_cast<std::size_t>(segment + 1)];
+    return (settings.y[static_cast<std::size_t>(segment + 1)] -
+            settings.y[static_cast<std::size_t>(segment)]) /
+           std::max(0.001f, x1 - x0);
+}
+
+static float curve_tangent(const CurvesSettings& settings, int point, int point_count) {
+    if (point == 0) return curve_slope(settings, 0);
+    if (point == point_count - 1) return curve_slope(settings, point_count - 2);
+    const float left_slope = curve_slope(settings, point - 1);
+    const float right_slope = curve_slope(settings, point);
+    if (left_slope * right_slope <= 0.0f) return 0.0f;
+    const float left_width = settings.x[static_cast<std::size_t>(point)] -
+                             settings.x[static_cast<std::size_t>(point - 1)];
+    const float right_width = settings.x[static_cast<std::size_t>(point + 1)] -
+                              settings.x[static_cast<std::size_t>(point)];
+    const float first_weight = 2.0f * right_width + left_width;
+    const float second_weight = right_width + 2.0f * left_width;
+    return (first_weight + second_weight) /
+           (first_weight / left_slope + second_weight / right_slope);
+}
+
 static float evaluate_curve(float value, const CurvesSettings& settings) {
     value = std::clamp(value, 0.0f, 1.0f);
     const int point_count = normalized_curve_point_count(settings);
@@ -433,9 +457,16 @@ static float evaluate_curve(float value, const CurvesSettings& settings) {
         if (value <= x1 || i == point_count - 1) {
             const float y0 = std::clamp(settings.y[static_cast<std::size_t>(i - 1)], 0.0f, 1.0f);
             const float y1 = std::clamp(settings.y[static_cast<std::size_t>(i)], 0.0f, 1.0f);
-            const float t = std::clamp((value - x0) / std::max(0.001f, x1 - x0), 0.0f, 1.0f);
-            const float smooth = t * t * (3.0f - 2.0f * t);
-            return y0 + (y1 - y0) * smooth;
+            const float width = std::max(0.001f, x1 - x0);
+            const float t = std::clamp((value - x0) / width, 0.0f, 1.0f);
+            const float t2 = t * t;
+            const float t3 = t2 * t;
+            const float left_tangent = curve_tangent(settings, i - 1, point_count);
+            const float right_tangent = curve_tangent(settings, i, point_count);
+            return std::clamp((2.0f * t3 - 3.0f * t2 + 1.0f) * y0 +
+                              (t3 - 2.0f * t2 + t) * width * left_tangent +
+                              (-2.0f * t3 + 3.0f * t2) * y1 +
+                              (t3 - t2) * width * right_tangent, 0.0f, 1.0f);
         }
     }
     return std::clamp(settings.y[static_cast<std::size_t>(point_count - 1)], 0.0f, 1.0f);

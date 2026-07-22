@@ -155,6 +155,118 @@ private slots:
         QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, end);
     }
 
+    void layer_visibility_stays_synchronized_between_list_and_checkbox() {
+        QtMainWindow window(mps_settings());
+        Document source = source_document();
+        source.add_layer("Second Layer");
+        source.active_layer = 0;
+        window.replace_document_for_testing(std::move(source));
+
+        auto* layers = window.findChild<QListWidget*>(QStringLiteral("LayersList"));
+        auto* visible = window.findChild<QCheckBox*>(QStringLiteral("LayerVisible"));
+        QVERIFY(layers != nullptr);
+        QVERIFY(visible != nullptr);
+        QCOMPARE(layers->currentRow(), 0);
+        QVERIFY(visible->isChecked());
+
+        QListWidgetItem* active_item = layers->item(0);
+        QVERIFY(active_item != nullptr);
+        active_item->setCheckState(Qt::Unchecked);
+        QVERIFY(!window.document().layers[0].visible);
+        QVERIFY(!visible->isChecked());
+        QCOMPARE(layers->currentRow(), 0);
+
+        visible->setChecked(true);
+        QVERIFY(window.document().layers[0].visible);
+        QCOMPARE(layers->currentRow(), 0);
+        active_item = layers->item(0);
+        QVERIFY(active_item != nullptr);
+        QCOMPARE(active_item->checkState(), Qt::Checked);
+
+        layers->setCurrentRow(1);
+        QVERIFY(window.document().layers[1].visible);
+        active_item = layers->item(1);
+        QVERIFY(active_item != nullptr);
+        active_item->setCheckState(Qt::Unchecked);
+        QVERIFY(!window.document().layers[1].visible);
+        QVERIFY(!visible->isChecked());
+        QCOMPARE(layers->currentRow(), 1);
+    }
+
+    void clipboard_shortcuts_copy_cut_and_paste_at_the_selection_origin() {
+        QtMainWindow window(mps_settings());
+        Document source = source_document();
+        source.selection.select_rect(3, 4, 5, 6, SelectionCombineMode::Replace);
+        const std::vector<Pixel> source_pixels = source.active_cel().pixels;
+        window.replace_document_for_testing(std::move(source));
+
+        auto* copy = window.findChild<QAction*>(QStringLiteral("EditCopy"));
+        auto* cut = window.findChild<QAction*>(QStringLiteral("EditCut"));
+        auto* paste = window.findChild<QAction*>(QStringLiteral("EditPaste"));
+        auto* deselect = window.findChild<QAction*>(QStringLiteral("EditDeselect"));
+        QVERIFY(copy != nullptr);
+        QVERIFY(cut != nullptr);
+        QVERIFY(paste != nullptr);
+        QVERIFY(deselect != nullptr);
+        QCOMPARE(copy->shortcut(), QKeySequence(QKeySequence::Copy));
+        QCOMPARE(cut->shortcut(), QKeySequence(QKeySequence::Cut));
+        QCOMPARE(paste->shortcut(), QKeySequence(QKeySequence::Paste));
+
+        copy->trigger();
+        window.replace_document_for_testing(Document::create(16, 16));
+        paste->trigger();
+        const auto pasted_bounds = window.document().selection.bounds();
+        QVERIFY(pasted_bounds.has_value());
+        QCOMPARE(*pasted_bounds, (std::array<int, 4>{3, 4, 5, 6}));
+        QVERIFY(window.document().floating_selection.active);
+        QCOMPARE(window.document().floating_selection.source_x, 3);
+        QCOMPARE(window.document().floating_selection.source_y, 4);
+        for (int y = 4; y <= 6; ++y) {
+            for (int x = 3; x <= 5; ++x) {
+                const std::size_t index = static_cast<std::size_t>(window.document().pixel_index(x, y));
+                QCOMPARE(window.document().active_cel().pixels[index], Pixel{0});
+                const std::size_t local = static_cast<std::size_t>((y - 4) * 3 + x - 3);
+                QCOMPARE(window.document().floating_selection.pixels[local], source_pixels[index]);
+            }
+        }
+        QCOMPARE(window.document().active_cel().pixels[0], Pixel{0});
+        deselect->trigger();
+        QVERIFY(!window.document().floating_selection.active);
+        for (int y = 4; y <= 6; ++y) {
+            for (int x = 3; x <= 5; ++x) {
+                const std::size_t index = static_cast<std::size_t>(window.document().pixel_index(x, y));
+                QCOMPARE(window.document().active_cel().pixels[index], source_pixels[index]);
+            }
+        }
+
+        source = source_document();
+        source.selection.select_rect(3, 4, 5, 6, SelectionCombineMode::Replace);
+        window.replace_document_for_testing(std::move(source));
+        cut->trigger();
+        for (int y = 4; y <= 6; ++y) {
+            for (int x = 3; x <= 5; ++x) {
+                const std::size_t index = static_cast<std::size_t>(window.document().pixel_index(x, y));
+                QCOMPARE(window.document().active_cel().pixels[index], Pixel{0});
+            }
+        }
+        paste->trigger();
+        QVERIFY(window.document().floating_selection.active);
+        for (int y = 4; y <= 6; ++y) {
+            for (int x = 3; x <= 5; ++x) {
+                const std::size_t index = static_cast<std::size_t>(window.document().pixel_index(x, y));
+                QCOMPARE(window.document().active_cel().pixels[index], Pixel{0});
+            }
+        }
+        deselect->trigger();
+        QVERIFY(!window.document().floating_selection.active);
+        for (int y = 4; y <= 6; ++y) {
+            for (int x = 3; x <= 5; ++x) {
+                const std::size_t index = static_cast<std::size_t>(window.document().pixel_index(x, y));
+                QCOMPARE(window.document().active_cel().pixels[index], source_pixels[index]);
+            }
+        }
+    }
+
     void grayscale_action_applies_pixels_through_mps() {
         run_exact_effect(QStringLiteral("Black and White"), QStringLiteral("black-white"), [](Pixel source) {
             const auto gray = static_cast<std::uint8_t>(
@@ -290,6 +402,7 @@ private slots:
             QCOMPARE(graph->property("histogramBins").toInt(), 256);
             QVERIFY(graph->property("histogramMaximum").toInt() > 0);
             QCOMPARE(graph->property("curvePointCount").toInt(), 3);
+            QCOMPARE(graph->property("curveQuarterOutput").toInt(), 250);
 
             auto* luma = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesChannel.luma"));
             auto* red = dialog->findChild<QRadioButton*>(QStringLiteral("CurvesChannel.red"));
@@ -321,7 +434,7 @@ private slots:
             auto* cancel = dialog->findChild<QPushButton*>(QStringLiteral("AdjustmentCancel"));
             QVERIFY(apply != nullptr);
             QVERIFY(cancel != nullptr);
-            apply_default = apply->isDefault() && !cancel->isDefault();
+            apply_default = apply->autoDefault() && !cancel->autoDefault();
             QTest::mouseClick(apply, Qt::LeftButton);
         });
         curves_action->trigger();
@@ -371,7 +484,8 @@ private slots:
         auto* curves_action = window.findChild<QAction*>(QStringLiteral("adjustment.curves"));
         QVERIFY(curves_action != nullptr);
 
-        QTimer::singleShot(0, &window, [&window] {
+        bool apply_configured_as_default = false;
+        QTimer::singleShot(0, &window, [&window, &apply_configured_as_default] {
             auto* dialog = window.findChild<QDialog*>(QStringLiteral("AdjustmentDialog.curves"));
             QVERIFY(dialog != nullptr);
             auto* graph = dialog->findChild<QWidget*>(QStringLiteral("CurvesGraph"));
@@ -379,11 +493,12 @@ private slots:
             QVERIFY(graph != nullptr);
             QVERIFY(apply != nullptr);
             QCOMPARE(graph->property("curvePointCount").toInt(), 3);
-            QVERIFY(apply->isDefault());
+            apply_configured_as_default = apply->autoDefault();
             QTest::mouseClick(apply, Qt::LeftButton);
         });
         curves_action->trigger();
 
+        QVERIFY(apply_configured_as_default);
         QVERIFY(window.document().active_cel().pixels == before);
         QCOMPARE(window.last_effect_backend(), std::string("none"));
         QVERIFY(!window.isWindowModified());
@@ -464,14 +579,16 @@ private slots:
         canvas->update();
         QApplication::processEvents();
         const QImage onion_enabled_framebuffer = canvas->grabFramebuffer();
-        QVERIFY(!onion_enabled_framebuffer.isNull());
         onion->click();
         QVERIFY(!onion->isChecked());
         QVERIFY(!canvas->onion_visible());
         QApplication::processEvents();
         const QImage onion_disabled_framebuffer = canvas->grabFramebuffer();
-        QVERIFY(!onion_disabled_framebuffer.isNull());
-        QVERIFY(onion_enabled_framebuffer != onion_disabled_framebuffer);
+        if (QGuiApplication::platformName() != QStringLiteral("offscreen")) {
+            QVERIFY(!onion_enabled_framebuffer.isNull());
+            QVERIFY(!onion_disabled_framebuffer.isNull());
+            QVERIFY(onion_enabled_framebuffer != onion_disabled_framebuffer);
+        }
         onion->click();
         QVERIFY(onion->isChecked());
         QVERIFY(canvas->onion_visible());

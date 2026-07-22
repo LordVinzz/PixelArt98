@@ -56,10 +56,19 @@ void SelectionMask::select_rect(int x0, int y0, int x1, int y1, SelectionCombine
         return;
     }
     std::vector<std::uint8_t> source(mask.size(), 0);
-    int min_x = std::clamp(std::min(x0, x1), 0, width - 1);
-    int max_x = std::clamp(std::max(x0, x1), 0, width - 1);
-    int min_y = std::clamp(std::min(y0, y1), 0, height - 1);
-    int max_y = std::clamp(std::max(y0, y1), 0, height - 1);
+    const int requested_min_x = std::min(x0, x1);
+    const int requested_max_x = std::max(x0, x1);
+    const int requested_min_y = std::min(y0, y1);
+    const int requested_max_y = std::max(y0, y1);
+    if (requested_max_x < 0 || requested_min_x >= width ||
+        requested_max_y < 0 || requested_min_y >= height) {
+        combine_with_mask(source, mode);
+        return;
+    }
+    const int min_x = std::clamp(requested_min_x, 0, width - 1);
+    const int max_x = std::clamp(requested_max_x, 0, width - 1);
+    const int min_y = std::clamp(requested_min_y, 0, height - 1);
+    const int max_y = std::clamp(requested_max_y, 0, height - 1);
     for (int y = min_y; y <= max_y; ++y) {
         for (int x = min_x; x <= max_x; ++x) {
             source[static_cast<std::size_t>(y * width + x)] = 1;

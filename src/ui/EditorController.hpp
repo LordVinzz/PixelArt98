@@ -52,6 +52,9 @@ public:
     void invert_selection();
     void delete_selection();
     void nudge_selection(int dx, int dy);
+    void begin_pasted_selection(FloatingSelection selection);
+    [[nodiscard]] bool commit_pasted_selection();
+    void discard_pasted_selection();
 
     // Memory-test seam retained from the previous UI owner.
     [[nodiscard]] bool huge_document_history_mode() const;
@@ -66,6 +69,7 @@ private:
     void commit_drag_tool(int x, int y, bool constrain);
     void clear_tiny_selection();
     void rebuild_histogram();
+    void sync_selection_to_floating();
 
     Document document_ = Document::create(64, 64);
     ModelDocument model_ = ModelDocument::create_default();
@@ -88,7 +92,11 @@ private:
     int interaction_start_y_ = 0;
     int interaction_last_x_ = 0;
     int interaction_last_y_ = 0;
+    int interaction_floating_start_offset_x_ = 0;
+    int interaction_floating_start_offset_y_ = 0;
     SelectionCombineMode selection_mode_ = SelectionCombineMode::Replace;
+    std::vector<Pixel> pasted_selection_before_;
+    bool pasted_selection_active_ = false;
     bool modified_ = false;
     std::string status_ = "Ready";
 };

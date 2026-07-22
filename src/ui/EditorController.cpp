@@ -45,6 +45,8 @@ void EditorController::replace_project(Document document, ModelDocument model) {
     onion_skin_pixels_.shrink_to_fit();
     onion_skin_frame_ = -1;
     interaction_before_.clear();
+    pasted_selection_before_.clear();
+    pasted_selection_active_ = false;
     display_dirty_ = true;
     onion_skin_dirty_ = true;
     histogram_dirty_ = true;
@@ -129,11 +131,14 @@ void EditorController::clear_tiny_selection() {
 void EditorController::begin_stroke(int x, int y, bool secondary, SelectionCombineMode selection_mode) {
     if (!document_.in_bounds(x, y)) return;
     if (!document_.ensure_active_cel()) return;
+    if (pasted_selection_active_ && tool_.tool != ToolType::MovePixels) (void)commit_pasted_selection();
     interaction_active_ = true;
     secondary_interaction_ = secondary;
     selection_mode_ = selection_mode;
     interaction_start_x_ = interaction_last_x_ = x;
     interaction_start_y_ = interaction_last_y_ = y;
+    interaction_floating_start_offset_x_ = document_.floating_selection.offset_x;
+    interaction_floating_start_offset_y_ = document_.floating_selection.offset_y;
     interaction_before_ = document_.snapshot_active_cel();
     selection_before_ = document_.selection;
     lasso_points_.clear();
@@ -179,8 +184,10 @@ void EditorController::apply_immediate_tool(int x, int y, bool secondary, Select
             lasso_points_.push_back({x, y});
             break;
         case ToolType::MovePixels:
-            if (!document_.selection.active) document_.selection.select_all();
-            document_.begin_floating_selection();
+            if (!document_.floating_selection.active) {
+                if (!document_.selection.active) document_.selection.select_all();
+                document_.begin_floating_selection();
+            }
             break;
         case ToolType::Text:
             stamp_text(document_, x, y, "TEXT", color);
@@ -211,7 +218,9 @@ void EditorController::update_stroke(int x, int y, bool) {
     } else if (tool_.tool == ToolType::LassoSelect) {
         if (lasso_points_.empty() || lasso_points_.back() != std::array<int, 2>{x, y}) lasso_points_.push_back({x, y});
     } else if (tool_.tool == ToolType::MovePixels) {
-        document_.move_floating_selection(x - interaction_start_x_, y - interaction_start_y_);
+        document_.move_floating_selection(interaction_floating_start_offset_x_ + x - interaction_start_x_,
+                                          interaction_floating_start_offset_y_ + y - interaction_start_y_);
+        if (pasted_selection_active_) sync_selection_to_floating();
     }
     interaction_last_x_ = x;
     interaction_last_y_ = y;
@@ -273,7 +282,9 @@ void EditorController::commit_drag_tool(int x, int y, bool constrain) {
             document_.commit_selection_edit("Lasso Selection", selection_before_);
             break;
         case ToolType::MovePixels:
-            document_.commit_floating_selection("Move Pixels", std::move(interaction_before_));
+            if (!pasted_selection_active_) {
+                document_.commit_floating_selection("Move Pixels", std::move(interaction_before_));
+            }
             break;
         case ToolType::Bucket:
         case ToolType::Eyedropper:
@@ -285,6 +296,14 @@ void EditorController::commit_drag_tool(int x, int y, bool constrain) {
 
 void EditorController::cancel_interaction() {
     if (!interaction_active_) return;
+    if (pasted_selection_active_ && document_.floating_selection.active) {
+        document_.move_floating_selection(interaction_floating_start_offset_x_,
+                                          interaction_floating_start_offset_y_);
+        sync_selection_to_floating();
+        interaction_active_ = false;
+        invalidate_display();
+        return;
+    }
     document_.active_cel().pixels = std::move(interaction_before_);
     document_.selection = selection_before_;
     document_.cancel_floating_selection();
@@ -292,13 +311,61 @@ void EditorController::cancel_interaction() {
     invalidate_display();
 }
 
-bool EditorController::undo() { const bool changed = document_.undo(); if (changed) mark_changed("Undo"); return changed; }
-bool EditorController::redo() { const bool changed = document_.redo(); if (changed) mark_changed("Redo"); return changed; }
-void EditorController::select_all() { const auto before = document_.selection; document_.selection.select_all(); document_.commit_selection_edit("Select All", before); mark_changed("Select All"); }
-void EditorController::clear_selection() { if (!document_.selection.active && document_.selection.selected_count() == 0) return; const auto before = document_.selection; document_.selection.clear(); document_.commit_selection_edit("Clear Selection", before); mark_changed("Clear Selection"); }
-void EditorController::invert_selection() { const auto before = document_.selection; document_.selection.invert(); document_.commit_selection_edit("Invert Selection", before); mark_changed("Invert Selection"); }
-void EditorController::delete_selection() { if (document_.delete_selected_pixels()) mark_changed("Delete Selection"); }
-void EditorController::nudge_selection(int dx, int dy) { const auto before = document_.selection; document_.selection.translate(dx, dy); document_.commit_selection_edit("Nudge Selection", before); mark_changed("Nudge Selection"); }
+bool EditorController::undo() { if (pasted_selection_active_) (void)commit_pasted_selection(); const bool changed = document_.undo(); if (changed) mark_changed("Undo"); return changed; }
+bool EditorController::redo() { if (pasted_selection_active_) (void)commit_pasted_selection(); const bool changed = document_.redo(); if (changed) mark_changed("Redo"); return changed; }
+void EditorController::select_all() { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.select_all(); document_.commit_selection_edit("Select All", before); mark_changed("Select All"); }
+void EditorController::clear_selection() { if (pasted_selection_active_) (void)commit_pasted_selection(); if (!document_.selection.active && document_.selection.selected_count() == 0) return; const auto before = document_.selection; document_.selection.clear(); document_.commit_selection_edit("Clear Selection", before); mark_changed("Clear Selection"); }
+void EditorController::invert_selection() { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.invert(); document_.commit_selection_edit("Invert Selection", before); mark_changed("Invert Selection"); }
+void EditorController::delete_selection() { if (pasted_selection_active_) (void)commit_pasted_selection(); if (document_.delete_selected_pixels()) mark_changed("Delete Selection"); }
+void EditorController::nudge_selection(int dx, int dy) { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.translate(dx, dy); document_.commit_selection_edit("Nudge Selection", before); mark_changed("Nudge Selection"); }
+
+void EditorController::begin_pasted_selection(FloatingSelection selection) {
+    if (pasted_selection_active_) (void)commit_pasted_selection();
+    if (!document_.ensure_active_cel() || !selection.active || selection.width <= 0 || selection.height <= 0) return;
+    pasted_selection_before_ = document_.snapshot_active_cel();
+    document_.floating_selection = std::move(selection);
+    sync_selection_to_floating();
+    pasted_selection_active_ = true;
+    mark_changed("Paste");
+}
+
+void EditorController::sync_selection_to_floating() {
+    document_.selection.clear();
+    const FloatingSelection& floating = document_.floating_selection;
+    bool any_selected = false;
+    for (int y = 0; y < floating.height; ++y) {
+        for (int x = 0; x < floating.width; ++x) {
+            const std::size_t local = static_cast<std::size_t>(y * floating.width + x);
+            if (local >= floating.mask.size() || floating.mask[local] == 0) continue;
+            const int destination_x = floating.source_x + floating.offset_x + x;
+            const int destination_y = floating.source_y + floating.offset_y + y;
+            if (!document_.in_bounds(destination_x, destination_y)) continue;
+            document_.selection.mask[static_cast<std::size_t>(document_.pixel_index(destination_x, destination_y))] = 1;
+            any_selected = true;
+        }
+    }
+    document_.selection.active = any_selected;
+}
+
+bool EditorController::commit_pasted_selection() {
+    if (!pasted_selection_active_) return false;
+    if (document_.floating_selection.active) {
+        document_.commit_floating_selection("Paste", std::move(pasted_selection_before_));
+    }
+    pasted_selection_before_.clear();
+    pasted_selection_active_ = false;
+    invalidate_display();
+    return true;
+}
+
+void EditorController::discard_pasted_selection() {
+    if (!pasted_selection_active_) return;
+    document_.floating_selection.clear();
+    document_.selection.clear();
+    pasted_selection_before_.clear();
+    pasted_selection_active_ = false;
+    mark_changed("Cut");
+}
 
 bool EditorController::huge_document_history_mode() const {
     const std::size_t threshold = environment_limit("PIXELART_HUGE_DOCUMENT_PIXEL_THRESHOLD", 64U * 1024U * 1024U);

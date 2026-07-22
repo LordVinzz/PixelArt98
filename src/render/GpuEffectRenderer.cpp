@@ -299,6 +299,25 @@ float curve_y_at(int index) {
     return index < 4 ? u_curve_y0[index] : u_curve_y1[index - 4];
 }
 
+float curve_slope(int segment) {
+    float width = max(0.001, curve_x_at(segment + 1) - curve_x_at(segment));
+    return (curve_y_at(segment + 1) - curve_y_at(segment)) / width;
+}
+
+float curve_tangent(int point, int count) {
+    if (point == 0) return curve_slope(0);
+    if (point == count - 1) return curve_slope(count - 2);
+    float left_slope = curve_slope(point - 1);
+    float right_slope = curve_slope(point);
+    if (left_slope * right_slope <= 0.0) return 0.0;
+    float left_width = curve_x_at(point) - curve_x_at(point - 1);
+    float right_width = curve_x_at(point + 1) - curve_x_at(point);
+    float first_weight = 2.0 * right_width + left_width;
+    float second_weight = right_width + 2.0 * left_width;
+    return (first_weight + second_weight) /
+           (first_weight / left_slope + second_weight / right_slope);
+}
+
 float evaluate_point_curve(float value) {
     float target = clamp(value, 0.0, 1.0);
     int count = clamp(u_curve_point_count, 2, 8);
@@ -312,9 +331,16 @@ float evaluate_point_curve(float value) {
             if (target <= x1 || i == count - 1) {
                 float y0 = clamp(curve_y_at(i - 1), 0.0, 1.0);
                 float y1 = clamp(curve_y_at(i), 0.0, 1.0);
-                float t = clamp((target - x0) / max(0.001, x1 - x0), 0.0, 1.0);
-                float smooth_t = t * t * (3.0 - 2.0 * t);
-                return mix(y0, y1, smooth_t);
+                float width = max(0.001, x1 - x0);
+                float t = clamp((target - x0) / width, 0.0, 1.0);
+                float t2 = t * t;
+                float t3 = t2 * t;
+                float left_tangent = curve_tangent(i - 1, count);
+                float right_tangent = curve_tangent(i, count);
+                return clamp((2.0 * t3 - 3.0 * t2 + 1.0) * y0 +
+                             (t3 - 2.0 * t2 + t) * width * left_tangent +
+                             (-2.0 * t3 + 3.0 * t2) * y1 +
+                             (t3 - t2) * width * right_tangent, 0.0, 1.0);
             }
         }
     }

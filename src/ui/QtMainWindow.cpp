@@ -12,14 +12,17 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QAbstractButton>
+#include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDesktopServices>
+#include <QDataStream>
 #include <QDateTime>
 #include <QDockWidget>
 #include <QFileDialog>
@@ -38,6 +41,7 @@
 #include <QListWidget>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -76,6 +80,67 @@ namespace px {
 namespace {
 
 constexpr int kWindowStateVersion = 1;
+constexpr auto kSelectionMimeType = "application/x-pixelart98-selection";
+constexpr quint32 kSelectionClipboardMagic = 0x50583938U;
+constexpr quint32 kSelectionClipboardVersion = 1U;
+
+struct ClipboardSelection {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    std::vector<Pixel> pixels;
+    std::vector<std::uint8_t> mask;
+};
+
+QByteArray encode_clipboard_selection(const ClipboardSelection& selection) {
+    QByteArray bytes;
+    QDataStream stream(&bytes, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    stream << kSelectionClipboardMagic << kSelectionClipboardVersion
+           << static_cast<qint32>(selection.x) << static_cast<qint32>(selection.y)
+           << static_cast<qint32>(selection.width) << static_cast<qint32>(selection.height);
+    for (Pixel pixel : selection.pixels) stream << static_cast<quint32>(pixel);
+    for (std::uint8_t selected : selection.mask) stream << static_cast<quint8>(selected);
+    return bytes;
+}
+
+std::optional<ClipboardSelection> decode_clipboard_selection(const QByteArray& bytes) {
+    QDataStream stream(bytes);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    quint32 magic = 0;
+    quint32 version = 0;
+    qint32 x = 0;
+    qint32 y = 0;
+    qint32 width = 0;
+    qint32 height = 0;
+    stream >> magic >> version >> x >> y >> width >> height;
+    const qint64 pixel_count = static_cast<qint64>(width) * static_cast<qint64>(height);
+    if (stream.status() != QDataStream::Ok || magic != kSelectionClipboardMagic ||
+        version != kSelectionClipboardVersion || width <= 0 || height <= 0 ||
+        pixel_count <= 0 || pixel_count > 268435456LL) {
+        return std::nullopt;
+    }
+    ClipboardSelection selection;
+    selection.x = x;
+    selection.y = y;
+    selection.width = width;
+    selection.height = height;
+    selection.pixels.resize(static_cast<std::size_t>(pixel_count));
+    selection.mask.resize(static_cast<std::size_t>(pixel_count));
+    for (Pixel& pixel : selection.pixels) {
+        quint32 encoded = 0;
+        stream >> encoded;
+        pixel = static_cast<Pixel>(encoded);
+    }
+    for (std::uint8_t& selected : selection.mask) {
+        quint8 encoded = 0;
+        stream >> encoded;
+        selected = encoded != 0 ? 1 : 0;
+    }
+    if (stream.status() != QDataStream::Ok) return std::nullopt;
+    return selection;
+}
 
 QString image_filter() { return QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp *.gif);;All files (*)"); }
 QString project_filter() { return QStringLiteral("PixelArt98 Projects (*.pixart);;All files (*)"); }
@@ -223,6 +288,7 @@ public:
     void reset_curve() {
         points_ = {{0.0, 0.0}, {0.5, 0.5}, {1.0, 1.0}};
         setProperty("curvePointCount", static_cast<int>(points_.size()));
+        setProperty("curveQuarterOutput", qRound(evaluate(0.25) * 1000.0));
         update();
         if (changed) changed();
     }
@@ -387,15 +453,43 @@ private:
             if (value <= points_[index].x() || index + 1 == points_.size()) {
                 const QPointF& left = points_[index - 1];
                 const QPointF& right = points_[index];
-                const qreal t = std::clamp((value - left.x()) / std::max(0.001, right.x() - left.x()), 0.0, 1.0);
-                const qreal smooth = t * t * (3.0 - 2.0 * t);
-                return left.y() + (right.y() - left.y()) * smooth;
+                const qreal width = std::max(0.001, right.x() - left.x());
+                const qreal t = std::clamp((value - left.x()) / width, 0.0, 1.0);
+                const qreal t2 = t * t;
+                const qreal t3 = t2 * t;
+                const qreal left_tangent = tangent_at(index - 1);
+                const qreal right_tangent = tangent_at(index);
+                return std::clamp((2.0 * t3 - 3.0 * t2 + 1.0) * left.y() +
+                                  (t3 - 2.0 * t2 + t) * width * left_tangent +
+                                  (-2.0 * t3 + 3.0 * t2) * right.y() +
+                                  (t3 - t2) * width * right_tangent, 0.0, 1.0);
             }
         }
         return points_.back().y();
     }
 
+    [[nodiscard]] qreal slope_at(std::size_t segment) const {
+        const QPointF& left = points_[segment];
+        const QPointF& right = points_[segment + 1];
+        return (right.y() - left.y()) / std::max(0.001, right.x() - left.x());
+    }
+
+    [[nodiscard]] qreal tangent_at(std::size_t point) const {
+        if (point == 0) return slope_at(0);
+        if (point + 1 == points_.size()) return slope_at(points_.size() - 2);
+        const qreal left_slope = slope_at(point - 1);
+        const qreal right_slope = slope_at(point);
+        if (left_slope * right_slope <= 0.0) return 0.0;
+        const qreal left_width = points_[point].x() - points_[point - 1].x();
+        const qreal right_width = points_[point + 1].x() - points_[point].x();
+        const qreal first_weight = 2.0 * right_width + left_width;
+        const qreal second_weight = right_width + 2.0 * left_width;
+        return (first_weight + second_weight) /
+               (first_weight / left_slope + second_weight / right_slope);
+    }
+
     void notify_changed() {
+        setProperty("curveQuarterOutput", qRound(evaluate(0.25) * 1000.0));
         update();
         if (changed) changed();
     }
@@ -1188,8 +1282,16 @@ void QtMainWindow::build_menus() {
     add_action(edit, tr("Undo"), QKeySequence::Undo, [this] { if (controller_.undo()) refresh_all(); });
     add_action(edit, tr("Redo"), QKeySequence::Redo, [this] { if (controller_.redo()) refresh_all(); });
     edit->addSeparator();
+    QAction* cut = add_action(edit, tr("Cut"), QKeySequence::Cut, [this] { cut_selection_to_clipboard(); });
+    QAction* copy = add_action(edit, tr("Copy"), QKeySequence::Copy, [this] { (void)copy_selection_to_clipboard(); });
+    QAction* paste = add_action(edit, tr("Paste"), QKeySequence::Paste, [this] { paste_from_clipboard(); });
+    cut->setObjectName(QStringLiteral("EditCut"));
+    copy->setObjectName(QStringLiteral("EditCopy"));
+    paste->setObjectName(QStringLiteral("EditPaste"));
+    edit->addSeparator();
     add_action(edit, tr("Select All"), QKeySequence::SelectAll, [this] { controller_.select_all(); refresh_all(); });
-    add_action(edit, tr("Deselect"), QKeySequence(QStringLiteral("Ctrl+D")), [this] { controller_.clear_selection(); refresh_all(); });
+    QAction* deselect = add_action(edit, tr("Deselect"), QKeySequence(QStringLiteral("Ctrl+D")), [this] { controller_.clear_selection(); refresh_all(); });
+    deselect->setObjectName(QStringLiteral("EditDeselect"));
     add_action(edit, tr("Invert Selection"), QKeySequence(QStringLiteral("Ctrl+I")), [this] { controller_.invert_selection(); refresh_all(); });
     add_action(edit, tr("Delete Selection"), QKeySequence::Delete, [this] { controller_.delete_selection(); refresh_all(); });
 
@@ -1424,6 +1526,7 @@ void QtMainWindow::build_colors_dock() {
 
 void QtMainWindow::build_layers_dock() {
     auto* dock = new QDockWidget(tr("Layers"), this); dock->setObjectName(QStringLiteral("LayersDock")); layers_list_ = new QListWidget;
+    layers_list_->setObjectName(QStringLiteral("LayersList"));
     auto* add = icon_button(icon_resource(QStringLiteral("new_layer.png")), tr("New Layer"));
     auto* duplicate = icon_button(icon_resource(QStringLiteral("duplicate_layer.png")), tr("Duplicate Layer"));
     auto* remove = icon_button(icon_resource(QStringLiteral("remove_layer.png")), tr("Remove Layer"));
@@ -1441,7 +1544,7 @@ void QtMainWindow::build_layers_dock() {
     layer_actions_layout->addStretch(1);
     blend_mode_ = new QComboBox; for (int i = 0; i <= static_cast<int>(LayerBlendMode::Xor); ++i) blend_mode_->addItem(QString::fromUtf8(layer_blend_mode_name(static_cast<LayerBlendMode>(i))), i);
     auto* opacity = new QSlider(Qt::Horizontal); opacity->setRange(0, 100); opacity->setValue(100);
-    auto* visible = new QCheckBox(tr("Visible")); visible->setChecked(true); auto* clip = new QCheckBox(tr("Clip to below")); auto* mask = new QCheckBox(tr("Layer mask"));
+    auto* visible = new QCheckBox(tr("Visible")); visible->setObjectName(QStringLiteral("LayerVisible")); visible->setChecked(true); auto* clip = new QCheckBox(tr("Clip to below")); auto* mask = new QCheckBox(tr("Layer mask"));
     auto* reveal_mask = icon_button(icon_resource(QStringLiteral("reveal_mask.png")), tr("Reveal Mask"));
     auto* hide_mask = icon_button(icon_resource(QStringLiteral("hide_mask.png")), tr("Hide Mask"));
     auto* selection_mask = icon_button(icon_resource(QStringLiteral("mask_from_selection.png")), tr("Mask from Selection"));
@@ -1455,7 +1558,24 @@ void QtMainWindow::build_layers_dock() {
     mask_actions_layout->addWidget(selection_mask);
     mask_actions_layout->addWidget(clear_mask);
     mask_actions_layout->addStretch(1);
-    connect(layers_list_, &QListWidget::currentRowChanged, this, [this, opacity, visible, clip, mask](int row) { if (row >= 0 && row < static_cast<int>(controller_.document().layers.size())) { controller_.document().active_layer = row; const Layer& layer = controller_.document().layers[static_cast<std::size_t>(row)]; const QSignalBlocker block_opacity(opacity); const QSignalBlocker block_visible(visible); const QSignalBlocker block_clip(clip); const QSignalBlocker block_mask(mask); blend_mode_->setCurrentIndex(static_cast<int>(layer.blend_mode)); opacity->setValue(static_cast<int>(layer.opacity * 100.0f)); visible->setChecked(layer.visible); clip->setChecked(layer.clip_to_below); mask->setChecked(layer.mask_enabled); controller_.invalidate_display(); canvas_->update(); } });
+    connect(layers_list_, &QListWidget::currentRowChanged, this, [this, opacity, visible, clip, mask](int row) { if (row >= 0 && row < static_cast<int>(controller_.document().layers.size())) { controller_.document().active_layer = row; const Layer& layer = controller_.document().layers[static_cast<std::size_t>(row)]; const QSignalBlocker block_blend_mode(blend_mode_); const QSignalBlocker block_opacity(opacity); const QSignalBlocker block_visible(visible); const QSignalBlocker block_clip(clip); const QSignalBlocker block_mask(mask); blend_mode_->setCurrentIndex(static_cast<int>(layer.blend_mode)); opacity->setValue(static_cast<int>(layer.opacity * 100.0f)); visible->setChecked(layer.visible); clip->setChecked(layer.clip_to_below); mask->setChecked(layer.mask_enabled); controller_.invalidate_display(); canvas_->update(); } });
+    connect(layers_list_, &QListWidget::itemChanged, this, [this, visible](QListWidgetItem* item) {
+        const int row = layers_list_->row(item);
+        if (row < 0 || row >= static_cast<int>(controller_.document().layers.size())) return;
+        const bool checked = item->checkState() == Qt::Checked;
+        Layer& layer = controller_.document().layers[static_cast<std::size_t>(row)];
+        if (layer.visible == checked) return;
+        layer.visible = checked;
+        if (row == controller_.document().active_layer) {
+            const QSignalBlocker blocker(visible);
+            visible->setChecked(checked);
+        }
+        controller_.mark_changed("Layer Visibility");
+        controller_.invalidate_display();
+        canvas_->update();
+        if (model_preview_ != nullptr) model_preview_->update();
+        setWindowModified(controller_.modified());
+    });
     connect(layers_list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) { bool ok = false; const QString name = QInputDialog::getText(this, tr("Rename Layer"), tr("Name"), QLineEdit::Normal, item->text(), &ok); if (ok && !name.isEmpty()) { controller_.document().layers[static_cast<std::size_t>(layers_list_->row(item))].name = name.toStdString(); controller_.mark_changed("Rename Layer"); refresh_all(); } });
     connect(add, &QToolButton::clicked, this, [this] { controller_.document().add_layer("Layer"); controller_.mark_changed("Add Layer"); refresh_all(); });
     connect(duplicate, &QToolButton::clicked, this, [this] { controller_.document().duplicate_layer(controller_.document().active_layer); controller_.mark_changed("Duplicate Layer"); refresh_all(); });
@@ -1828,6 +1948,130 @@ void QtMainWindow::report_error(const QString& operation, const std::string& err
 
 bool QtMainWindow::confirm_discard() { if (!controller_.modified()) return true; const auto answer = QMessageBox::warning(this, tr("Unsaved Changes"), tr("Discard changes to the current project?"), QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel); return answer == QMessageBox::Discard; }
 void QtMainWindow::new_document() { if (!confirm_discard()) return; QDialog dialog(this); dialog.setWindowTitle(tr("New Document")); QFormLayout form(&dialog); QSpinBox width; QSpinBox height; width.setRange(1, 32768); height.setRange(1, 32768); width.setValue(64); height.setValue(64); form.addRow(tr("Width"), &width); form.addRow(tr("Height"), &height); QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); form.addRow(&buttons); connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); if (dialog.exec() == QDialog::Accepted) { controller_.new_document(width.value(), height.value()); project_path_.clear(); canvas_->fit_to_canvas(); refresh_all(); } }
+
+bool QtMainWindow::copy_selection_to_clipboard() {
+    const Document& document = controller_.document();
+    if (!document.has_active_cel()) return false;
+    ClipboardSelection selection;
+    const FloatingSelection& floating = document.floating_selection;
+    if (floating.active) {
+        selection.x = floating.source_x + floating.offset_x;
+        selection.y = floating.source_y + floating.offset_y;
+        selection.width = floating.width;
+        selection.height = floating.height;
+        selection.pixels = floating.pixels;
+        selection.mask = floating.mask;
+    } else {
+        const auto bounds = document.selection.bounds();
+        if (!bounds.has_value()) {
+            set_status(tr("Nothing selected to copy"));
+            return false;
+        }
+        selection.x = (*bounds)[0];
+        selection.y = (*bounds)[1];
+        selection.width = (*bounds)[2] - (*bounds)[0] + 1;
+        selection.height = (*bounds)[3] - (*bounds)[1] + 1;
+        const std::size_t pixel_count = static_cast<std::size_t>(selection.width) *
+                                        static_cast<std::size_t>(selection.height);
+        selection.pixels.assign(pixel_count, 0);
+        selection.mask.assign(pixel_count, 0);
+        const auto& source_pixels = document.active_cel().pixels;
+        for (int y = 0; y < selection.height; ++y) {
+            for (int x = 0; x < selection.width; ++x) {
+                const int source_x = selection.x + x;
+                const int source_y = selection.y + y;
+                if (!document.selection.contains(source_x, source_y)) continue;
+                const std::size_t source_index = static_cast<std::size_t>(document.pixel_index(source_x, source_y));
+                const std::size_t local_index = static_cast<std::size_t>(y * selection.width + x);
+                selection.pixels[local_index] = source_pixels[source_index];
+                selection.mask[local_index] = 1;
+            }
+        }
+    }
+
+    QImage image(selection.width, selection.height, QImage::Format_RGBA8888);
+    image.fill(Qt::transparent);
+    for (int y = 0; y < selection.height; ++y) {
+        for (int x = 0; x < selection.width; ++x) {
+            const std::size_t local_index = static_cast<std::size_t>(y * selection.width + x);
+            if (local_index < selection.mask.size() && selection.mask[local_index] != 0 &&
+                local_index < selection.pixels.size()) {
+                image.setPixelColor(x, y, qcolor(selection.pixels[local_index]));
+            }
+        }
+    }
+
+    auto* mime_data = new QMimeData;
+    mime_data->setImageData(image);
+    mime_data->setData(kSelectionMimeType, encode_clipboard_selection(selection));
+    QApplication::clipboard()->setMimeData(mime_data);
+    set_status(tr("Copied selection at (%1, %2)").arg(selection.x).arg(selection.y));
+    return true;
+}
+
+void QtMainWindow::cut_selection_to_clipboard() {
+    if (!copy_selection_to_clipboard()) return;
+    if (controller_.document().floating_selection.active) {
+        controller_.discard_pasted_selection();
+        refresh_all();
+        return;
+    }
+    if (controller_.document().delete_selected_pixels("Cut")) {
+        controller_.mark_changed("Cut");
+        refresh_all();
+    }
+}
+
+void QtMainWindow::paste_from_clipboard() {
+    const QMimeData* mime_data = QApplication::clipboard()->mimeData();
+    if (mime_data == nullptr) return;
+
+    std::optional<ClipboardSelection> clipboard_selection;
+    if (mime_data->hasFormat(kSelectionMimeType)) {
+        clipboard_selection = decode_clipboard_selection(mime_data->data(kSelectionMimeType));
+    }
+    if (!clipboard_selection.has_value() && mime_data->hasImage()) {
+        const QImage image = qvariant_cast<QImage>(mime_data->imageData()).convertToFormat(QImage::Format_RGBA8888);
+        const qint64 pixel_count = static_cast<qint64>(image.width()) * static_cast<qint64>(image.height());
+        if (!image.isNull() && pixel_count > 0 && pixel_count <= 67108864LL) {
+            ClipboardSelection external;
+            const auto current_bounds = controller_.document().selection.bounds();
+            if (current_bounds.has_value()) {
+                external.x = (*current_bounds)[0];
+                external.y = (*current_bounds)[1];
+            }
+            external.width = image.width();
+            external.height = image.height();
+            external.pixels.resize(static_cast<std::size_t>(pixel_count));
+            external.mask.assign(static_cast<std::size_t>(pixel_count), 1);
+            for (int y = 0; y < external.height; ++y) {
+                for (int x = 0; x < external.width; ++x) {
+                    external.pixels[static_cast<std::size_t>(y * external.width + x)] = pixel_color(image.pixelColor(x, y));
+                }
+            }
+            clipboard_selection = std::move(external);
+        }
+    }
+    if (!clipboard_selection.has_value()) {
+        set_status(tr("Clipboard does not contain an image selection"));
+        return;
+    }
+
+    const ClipboardSelection& source = *clipboard_selection;
+    FloatingSelection floating;
+    floating.active = true;
+    floating.source_x = source.x;
+    floating.source_y = source.y;
+    floating.width = source.width;
+    floating.height = source.height;
+    floating.pixels = source.pixels;
+    floating.mask = source.mask;
+    controller_.begin_pasted_selection(std::move(floating));
+    controller_.tool().tool = ToolType::MovePixels;
+    refresh_all();
+    set_status(tr("Pasted selection at (%1, %2)").arg(source.x).arg(source.y));
+}
+
 void QtMainWindow::save_project_as() { QString path = project_path_; if (path.isEmpty()) path = QFileDialog::getSaveFileName(this, tr("Save Project"), QStringLiteral("untitled.pixart"), project_filter()); if (path.isEmpty()) return; std::string error; if (!save_project(filesystem_path(path), controller_.document(), controller_.model(), &error)) report_error(tr("Save Project"), error); else { project_path_ = path; controller_.set_modified(false); set_status(tr("Saved %1").arg(path)); refresh_all(); } }
 void QtMainWindow::load_project_from() { if (!confirm_discard()) return; const QString path = QFileDialog::getOpenFileName(this, tr("Load Project"), {}, project_filter()); if (path.isEmpty()) return; ProjectBundle bundle; std::string error; if (!load_project(filesystem_path(path), bundle, &error)) report_error(tr("Load Project"), error); else { controller_.replace_project(std::move(bundle.document), std::move(bundle.model)); project_path_ = path; canvas_->fit_to_canvas(); refresh_all(); } }
 void QtMainWindow::import_image_document(const QString& path) { if (!confirm_discard()) return; Document document; std::string error; if (!import_image(path.toStdString(), document, &error)) report_error(tr("Import Image"), error); else { controller_.replace_document(std::move(document)); project_path_.clear(); canvas_->fit_to_canvas(); refresh_all(); } }

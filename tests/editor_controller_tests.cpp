@@ -84,6 +84,37 @@ int main() {
     assert(!mover.document().floating_selection.active);
     assert(b(mover.document().active_cel().pixels[static_cast<std::size_t>(mover.document().pixel_index(3, 1))]) == 255);
 
+    EditorController pasted_mover;
+    pasted_mover.new_document(10, 10);
+    FloatingSelection pasted;
+    pasted.active = true;
+    pasted.source_x = 2;
+    pasted.source_y = 2;
+    pasted.width = 2;
+    pasted.height = 1;
+    pasted.pixels = {rgba(255, 0, 0, 255), rgba(0, 255, 0, 255)};
+    pasted.mask = {1, 1};
+    pasted_mover.begin_pasted_selection(std::move(pasted));
+    assert(pasted_mover.document().floating_selection.active);
+    assert(pasted_mover.document().active_cel().pixels[static_cast<std::size_t>(pasted_mover.document().pixel_index(2, 2))] == 0);
+    pasted_mover.tool().tool = ToolType::MovePixels;
+    pasted_mover.begin_stroke(2, 2, false, SelectionCombineMode::Replace);
+    pasted_mover.update_stroke(4, 3, false);
+    pasted_mover.end_stroke(4, 3, false);
+    assert(pasted_mover.document().floating_selection.active);
+    assert(pasted_mover.document().floating_selection.offset_x == 2);
+    assert(pasted_mover.document().floating_selection.offset_y == 1);
+    pasted_mover.begin_stroke(4, 3, false, SelectionCombineMode::Replace);
+    pasted_mover.update_stroke(5, 5, false);
+    pasted_mover.end_stroke(5, 5, false);
+    assert(pasted_mover.document().floating_selection.active);
+    assert(pasted_mover.document().floating_selection.offset_x == 3);
+    assert(pasted_mover.document().floating_selection.offset_y == 3);
+    pasted_mover.clear_selection();
+    assert(!pasted_mover.document().floating_selection.active);
+    assert(r(pasted_mover.document().active_cel().pixels[static_cast<std::size_t>(pasted_mover.document().pixel_index(5, 5))]) == 255);
+    assert(g(pasted_mover.document().active_cel().pixels[static_cast<std::size_t>(pasted_mover.document().pixel_index(6, 5))]) == 255);
+
     EditorController onion;
     Document onion_document = Document::create(4, 4);
     onion_document.active_cel().pixels[static_cast<std::size_t>(onion_document.pixel_index(1, 1))] = rgba(220, 30, 20, 255);

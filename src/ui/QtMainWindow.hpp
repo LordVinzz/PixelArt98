@@ -93,6 +93,9 @@ private:
     [[nodiscard]] bool confirm_discard();
 
     void new_document();
+    [[nodiscard]] bool copy_selection_to_clipboard();
+    void cut_selection_to_clipboard();
+    void paste_from_clipboard();
     void save_project_as();
     void load_project_from();
     void import_layer();
