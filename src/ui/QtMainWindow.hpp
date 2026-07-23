@@ -31,6 +31,7 @@ class QListWidget;
 class QNetworkAccessManager;
 class QPlainTextEdit;
 class QPushButton;
+class QShowEvent;
 class QVBoxLayout;
 class QSpinBox;
 class QTabWidget;
@@ -57,6 +58,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     using EffectOperation = std::function<void(Document&, int)>;
@@ -212,7 +214,10 @@ private:
     std::vector<QDockWidget*> docks_;
     std::vector<QDockWidget*> canvas_only_docks_;
     std::vector<bool> canvas_dock_visibility_before_graph_;
+    std::vector<QDockWidget*> floating_docks_to_show_;
     bool canvas_docks_hidden_for_graph_ = false;
+    bool floating_dock_restore_scheduled_ = false;
+    bool shutdown_state_saved_ = false;
     bool graph_effect_source_dirty_ = true;
     bool raster_text_edit_active_ = false;
     bool raster_text_secondary_ = false;

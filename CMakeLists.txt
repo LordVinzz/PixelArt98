@@ -240,11 +240,24 @@ endfunction()
 
 add_library(pixelart_core
     src/core/Document.cpp
+    src/core/DocumentHistory.cpp
+    src/core/DocumentHistoryStorage.cpp
+    src/core/DocumentSelection.cpp
+    src/core/DocumentStructure.cpp
     src/core/DocumentTransforms.cpp
     src/core/Filters.cpp
+    src/core/FiltersArtistic.cpp
+    src/core/FiltersBlur.cpp
+    src/core/FiltersCommon.cpp
+    src/core/FiltersDistort.cpp
     src/core/GraphEffect.cpp
+    src/core/GraphEffectEvaluator.cpp
+    src/core/GraphEffectSerialization.cpp
     src/core/MemoryTrace.cpp
     src/core/Model.cpp
+    src/core/ModelUvUnwrap.cpp
+    src/core/Svg.cpp
+    src/core/SvgRaster.cpp
     src/core/Tools.cpp
     src/io/ProjectIO.cpp
     src/third_party/stb_impl.cpp)
@@ -317,6 +330,7 @@ qt_standard_project_setup()
 set(PIXELART_TOOL_ICONS
     ${CMAKE_SOURCE_DIR}/res/icons/brush.png ${CMAKE_SOURCE_DIR}/res/icons/bucket.png
     ${CMAKE_SOURCE_DIR}/res/icons/clone_stamp.png ${CMAKE_SOURCE_DIR}/res/icons/ellipse.png
+    ${CMAKE_SOURCE_DIR}/res/icons/ellipse_select.png
     ${CMAKE_SOURCE_DIR}/res/icons/eraser.png ${CMAKE_SOURCE_DIR}/res/icons/eyedropper.png
     ${CMAKE_SOURCE_DIR}/res/icons/gradient.png ${CMAKE_SOURCE_DIR}/res/icons/lasso.png
     ${CMAKE_SOURCE_DIR}/res/icons/line.png ${CMAKE_SOURCE_DIR}/res/icons/magic_wand.png
@@ -420,6 +434,12 @@ install(FILES
 
 if(PIXELART_BUILD_TESTS)
     enable_testing()
+    add_test(
+        NAME pixelart_listed_source_line_limits
+        COMMAND ${CMAKE_COMMAND}
+            -DPIXELART_SOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/cmake/CheckListedSourceLineLimits.cmake)
+
     add_executable(pixelart_tests tests/core_tests.cpp)
     target_link_libraries(pixelart_tests PRIVATE pixelart_app)
     pixelart_configure_project_target(pixelart_tests)
