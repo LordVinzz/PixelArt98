@@ -77,35 +77,8 @@ jobs:
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
           -DPIXELART_BUILD_TESTS=ON
 
-      - name: Build
-        if: runner.os != 'macOS'
-        run: >
-          cmake --build build --config ${{ env.BUILD_TYPE }}
-          --target
-          PixelArt98
-          pixelart_tests
-          pixelart_io_tests
-          pixelart_huge_image_memory_tests
-          pixelart_editor_controller_tests
-          pixelart_canvas_viewport_tests
-          pixelart_shader_compile_tests
-          pixelart_opengl_smoke
-
-      - name: Build macOS
-        if: runner.os == 'macOS'
-        run: >
-          cmake --build build --config ${{ env.BUILD_TYPE }}
-          --target
-          PixelArt98
-          pixelart_tests
-          pixelart_io_tests
-          pixelart_huge_image_memory_tests
-          pixelart_editor_controller_tests
-          pixelart_canvas_viewport_tests
-          pixelart_shader_compile_tests
-          pixelart_opengl_smoke
-          pixelart_mps_smoke
-          pixelart_qt_mps_effects_e2e
+      - name: Build all targets
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
 
       - name: Test
         run: ctest --test-dir build --build-config ${{ env.BUILD_TYPE }} --output-on-failure

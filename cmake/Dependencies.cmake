@@ -17,6 +17,7 @@ FetchContent_Declare(nlohmann_json
     GIT_TAG v3.12.0
     UPDATE_DISCONNECTED TRUE
     GIT_SHALLOW TRUE)
+set(JSON_SystemInclude ON CACHE BOOL "Treat nlohmann/json as a system dependency" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
 
 FetchContent_Declare(miniz_src

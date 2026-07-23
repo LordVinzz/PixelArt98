@@ -830,6 +830,23 @@ void test_save_load_round_trip_and_corruptions() {
     assert(!load_graph_effect(wrong_version, loaded, &error));
     assert(error.find("version") != std::string::npos);
 
+    const std::filesystem::path optional_defaults = temporary.path / "optional-defaults.pxgraph";
+    {
+        std::ofstream out(optional_defaults);
+        out << "{\"format\":\"pixelart98-graph-effect\",\"version\":1,"
+               "\"nodes\":[{\"id\":1,\"type_id\":\"source.active-cel\","
+               "\"position\":{\"x\":0,\"y\":0}},{\"id\":2,\"type_id\":\"output\","
+               "\"position\":{\"x\":100,\"y\":0}}],\"links\":[{\"from\":{\"node\":1,"
+               "\"port\":\"image\"},\"to\":{\"node\":2,\"port\":\"image\"}}]}";
+    }
+    assert(load_graph_effect(optional_defaults, loaded, &error));
+    assert(error.empty());
+    assert(loaded.name == "Untitled Graph");
+    assert(loaded.nodes.size() == 2U);
+    assert(std::all_of(loaded.nodes.begin(), loaded.nodes.end(), [](const GraphEffectNode& node) {
+        return node.enabled && node.parameters.empty();
+    }));
+
     assert(!load_graph_effect(temporary.path / "missing.pxgraph", loaded, &error));
     assert(!error.empty());
 }

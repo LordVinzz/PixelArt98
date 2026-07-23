@@ -844,7 +844,10 @@ GraphEffectGraph graph_from_json(const nlohmann::json& root) {
         throw std::runtime_error("Unsupported GraphEffect version: " + std::to_string(version));
     }
     GraphEffectGraph graph;
-    graph.name = root.value("name", "Untitled Graph");
+    const auto name_iterator = root.find("name");
+    graph.name = name_iterator == root.end()
+                     ? "Untitled Graph"
+                     : name_iterator->get<std::string>();
     const nlohmann::json& nodes = root.at("nodes");
     const nlohmann::json& links = root.at("links");
     if (!nodes.is_array() || nodes.size() > kMaximumGraphNodes ||
@@ -857,13 +860,19 @@ GraphEffectGraph graph_from_json(const nlohmann::json& root) {
         node.type_id = node_json.at("type_id").get<std::string>();
         node.x = node_json.at("position").at("x").get<double>();
         node.y = node_json.at("position").at("y").get<double>();
-        node.enabled = node_json.value("enabled", true);
-        const nlohmann::json& parameters = node_json.value("parameters", nlohmann::json::object());
-        if (!parameters.is_object() || parameters.size() > kMaximumGraphParameters) {
-            throw std::runtime_error("Graph node has too many parameters");
-        }
-        for (const auto& [id, parameter_json] : parameters.items()) {
-            node.parameters.emplace(id, parameter_from_json(parameter_json));
+        const auto enabled_iterator = node_json.find("enabled");
+        node.enabled = enabled_iterator == node_json.end()
+                           ? true
+                           : enabled_iterator->get<bool>();
+        const auto parameters_iterator = node_json.find("parameters");
+        if (parameters_iterator != node_json.end()) {
+            const nlohmann::json& parameters = *parameters_iterator;
+            if (!parameters.is_object() || parameters.size() > kMaximumGraphParameters) {
+                throw std::runtime_error("Graph node has too many parameters");
+            }
+            for (const auto& [id, parameter_json] : parameters.items()) {
+                node.parameters.emplace(id, parameter_from_json(parameter_json));
+            }
         }
         graph.nodes.push_back(std::move(node));
     }
