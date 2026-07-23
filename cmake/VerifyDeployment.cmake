@@ -39,6 +39,7 @@ if(PIXELART_DEPLOY_PLATFORM STREQUAL "windows")
 
     file(GLOB compiler_runtime_files
         "${pixelart_deploy_root}/vc_redist.x64.exe"
+        "${pixelart_deploy_root}/bin/vc_redist.x64.exe"
         "${pixelart_deploy_root}/bin/msvcp*.dll"
         "${pixelart_deploy_root}/bin/vcruntime*.dll")
     if(NOT compiler_runtime_files)
