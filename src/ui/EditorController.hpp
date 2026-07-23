@@ -15,6 +15,19 @@
 
 namespace px {
 
+enum class SelectionTransformHandle {
+    None,
+    NorthWest,
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+    Rotate
+};
+
 // Toolkit-independent editor state shared by the Qt widgets and headless tests.
 class EditorController {
 public:
@@ -40,18 +53,34 @@ public:
     void invalidate_display() noexcept;
     [[nodiscard]] const std::array<int, 256>& histogram_luma();
 
-    void begin_stroke(int x, int y, bool secondary, SelectionCombineMode selection_mode);
-    void update_stroke(int x, int y, bool constrain);
-    void end_stroke(int x, int y, bool constrain);
+    void begin_stroke(int x, int y, bool secondary, SelectionCombineMode selection_mode,
+                      float pressure = 1.0f);
+    void update_stroke(int x, int y, bool constrain, float pressure = 1.0f);
+    void end_stroke(int x, int y, bool constrain, float pressure = 1.0f);
     void cancel_interaction();
+    [[nodiscard]] bool begin_selection_transform(SelectionTransformHandle handle, int x, int y);
+    void update_selection_transform(int x, int y, bool constrain);
+    [[nodiscard]] bool end_selection_transform();
+    [[nodiscard]] bool apply_selection_transform(float scale_x, float scale_y,
+                                                 float angle_degrees);
+    [[nodiscard]] bool selection_transform_active() const noexcept {
+        return selection_transform_active_;
+    }
 
     [[nodiscard]] bool undo();
     [[nodiscard]] bool redo();
+    void add_cuboid();
+    [[nodiscard]] bool remove_selected_cuboid();
+    void commit_model_edit(const std::string& name, ModelDocument before_model);
     void select_all();
     void clear_selection();
     void invert_selection();
     void delete_selection();
     void nudge_selection(int dx, int dy);
+    [[nodiscard]] bool expand_selection(int radius);
+    [[nodiscard]] bool contract_selection(int radius);
+    [[nodiscard]] bool border_selection(int radius);
+    [[nodiscard]] bool smooth_selection(int radius);
     void begin_pasted_selection(FloatingSelection selection);
     [[nodiscard]] bool commit_pasted_selection();
     void discard_pasted_selection();
@@ -70,6 +99,8 @@ private:
     void clear_tiny_selection();
     void rebuild_histogram();
     void sync_selection_to_floating();
+    void stamp_active_brush(float x, float y, float pressure);
+    void continue_active_brush(float x, float y, float pressure);
 
     Document document_ = Document::create(64, 64);
     ModelDocument model_ = ModelDocument::create_default();
@@ -86,6 +117,11 @@ private:
     bool histogram_dirty_ = true;
     bool histogram_approximate_ = false;
     bool interaction_active_ = false;
+    bool selection_transform_active_ = false;
+    SelectionTransformHandle selection_transform_handle_ = SelectionTransformHandle::None;
+    FloatingSelection selection_transform_source_;
+    FloatingSelection selection_transform_before_floating_;
+    double selection_transform_start_angle_ = 0.0;
     bool stroke_tool_active_ = false;
     bool secondary_interaction_ = false;
     int interaction_start_x_ = 0;
@@ -94,6 +130,10 @@ private:
     int interaction_last_y_ = 0;
     int interaction_floating_start_offset_x_ = 0;
     int interaction_floating_start_offset_y_ = 0;
+    float brush_path_x_ = 0.0f;
+    float brush_path_y_ = 0.0f;
+    float brush_distance_since_stamp_ = 0.0f;
+    float brush_last_pressure_ = 1.0f;
     SelectionCombineMode selection_mode_ = SelectionCombineMode::Replace;
     std::vector<Pixel> pasted_selection_before_;
     bool pasted_selection_active_ = false;

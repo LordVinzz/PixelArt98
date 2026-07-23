@@ -5,6 +5,7 @@
 #pragma once
 
 #include "core/Pixel.hpp"
+#include "core/Model.hpp"
 
 #include <array>
 #include <cstddef>
@@ -35,11 +36,16 @@ struct SelectionMask {
     void select_all();
     void select_rect(int x0, int y0, int x1, int y1, bool replace = true);
     void select_rect(int x0, int y0, int x1, int y1, SelectionCombineMode mode);
+    void select_ellipse(int x0, int y0, int x1, int y1, SelectionCombineMode mode);
     void select_polygon(const std::vector<std::array<int, 2>>& points, bool replace = true);
     void select_polygon(const std::vector<std::array<int, 2>>& points, SelectionCombineMode mode);
     void combine_with_mask(const std::vector<std::uint8_t>& source, SelectionCombineMode mode);
     void invert();
     void translate(int dx, int dy);
+    void expand(int radius);
+    void contract(int radius);
+    void select_border(int radius);
+    void smooth(int radius);
     bool contains(int x, int y) const;
     int selected_count() const;
     std::optional<std::array<int, 4>> bounds() const;
@@ -167,6 +173,8 @@ struct UndoCommand {
     std::optional<DensePixelDiff> dense_pixel_diff;
     std::optional<SelectionMask> before_selection;
     std::optional<SelectionMask> after_selection;
+    std::optional<FloatingSelection> before_floating_selection;
+    std::optional<FloatingSelection> after_floating_selection;
     std::optional<Palette> before_palette;
     std::optional<Palette> after_palette;
     std::optional<std::vector<Layer>> before_layers;
@@ -177,6 +185,12 @@ struct UndoCommand {
     std::optional<std::vector<AnimationTag>> after_tags;
     std::optional<int> before_frame_duration_ms;
     std::optional<int> after_frame_duration_ms;
+    std::optional<int> before_width;
+    std::optional<int> before_height;
+    std::optional<int> after_width;
+    std::optional<int> after_height;
+    std::optional<ModelDocument> before_model;
+    std::optional<ModelDocument> after_model;
     int before_active_layer = 0;
     int before_active_frame = 0;
     int after_active_layer = 0;
@@ -220,8 +234,20 @@ public:
                                std::vector<AnimationTag> before_tags,
                                int before_active_layer,
                                int before_active_frame);
-    bool undo();
-    bool redo();
+    void commit_document_edit(const std::string& name,
+                              int before_width,
+                              int before_height,
+                              std::vector<Layer> before_layers,
+                              std::vector<Frame> before_frames,
+                              SelectionMask before_selection,
+                              FloatingSelection before_floating_selection,
+                              std::optional<ModelDocument> before_model = std::nullopt,
+                              std::optional<ModelDocument> after_model = std::nullopt);
+    void commit_model_edit(const std::string& name,
+                           ModelDocument before_model,
+                           ModelDocument after_model);
+    bool undo(ModelDocument* model = nullptr);
+    bool redo(ModelDocument* model = nullptr);
     void clear_history();
     [[nodiscard]] const std::deque<UndoCommand>& undo_history_for_recovery() const noexcept;
     [[nodiscard]] const std::deque<UndoCommand>& redo_history_for_recovery() const noexcept;
@@ -242,6 +268,13 @@ public:
     bool remove_layer(int index);
     void move_layer(int from, int to);
     bool merge_layer_down(int index);
+    bool set_layer_name(int index, const std::string& name);
+    bool set_layer_visible(int index, bool visible);
+    bool set_layer_opacity(int index, float opacity);
+    bool set_layer_blend_mode(int index, LayerBlendMode blend_mode);
+    bool set_layer_clipped(int index, bool clipped);
+    bool set_layer_mask(int index, std::vector<std::uint8_t> mask, bool enabled,
+                        const std::string& undo_name = "Layer Mask");
     void add_frame(bool duplicate_current);
     bool remove_frame(int index);
     void duplicate_frame(int index);
@@ -264,6 +297,7 @@ public:
     void commit_floating_selection(const std::string& undo_name, std::vector<Pixel> before);
 
 private:
+    void commit_layer_edit(const std::string& name, std::vector<Layer> before_layers);
     std::deque<UndoCommand> undo_stack_;
     std::deque<UndoCommand> redo_stack_;
     std::vector<std::string> recent_commit_names_;

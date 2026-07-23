@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <numbers>
 #include <queue>
 #include <string_view>
 
@@ -33,6 +34,7 @@ const char* tool_name(ToolType tool) {
         case ToolType::Eyedropper: return "Eyedropper";
         case ToolType::CloneStamp: return "Clone Stamp";
         case ToolType::RectSelect: return "Rectangle Select";
+        case ToolType::EllipseSelect: return "Ellipse Select";
         case ToolType::LassoSelect: return "Lasso Select";
         case ToolType::MagicWand: return "Magic Wand";
         case ToolType::MovePixels: return "Move Pixels";
@@ -60,7 +62,8 @@ std::array<int, 2> constrained_tool_endpoint(ToolType tool,
     switch (tool) {
         case ToolType::Rectangle:
         case ToolType::Ellipse:
-        case ToolType::RectSelect: {
+        case ToolType::RectSelect:
+        case ToolType::EllipseSelect: {
             const int side = std::max(std::abs(dx), std::abs(dy));
             return {start_x + positive_when_zero_sign(dx) * side,
                     start_y + positive_when_zero_sign(dy) * side};
@@ -98,35 +101,44 @@ std::array<int, 2> constrained_tool_endpoint(ToolType tool,
     }
 }
 
-void put_pixel(Document& doc, int x, int y, Pixel color, bool erase) {
+void put_pixel(Document& doc, int x, int y, Pixel color, bool erase, float opacity) {
     if (!doc.in_bounds(x, y) || !doc.selection.contains(x, y)) {
         return;
     }
     auto& pixels = doc.active_cel().pixels;
     std::size_t i = static_cast<std::size_t>(doc.pixel_index(x, y));
-    pixels[i] = erase ? 0 : blend_over(pixels[i], color, 1.0f);
+    opacity = std::clamp(opacity, 0.0f, 1.0f);
+    if (erase) {
+        const std::uint8_t alpha = static_cast<std::uint8_t>(std::clamp(
+            static_cast<float>(a(pixels[i])) * (1.0f - opacity), 0.0f, 255.0f) + 0.5f);
+        pixels[i] = alpha == 0 ? 0 : with_alpha(pixels[i], alpha);
+    } else {
+        pixels[i] = blend_over(pixels[i], color, opacity);
+    }
 }
 
-void plot_brush_raw(Document& doc, int cx, int cy, Pixel color, int size, bool erase) {
-    int radius = std::max(1, size);
-    int half = radius / 2;
-    if (radius <= 2) {
-        for (int y = cy - half; y <= cy - half + radius - 1; ++y) {
-            for (int x = cx - half; x <= cx - half + radius - 1; ++x) {
-                put_pixel(doc, x, y, color, erase);
+void plot_brush_raw(Document& doc, int cx, int cy, Pixel color, int size, bool erase,
+                    float opacity, float hardness) {
+    const int diameter = std::max(1, size);
+    const int half = diameter / 2;
+    const float radius = std::max(0.5f, static_cast<float>(diameter) * 0.5f);
+    const float center = (static_cast<float>(diameter) - 1.0f) * 0.5f;
+    opacity = std::clamp(opacity, 0.0f, 1.0f);
+    hardness = std::clamp(hardness, 0.0f, 1.0f);
+    for (int yy = 0; yy < diameter; ++yy) {
+        for (int xx = 0; xx < diameter; ++xx) {
+            const float dx = static_cast<float>(xx) - center;
+            const float dy = static_cast<float>(yy) - center;
+            const float normalized_distance = std::sqrt(dx * dx + dy * dy) / radius;
+            if (normalized_distance > 1.0f) continue;
+            float coverage = 1.0f;
+            if (hardness < 0.999f && normalized_distance > hardness) {
+                coverage = std::clamp((1.0f - normalized_distance) /
+                                      std::max(0.001f, 1.0f - hardness), 0.0f, 1.0f);
             }
-        }
-        return;
-    }
-
-    float r2 = (static_cast<float>(radius) * 0.5f) * (static_cast<float>(radius) * 0.5f);
-    float center = (static_cast<float>(radius) - 1.0f) * 0.5f;
-    for (int yy = 0; yy < radius; ++yy) {
-        for (int xx = 0; xx < radius; ++xx) {
-            float dx = static_cast<float>(xx) - center;
-            float dy = static_cast<float>(yy) - center;
-            if (dx * dx + dy * dy <= r2 + 0.1f) {
-                put_pixel(doc, cx + xx - half, cy + yy - half, color, erase);
+            if (coverage > 0.0f) {
+                put_pixel(doc, cx + xx - half, cy + yy - half, color, erase,
+                          opacity * coverage);
             }
         }
     }
@@ -158,7 +170,8 @@ void draw_line_raw(Document& doc, int x0, int y0, int x1, int y1, Pixel color, i
 
 void draw_brush(Document& doc, int x, int y, const ToolContext& ctx, bool erase) {
     auto before = doc.snapshot_active_cel();
-    plot_brush_raw(doc, x, y, ctx.primary, std::max(1, ctx.brush_size), erase);
+    plot_brush_raw(doc, x, y, ctx.primary, std::max(1, ctx.brush_size), erase,
+                   ctx.brush_opacity, ctx.brush_hardness);
     doc.commit_active_cel_edit(erase ? "Erase" : "Brush", std::move(before));
 }
 
@@ -553,6 +566,89 @@ void stamp_text(Document& doc, int x, int y, const std::string& text, Pixel colo
 
 void stamp_text_blocks(Document& doc, int x, int y, const std::string& text, Pixel color) {
     stamp_text(doc, x, y, text, color);
+}
+
+FloatingSelection scale_floating_selection(const FloatingSelection& source, int left, int top,
+                                           int width, int height) {
+    if (!source.active || source.width <= 0 || source.height <= 0 || width <= 0 || height <= 0 ||
+        source.pixels.size() != static_cast<std::size_t>(source.width * source.height) ||
+        source.mask.size() != source.pixels.size()) return {};
+    FloatingSelection result;
+    result.active = true;
+    result.source_x = left;
+    result.source_y = top;
+    result.width = width;
+    result.height = height;
+    result.pixels.assign(static_cast<std::size_t>(width * height), 0);
+    result.mask.assign(result.pixels.size(), 0);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int source_x = std::clamp(static_cast<int>(std::floor(
+                (static_cast<double>(x) + 0.5) * source.width / width)), 0, source.width - 1);
+            const int source_y = std::clamp(static_cast<int>(std::floor(
+                (static_cast<double>(y) + 0.5) * source.height / height)), 0, source.height - 1);
+            const std::size_t source_index = static_cast<std::size_t>(source_y * source.width + source_x);
+            const std::size_t destination = static_cast<std::size_t>(y * width + x);
+            result.pixels[destination] = source.pixels[source_index];
+            result.mask[destination] = source.mask[source_index];
+        }
+    }
+    return result;
+}
+
+FloatingSelection rotate_floating_selection(const FloatingSelection& source, float angle_degrees) {
+    if (!source.active || source.width <= 0 || source.height <= 0 ||
+        source.pixels.size() != static_cast<std::size_t>(source.width * source.height) ||
+        source.mask.size() != source.pixels.size()) return {};
+    const double radians = static_cast<double>(angle_degrees) * std::numbers::pi / 180.0;
+    const double cosine = std::cos(radians);
+    const double sine = std::sin(radians);
+    // Keep exact quarter turns exact despite the tiny floating-point residue
+    // produced by sin/cos (for example ceil(1.0000000000000002) must be 1).
+    constexpr double kBoundingBoxEpsilon = 1.0e-9;
+    const int width = std::max(1, static_cast<int>(std::ceil(
+        std::abs(source.width * cosine) + std::abs(source.height * sine) -
+        kBoundingBoxEpsilon)));
+    const int height = std::max(1, static_cast<int>(std::ceil(
+        std::abs(source.width * sine) + std::abs(source.height * cosine) -
+        kBoundingBoxEpsilon)));
+    const int source_left = source.source_x + source.offset_x;
+    const int source_top = source.source_y + source.offset_y;
+    const int left = static_cast<int>(std::lround(
+        static_cast<double>(source_left) +
+        static_cast<double>(source.width - width) * 0.5));
+    const int top = static_cast<int>(std::lround(
+        static_cast<double>(source_top) +
+        static_cast<double>(source.height - height) * 0.5));
+    const double source_center_x = static_cast<double>(source.width - 1) * 0.5;
+    const double source_center_y = static_cast<double>(source.height - 1) * 0.5;
+    const double destination_center_x = static_cast<double>(width - 1) * 0.5;
+    const double destination_center_y = static_cast<double>(height - 1) * 0.5;
+    FloatingSelection result;
+    result.active = true;
+    result.source_x = left;
+    result.source_y = top;
+    result.width = width;
+    result.height = height;
+    result.pixels.assign(static_cast<std::size_t>(width * height), 0);
+    result.mask.assign(result.pixels.size(), 0);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const double destination_x = static_cast<double>(x) - destination_center_x;
+            const double destination_y = static_cast<double>(y) - destination_center_y;
+            const int source_x = static_cast<int>(std::lround(
+                destination_x * cosine + destination_y * sine + source_center_x));
+            const int source_y = static_cast<int>(std::lround(
+                -destination_x * sine + destination_y * cosine + source_center_y));
+            if (source_x < 0 || source_y < 0 || source_x >= source.width || source_y >= source.height)
+                continue;
+            const std::size_t source_index = static_cast<std::size_t>(source_y * source.width + source_x);
+            const std::size_t destination = static_cast<std::size_t>(y * width + x);
+            result.pixels[destination] = source.pixels[source_index];
+            result.mask[destination] = source.mask[source_index];
+        }
+    }
+    return result;
 }
 
 void ensure_active_layer_mask(Document& doc, std::uint8_t value) {

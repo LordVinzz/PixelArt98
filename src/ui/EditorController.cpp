@@ -4,7 +4,9 @@
 #include "ui/EditorController.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
+#include <numbers>
 #include <utility>
 
 namespace px {
@@ -131,7 +133,8 @@ void EditorController::clear_tiny_selection() {
     }
 }
 
-void EditorController::begin_stroke(int x, int y, bool secondary, SelectionCombineMode selection_mode) {
+void EditorController::begin_stroke(int x, int y, bool secondary, SelectionCombineMode selection_mode,
+                                    float pressure) {
     if (!document_.in_bounds(x, y)) return;
     if (!document_.ensure_active_cel()) return;
     if (pasted_selection_active_ && tool_.tool != ToolType::MovePixels) (void)commit_pasted_selection();
@@ -146,7 +149,57 @@ void EditorController::begin_stroke(int x, int y, bool secondary, SelectionCombi
     selection_before_ = document_.selection;
     lasso_points_.clear();
     stroke_tool_active_ = tool_.tool == ToolType::Pencil || tool_.tool == ToolType::Brush || tool_.tool == ToolType::Eraser || tool_.tool == ToolType::CloneStamp;
+    brush_path_x_ = static_cast<float>(x);
+    brush_path_y_ = static_cast<float>(y);
+    brush_distance_since_stamp_ = 0.0f;
+    brush_last_pressure_ = std::clamp(pressure, 0.0f, 1.0f);
     apply_immediate_tool(x, y, secondary, selection_mode);
+}
+
+void EditorController::stamp_active_brush(float x, float y, float pressure) {
+    pressure = std::clamp(pressure, 0.0f, 1.0f);
+    const bool pencil = tool_.tool == ToolType::Pencil;
+    const bool eraser = tool_.tool == ToolType::Eraser;
+    const float size_pressure = !pencil && tool_.pressure_controls_size
+                                    ? 0.15f + pressure * 0.85f : 1.0f;
+    const int size = pencil ? 1 : std::max(1, static_cast<int>(std::lround(
+        static_cast<float>(tool_.brush_size) * size_pressure)));
+    const float opacity_pressure = !pencil && tool_.pressure_controls_opacity ? pressure : 1.0f;
+    const float opacity = pencil ? 1.0f : std::clamp(tool_.brush_opacity * opacity_pressure,
+                                                     0.0f, 1.0f);
+    plot_brush_raw(document_, static_cast<int>(std::lround(x)), static_cast<int>(std::lround(y)),
+                   interaction_color(secondary_interaction_), size, eraser, opacity,
+                   pencil ? 1.0f : tool_.brush_hardness);
+}
+
+void EditorController::continue_active_brush(float x, float y, float pressure) {
+    pressure = std::clamp(pressure, 0.0f, 1.0f);
+    const float smoothing = std::clamp(tool_.brush_smoothing, 0.0f, 1.0f);
+    const float smoothing_factor = 1.0f - smoothing * 0.9f;
+    const float target_x = brush_path_x_ + (x - brush_path_x_) * smoothing_factor;
+    const float target_y = brush_path_y_ + (y - brush_path_y_) * smoothing_factor;
+    const float delta_x = target_x - brush_path_x_;
+    const float delta_y = target_y - brush_path_y_;
+    const float distance = std::sqrt(delta_x * delta_x + delta_y * delta_y);
+    if (distance < 0.0001f) {
+        brush_last_pressure_ = pressure;
+        return;
+    }
+    const float spacing = std::max(1.0f, static_cast<float>(std::max(1, tool_.brush_size)) *
+                                           std::clamp(tool_.brush_spacing, 0.01f, 2.0f));
+    float next = spacing - brush_distance_since_stamp_;
+    while (next <= distance + 0.0001f) {
+        const float t = std::clamp(next / distance, 0.0f, 1.0f);
+        const float interpolated_pressure = brush_last_pressure_ +
+                                            (pressure - brush_last_pressure_) * t;
+        stamp_active_brush(brush_path_x_ + delta_x * t, brush_path_y_ + delta_y * t,
+                           interpolated_pressure);
+        next += spacing;
+    }
+    brush_distance_since_stamp_ = std::fmod(brush_distance_since_stamp_ + distance, spacing);
+    brush_path_x_ = target_x;
+    brush_path_y_ = target_y;
+    brush_last_pressure_ = pressure;
 }
 
 void EditorController::apply_immediate_tool(int x, int y, bool secondary, SelectionCombineMode selection_mode) {
@@ -155,7 +208,8 @@ void EditorController::apply_immediate_tool(int x, int y, bool secondary, Select
         case ToolType::Pencil:
         case ToolType::Brush:
         case ToolType::Eraser:
-            plot_brush_raw(document_, x, y, color, tool_.tool == ToolType::Pencil ? 1 : tool_.brush_size, tool_.tool == ToolType::Eraser);
+            secondary_interaction_ = secondary;
+            stamp_active_brush(static_cast<float>(x), static_cast<float>(y), brush_last_pressure_);
             break;
         case ToolType::Bucket:
             fill_bucket(document_, x, y, color, tool_.tolerance, tool_.contiguous);
@@ -193,8 +247,6 @@ void EditorController::apply_immediate_tool(int x, int y, bool secondary, Select
             }
             break;
         case ToolType::Text:
-            stamp_text(document_, x, y, "TEXT", color);
-            document_.commit_active_cel_edit("Text", std::move(interaction_before_));
             interaction_active_ = false;
             break;
         case ToolType::Line:
@@ -202,20 +254,21 @@ void EditorController::apply_immediate_tool(int x, int y, bool secondary, Select
         case ToolType::Ellipse:
         case ToolType::Gradient:
         case ToolType::RectSelect:
+        case ToolType::EllipseSelect:
             break;
     }
     invalidate_display();
 }
 
-void EditorController::update_stroke(int x, int y, bool) {
+void EditorController::update_stroke(int x, int y, bool, float pressure) {
     if (!interaction_active_ || !document_.in_bounds(x, y)) return;
     bool display_changed = false;
     if (stroke_tool_active_) {
-        if (tool_.tool == ToolType::CloneStamp && tool_.clone_source_x >= 0) {
+        if (tool_.tool == ToolType::Pencil || tool_.tool == ToolType::Brush ||
+            tool_.tool == ToolType::Eraser) {
+            continue_active_brush(static_cast<float>(x), static_cast<float>(y), pressure);
+        } else if (tool_.tool == ToolType::CloneStamp && tool_.clone_source_x >= 0) {
             clone_stamp_raw(document_, interaction_before_, tool_.clone_source_x, tool_.clone_source_y, x, y, tool_.brush_size);
-        } else {
-            const int size = tool_.tool == ToolType::Pencil ? 1 : tool_.brush_size;
-            draw_line_raw(document_, interaction_last_x_, interaction_last_y_, x, y, interaction_color(secondary_interaction_), size, tool_.tool == ToolType::Eraser);
         }
         display_changed = true;
     } else if (tool_.tool == ToolType::LassoSelect) {
@@ -230,8 +283,15 @@ void EditorController::update_stroke(int x, int y, bool) {
     if (display_changed) invalidate_display();
 }
 
-void EditorController::end_stroke(int x, int y, bool constrain) {
+void EditorController::end_stroke(int x, int y, bool constrain, float pressure) {
     if (!interaction_active_) return;
+    if (tool_.tool == ToolType::Pencil || tool_.tool == ToolType::Brush ||
+        tool_.tool == ToolType::Eraser) {
+        // TabletRelease commonly reports zero pressure after the pen has left
+        // the surface. Preserve the last real sample for the tail of the stroke.
+        if (pressure <= 0.0f) pressure = brush_last_pressure_;
+        continue_active_brush(static_cast<float>(x), static_cast<float>(y), pressure);
+    }
     commit_drag_tool(x, y, constrain);
     interaction_active_ = false;
     stroke_tool_active_ = false;
@@ -275,6 +335,16 @@ void EditorController::commit_drag_tool(int x, int y, bool constrain) {
             }
             document_.commit_selection_edit("Rectangle Selection", selection_before_);
             break;
+        case ToolType::EllipseSelect:
+            if (interaction_start_x_ == x && interaction_start_y_ == y) {
+                document_.selection.clear();
+            } else {
+                document_.selection.select_ellipse(interaction_start_x_, interaction_start_y_, x, y,
+                                                   selection_mode_);
+                clear_tiny_selection();
+            }
+            document_.commit_selection_edit("Ellipse Selection", selection_before_);
+            break;
         case ToolType::LassoSelect:
             if (lasso_points_.size() < 3U) {
                 document_.selection.clear();
@@ -299,6 +369,20 @@ void EditorController::commit_drag_tool(int x, int y, bool constrain) {
 
 void EditorController::cancel_interaction() {
     if (!interaction_active_) return;
+    if (selection_transform_active_) {
+        if (pasted_selection_active_) {
+            document_.floating_selection = selection_transform_before_floating_;
+        } else {
+            document_.active_cel().pixels = std::move(interaction_before_);
+            document_.floating_selection.clear();
+        }
+        document_.selection = selection_before_;
+        selection_transform_active_ = false;
+        selection_transform_handle_ = SelectionTransformHandle::None;
+        interaction_active_ = false;
+        invalidate_display();
+        return;
+    }
     if (pasted_selection_active_ && document_.floating_selection.active) {
         document_.move_floating_selection(interaction_floating_start_offset_x_,
                                           interaction_floating_start_offset_y_);
@@ -314,13 +398,141 @@ void EditorController::cancel_interaction() {
     invalidate_display();
 }
 
-bool EditorController::undo() { if (pasted_selection_active_) (void)commit_pasted_selection(); const bool changed = document_.undo(); if (changed) mark_changed("Undo"); return changed; }
-bool EditorController::redo() { if (pasted_selection_active_) (void)commit_pasted_selection(); const bool changed = document_.redo(); if (changed) mark_changed("Redo"); return changed; }
+bool EditorController::begin_selection_transform(SelectionTransformHandle handle, int x, int y) {
+    if (handle == SelectionTransformHandle::None || !document_.has_active_cel()) return false;
+    if (!document_.floating_selection.active && !document_.selection.active) return false;
+    if (pasted_selection_active_ && !document_.floating_selection.active) return false;
+    interaction_before_ = document_.snapshot_active_cel();
+    selection_before_ = document_.selection;
+    selection_transform_before_floating_ = document_.floating_selection;
+    if (!document_.floating_selection.active && !document_.begin_floating_selection()) return false;
+    selection_transform_source_ = document_.floating_selection;
+    selection_transform_handle_ = handle;
+    selection_transform_active_ = true;
+    interaction_active_ = true;
+    const double left = static_cast<double>(selection_transform_source_.source_x +
+                                            selection_transform_source_.offset_x);
+    const double top = static_cast<double>(selection_transform_source_.source_y +
+                                           selection_transform_source_.offset_y);
+    const double center_x = left + static_cast<double>(selection_transform_source_.width) * 0.5;
+    const double center_y = top + static_cast<double>(selection_transform_source_.height) * 0.5;
+    selection_transform_start_angle_ = std::atan2(static_cast<double>(y) + 0.5 - center_y,
+                                                   static_cast<double>(x) + 0.5 - center_x);
+    invalidate_display();
+    return true;
+}
+
+void EditorController::update_selection_transform(int x, int y, bool constrain) {
+    if (!selection_transform_active_) return;
+    const FloatingSelection& source = selection_transform_source_;
+    const int original_left = source.source_x + source.offset_x;
+    const int original_top = source.source_y + source.offset_y;
+    const int original_right = original_left + source.width - 1;
+    const int original_bottom = original_top + source.height - 1;
+    if (selection_transform_handle_ == SelectionTransformHandle::Rotate) {
+        const double center_x = static_cast<double>(original_left) + static_cast<double>(source.width) * 0.5;
+        const double center_y = static_cast<double>(original_top) + static_cast<double>(source.height) * 0.5;
+        const double current = std::atan2(static_cast<double>(y) + 0.5 - center_y,
+                                          static_cast<double>(x) + 0.5 - center_x);
+        double angle = (current - selection_transform_start_angle_) * 180.0 / std::numbers::pi;
+        if (constrain) angle = std::round(angle / 15.0) * 15.0;
+        document_.floating_selection = rotate_floating_selection(source, static_cast<float>(angle));
+        invalidate_display();
+        return;
+    }
+
+    int left = original_left;
+    int top = original_top;
+    int right = original_right;
+    int bottom = original_bottom;
+    const bool west = selection_transform_handle_ == SelectionTransformHandle::West ||
+                      selection_transform_handle_ == SelectionTransformHandle::NorthWest ||
+                      selection_transform_handle_ == SelectionTransformHandle::SouthWest;
+    const bool east = selection_transform_handle_ == SelectionTransformHandle::East ||
+                      selection_transform_handle_ == SelectionTransformHandle::NorthEast ||
+                      selection_transform_handle_ == SelectionTransformHandle::SouthEast;
+    const bool north = selection_transform_handle_ == SelectionTransformHandle::North ||
+                       selection_transform_handle_ == SelectionTransformHandle::NorthWest ||
+                       selection_transform_handle_ == SelectionTransformHandle::NorthEast;
+    const bool south = selection_transform_handle_ == SelectionTransformHandle::South ||
+                       selection_transform_handle_ == SelectionTransformHandle::SouthWest ||
+                       selection_transform_handle_ == SelectionTransformHandle::SouthEast;
+    if (west) left = std::min(x, right);
+    if (east) right = std::max(x, left);
+    if (north) top = std::min(y, bottom);
+    if (south) bottom = std::max(y, top);
+    int width = std::max(1, right - left + 1);
+    int height = std::max(1, bottom - top + 1);
+    if (constrain && (west || east) && (north || south)) {
+        const double aspect = static_cast<double>(source.width) / static_cast<double>(source.height);
+        if (static_cast<double>(width) / static_cast<double>(height) > aspect) {
+            height = std::max(1, static_cast<int>(std::lround(static_cast<double>(width) / aspect)));
+            if (north) top = bottom - height + 1;
+            else bottom = top + height - 1;
+        } else {
+            width = std::max(1, static_cast<int>(std::lround(static_cast<double>(height) * aspect)));
+            if (west) left = right - width + 1;
+            else right = left + width - 1;
+        }
+    }
+    document_.floating_selection = scale_floating_selection(source, left, top, width, height);
+    invalidate_display();
+}
+
+bool EditorController::end_selection_transform() {
+    if (!selection_transform_active_) return false;
+    selection_transform_active_ = false;
+    selection_transform_handle_ = SelectionTransformHandle::None;
+    interaction_active_ = false;
+    if (pasted_selection_active_) {
+        sync_selection_to_floating();
+    } else {
+        document_.commit_floating_selection("Transform Selection", std::move(interaction_before_));
+    }
+    mark_changed("Transform Selection");
+    return true;
+}
+
+bool EditorController::apply_selection_transform(float scale_x, float scale_y,
+                                                 float angle_degrees) {
+    scale_x = std::max(0.01f, scale_x);
+    scale_y = std::max(0.01f, scale_y);
+    if (std::abs(scale_x - 1.0f) < 0.0001f && std::abs(scale_y - 1.0f) < 0.0001f &&
+        std::abs(angle_degrees) < 0.0001f) return false;
+    if (!document_.floating_selection.active && !document_.selection.active) return false;
+    interaction_before_ = document_.snapshot_active_cel();
+    selection_before_ = document_.selection;
+    if (!document_.floating_selection.active && !document_.begin_floating_selection()) return false;
+    const FloatingSelection source = document_.floating_selection;
+    const int left = source.source_x + source.offset_x;
+    const int top = source.source_y + source.offset_y;
+    const int width = std::max(1, static_cast<int>(std::lround(source.width * scale_x)));
+    const int height = std::max(1, static_cast<int>(std::lround(source.height * scale_y)));
+    FloatingSelection transformed = scale_floating_selection(source, left, top, width, height);
+    if (std::abs(angle_degrees) >= 0.0001f) {
+        transformed = rotate_floating_selection(transformed, angle_degrees);
+    }
+    document_.floating_selection = std::move(transformed);
+    if (pasted_selection_active_) sync_selection_to_floating();
+    else document_.commit_floating_selection("Transform Selection", std::move(interaction_before_));
+    mark_changed("Transform Selection");
+    return true;
+}
+
+bool EditorController::undo() { if (pasted_selection_active_) (void)commit_pasted_selection(); const bool changed = document_.undo(&model_); if (changed) mark_changed("Undo"); return changed; }
+bool EditorController::redo() { if (pasted_selection_active_) (void)commit_pasted_selection(); const bool changed = document_.redo(&model_); if (changed) mark_changed("Redo"); return changed; }
+void EditorController::add_cuboid() { ModelDocument before = model_; model_.add_cuboid(); document_.commit_model_edit("Add Cuboid", std::move(before), model_); mark_changed("Add Cuboid"); }
+bool EditorController::remove_selected_cuboid() { ModelDocument before = model_; if (!model_.remove_selected()) return false; document_.commit_model_edit("Remove Cuboid", std::move(before), model_); mark_changed("Remove Cuboid"); return true; }
+void EditorController::commit_model_edit(const std::string& name, ModelDocument before_model) { document_.commit_model_edit(name, std::move(before_model), model_); mark_changed(name); }
 void EditorController::select_all() { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.select_all(); document_.commit_selection_edit("Select All", before); mark_changed("Select All"); }
 void EditorController::clear_selection() { if (pasted_selection_active_) (void)commit_pasted_selection(); if (!document_.selection.active && document_.selection.selected_count() == 0) return; const auto before = document_.selection; document_.selection.clear(); document_.commit_selection_edit("Clear Selection", before); mark_changed("Clear Selection"); }
 void EditorController::invert_selection() { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.invert(); document_.commit_selection_edit("Invert Selection", before); mark_changed("Invert Selection"); }
 void EditorController::delete_selection() { if (pasted_selection_active_) (void)commit_pasted_selection(); if (document_.delete_selected_pixels()) mark_changed("Delete Selection"); }
 void EditorController::nudge_selection(int dx, int dy) { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.translate(dx, dy); document_.commit_selection_edit("Nudge Selection", before); mark_changed("Nudge Selection"); }
+bool EditorController::expand_selection(int radius) { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.expand(radius); if (before.mask == document_.selection.mask) return false; document_.commit_selection_edit("Expand Selection", before); mark_changed("Expand Selection"); return true; }
+bool EditorController::contract_selection(int radius) { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.contract(radius); if (before.mask == document_.selection.mask) return false; document_.commit_selection_edit("Contract Selection", before); mark_changed("Contract Selection"); return true; }
+bool EditorController::border_selection(int radius) { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.select_border(radius); if (before.mask == document_.selection.mask) return false; document_.commit_selection_edit("Border Selection", before); mark_changed("Border Selection"); return true; }
+bool EditorController::smooth_selection(int radius) { if (pasted_selection_active_) (void)commit_pasted_selection(); const auto before = document_.selection; document_.selection.smooth(radius); if (before.mask == document_.selection.mask) return false; document_.commit_selection_edit("Smooth Selection", before); mark_changed("Smooth Selection"); return true; }
 
 void EditorController::begin_pasted_selection(FloatingSelection selection) {
     if (pasted_selection_active_) (void)commit_pasted_selection();

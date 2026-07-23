@@ -3,6 +3,7 @@
 // See LICENSE for details.
 
 #include "core/Document.hpp"
+#include "core/DocumentTransforms.hpp"
 #include "core/Model.hpp"
 #include "io/ProjectIO.hpp"
 
@@ -344,8 +345,14 @@ void test_recovery_archive_preserves_complete_history(const std::filesystem::pat
     source.commit_palette_edit("Recovered palette", before_palette);
 
     source.add_layer("Recovered layer");
+    ModelDocument source_model = make_model();
+    source_model.texture_width = source.width;
+    source_model.texture_height = source.height;
+    clamp_model_uvs(source_model);
+    assert(resize_document_canvas(source, source.width + 2, source.height + 1, 1, 0,
+                                  &source_model));
     assert(source.set_frame_duration(0, 333));
-    assert(source.undo());
+    assert(source.undo(&source_model));
 
     source.floating_selection.active = true;
     source.floating_selection.source_x = 1;
@@ -359,7 +366,7 @@ void test_recovery_archive_preserves_complete_history(const std::filesystem::pat
 
     const auto path = root / "crash recovery session.pixart-recovery";
     std::string error;
-    assert(save_recovery_project(path, source, make_model(), &error));
+    assert(save_recovery_project(path, source, source_model, &error));
     assert(!read_zip_entry(path, "history.cbor").empty());
 
     ProjectBundle recovered;
@@ -369,19 +376,22 @@ void test_recovery_archive_preserves_complete_history(const std::filesystem::pat
            source.undo_history_for_recovery().size());
     assert(recovered.document.redo_history_for_recovery().size() ==
            source.redo_history_for_recovery().size());
+    assert(model_to_json(recovered.model) == model_to_json(source_model));
 
     while (true) {
-        const bool source_changed = source.undo();
-        const bool recovered_changed = recovered.document.undo();
+        const bool source_changed = source.undo(&source_model);
+        const bool recovered_changed = recovered.document.undo(&recovered.model);
         assert(source_changed == recovered_changed);
         assert_same_recovery_state(source, recovered.document);
+        assert(model_to_json(recovered.model) == model_to_json(source_model));
         if (!source_changed) break;
     }
     while (true) {
-        const bool source_changed = source.redo();
-        const bool recovered_changed = recovered.document.redo();
+        const bool source_changed = source.redo(&source_model);
+        const bool recovered_changed = recovered.document.redo(&recovered.model);
         assert(source_changed == recovered_changed);
         assert_same_recovery_state(source, recovered.document);
+        assert(model_to_json(recovered.model) == model_to_json(source_model));
         if (!source_changed) break;
     }
     clear_test_environment("PIXELART_DENSE_HISTORY_MIN_BYTES");

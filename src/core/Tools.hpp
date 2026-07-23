@@ -26,6 +26,7 @@ enum class ToolType {
     Eyedropper,
     CloneStamp,
     RectSelect,
+    EllipseSelect,
     LassoSelect,
     MagicWand,
     MovePixels,
@@ -37,6 +38,12 @@ struct ToolContext {
     Pixel primary = rgba(0, 0, 0, 255);
     Pixel secondary = rgba(255, 255, 255, 255);
     int brush_size = 1;
+    float brush_opacity = 1.0f;
+    float brush_hardness = 1.0f;
+    float brush_spacing = 0.25f;
+    float brush_smoothing = 0.0f;
+    bool pressure_controls_size = true;
+    bool pressure_controls_opacity = true;
     int tolerance = 32;
     bool contiguous = true;
     bool erase_to_transparent = true;
@@ -60,8 +67,9 @@ const char* tool_name(ToolType tool);
                                                            int current_y,
                                                            bool constrain);
 
-void put_pixel(Document& doc, int x, int y, Pixel color, bool erase);
-void plot_brush_raw(Document& doc, int cx, int cy, Pixel color, int size, bool erase);
+void put_pixel(Document& doc, int x, int y, Pixel color, bool erase, float opacity = 1.0f);
+void plot_brush_raw(Document& doc, int cx, int cy, Pixel color, int size, bool erase,
+                    float opacity = 1.0f, float hardness = 1.0f);
 void draw_line_raw(Document& doc, int x0, int y0, int x1, int y1, Pixel color, int size, bool erase);
 void draw_rect_raw(Document& doc, int x0, int y0, int x1, int y1, Pixel color, int size, bool filled);
 void draw_ellipse_raw(Document& doc, int x0, int y0, int x1, int y1, Pixel color, int size, bool filled);
@@ -81,6 +89,11 @@ void clone_stamp(Document& doc, int sx, int sy, int dx, int dy, int brush_size);
 std::vector<std::array<int, 2>> raster_text_points(int x, int y, const std::string& text);
 void stamp_text(Document& doc, int x, int y, const std::string& text, Pixel color);
 void stamp_text_blocks(Document& doc, int x, int y, const std::string& text, Pixel color);
+[[nodiscard]] FloatingSelection scale_floating_selection(const FloatingSelection& source,
+                                                         int left, int top,
+                                                         int width, int height);
+[[nodiscard]] FloatingSelection rotate_floating_selection(const FloatingSelection& source,
+                                                          float angle_degrees);
 
 void ensure_active_layer_mask(Document& doc, std::uint8_t value = 255);
 void put_mask_pixel(Document& doc, int x, int y, std::uint8_t value);

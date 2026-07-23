@@ -1750,6 +1750,10 @@ bool command_to_recovery_json(const Document& document, const UndoCommand& comma
     value["after_selection"] = command.after_selection
                                      ? selection_to_recovery_json(*command.after_selection)
                                      : nlohmann::json(nullptr);
+    value["before_floating_selection"] = command.before_floating_selection
+        ? floating_to_recovery_json(*command.before_floating_selection) : nlohmann::json(nullptr);
+    value["after_floating_selection"] = command.after_floating_selection
+        ? floating_to_recovery_json(*command.after_floating_selection) : nlohmann::json(nullptr);
     value["before_palette"] = command.before_palette
                                     ? palette_to_recovery_json(*command.before_palette)
                                     : nlohmann::json(nullptr);
@@ -1778,6 +1782,18 @@ bool command_to_recovery_json(const Document& document, const UndoCommand& comma
     value["after_frame_duration_ms"] = command.after_frame_duration_ms
                                             ? nlohmann::json(*command.after_frame_duration_ms)
                                             : nlohmann::json(nullptr);
+    value["before_width"] = command.before_width ? nlohmann::json(*command.before_width)
+                                                   : nlohmann::json(nullptr);
+    value["before_height"] = command.before_height ? nlohmann::json(*command.before_height)
+                                                     : nlohmann::json(nullptr);
+    value["after_width"] = command.after_width ? nlohmann::json(*command.after_width)
+                                                 : nlohmann::json(nullptr);
+    value["after_height"] = command.after_height ? nlohmann::json(*command.after_height)
+                                                   : nlohmann::json(nullptr);
+    value["before_model"] = command.before_model
+        ? nlohmann::json::parse(model_to_json(*command.before_model)) : nlohmann::json(nullptr);
+    value["after_model"] = command.after_model
+        ? nlohmann::json::parse(model_to_json(*command.after_model)) : nlohmann::json(nullptr);
     return true;
 }
 
@@ -1814,10 +1830,18 @@ bool command_from_recovery_json(const nlohmann::json& value, UndoCommand& comman
         command.dense_pixel_diff = std::move(dense);
     }
     const auto decode_selection = [&value](const char* key, std::optional<SelectionMask>& target) {
-        if (value.at(key).is_null()) return true;
+        if (!value.contains(key) || value.at(key).is_null()) return true;
         SelectionMask selection;
         if (!selection_from_recovery_json(value.at(key), selection)) return false;
         target = std::move(selection);
+        return true;
+    };
+    const auto decode_floating = [&value](const char* key,
+                                          std::optional<FloatingSelection>& target) {
+        if (!value.contains(key) || value.at(key).is_null()) return true;
+        FloatingSelection floating;
+        if (!floating_from_recovery_json(value.at(key), floating)) return false;
+        target = std::move(floating);
         return true;
     };
     const auto decode_palette = [&value](const char* key, std::optional<Palette>& target) {
@@ -1850,6 +1874,8 @@ bool command_from_recovery_json(const nlohmann::json& value, UndoCommand& comman
     };
     if (!decode_selection("before_selection", command.before_selection) ||
         !decode_selection("after_selection", command.after_selection) ||
+        !decode_floating("before_floating_selection", command.before_floating_selection) ||
+        !decode_floating("after_floating_selection", command.after_floating_selection) ||
         !decode_palette("before_palette", command.before_palette) ||
         !decode_palette("after_palette", command.after_palette) ||
         !decode_layers("before_layers", command.before_layers) ||
@@ -1864,6 +1890,22 @@ bool command_from_recovery_json(const nlohmann::json& value, UndoCommand& comman
     if (!value.at("after_frame_duration_ms").is_null()) {
         command.after_frame_duration_ms = value.at("after_frame_duration_ms").get<int>();
     }
+    const auto decode_int = [&value](const char* key, std::optional<int>& target) {
+        if (value.contains(key) && !value.at(key).is_null()) target = value.at(key).get<int>();
+    };
+    decode_int("before_width", command.before_width);
+    decode_int("before_height", command.before_height);
+    decode_int("after_width", command.after_width);
+    decode_int("after_height", command.after_height);
+    const auto decode_model = [&value](const char* key, std::optional<ModelDocument>& target) {
+        if (!value.contains(key) || value.at(key).is_null()) return true;
+        ModelDocument model;
+        if (!model_from_json(value.at(key).dump(), model)) return false;
+        target = std::move(model);
+        return true;
+    };
+    if (!decode_model("before_model", command.before_model) ||
+        !decode_model("after_model", command.after_model)) return false;
     return true;
 }
 

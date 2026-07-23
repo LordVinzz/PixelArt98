@@ -4,7 +4,7 @@
 
 This document records the features that are actually available in the current
 PixelArt98 Qt application and compares them with Paint.NET 5.1.12 and Adobe
-Photoshop desktop 27.x. The audit was last updated on 22 July 2026 and includes
+Photoshop desktop 27.x. The audit was last updated on 23 July 2026 and includes
 work-in-progress changes in the local working tree, not only the last published
 commit.
 
@@ -27,8 +27,10 @@ PixelArt98 is currently an experimental pixel-art editor, not a general-purpose
 replacement for Paint.NET or Photoshop. Its strongest differentiators are the
 GraphEffect node workspace, sprite-oriented animation exports, partial Aseprite
 interchange, and cuboid/model workflows. Its largest gaps are basic document
-operations, text, brush quality, color management, non-destructive editing,
-history accuracy, file-format coverage, and release maturity.
+management, brush quality, color management, non-destructive editing,
+file-format coverage, and release maturity. Completing raster text, document
+geometry, mutation history, selection transforms, and the first usable brush
+controls in the current working tree does not change that broader assessment.
 
 | Area | PixelArt98 | Paint.NET 5.1.12 | Photoshop desktop 27.x |
 |---|---|---|---|
@@ -51,10 +53,10 @@ history accuracy, file-format coverage, and release maturity.
 | Custom pixel dimensions | **Yes**: width and height from 1 to 32768 | **Yes** | **Yes** |
 | New-document presets | **No** | **Yes** | **Yes**: print, photo, web, mobile, and custom presets |
 | Physical units and resolution | **No** | **Yes** | **Yes** |
-| Aspect-ratio presets or locking | **No** | **Yes** | **Yes** |
-| Image resize | **No** | **Yes** with several resamplers | **Yes** with professional resampling options |
-| Canvas resize | **No** | **Yes** with anchoring and fill controls | **Yes** |
-| Crop tool or crop command | **No** | **Yes** | **Yes**, including perspective and content-aware crop |
+| Aspect-ratio presets or locking | **Partial**: image resize can lock the current ratio; new-document presets are still absent | **Yes** | **Yes** |
+| Image resize | **Yes**: all layers and frames, with nearest-neighbor, bilinear, or bicubic resampling | **Yes** with several resamplers | **Yes** with professional resampling options |
+| Canvas resize | **Partial**: nine-point anchoring is implemented, but there are no fill-color or extension modes | **Yes** with anchoring and fill controls | **Yes** |
+| Crop tool or crop command | **Partial**: numeric crop command defaults to selection bounds; no interactive crop tool | **Yes** | **Yes**, including perspective and content-aware crop |
 | Artboards | **No** | No | **Yes** |
 | Print workflow | **No** | Basic Windows printing | **Yes** with color-managed output |
 | Pointer-centered zoom | **Yes** | **Yes** | **Yes** |
@@ -86,14 +88,14 @@ history accuracy, file-format coverage, and release maturity.
 | Feature | PixelArt98 | Paint.NET 5.1.12 | Photoshop desktop 27.x |
 |---|---|---|---|
 | Pencil | **Yes** | **Yes** | **Yes** |
-| Paintbrush | **Partial**: circular tip and size only, maximum 32 px | **Yes**: size, hardness, spacing, antialiasing, and pressure | **Yes**: professional brush engine |
-| Tablet pressure | **No** | **Yes** through Windows Ink | **Yes** |
-| Stroke smoothing or stabilization | **No** | **Yes** | **Yes** |
-| Brush hardness | **No** | **Yes** | **Yes** |
-| Brush spacing | **No** | **Yes** | **Yes** |
-| Brush opacity and flow | **No** | **Yes** | **Yes** |
+| Paintbrush | **Partial**: circular tip up to 256 px with opacity, hardness, spacing, pressure, and smoothing; still far short of a preset-based brush engine | **Yes**: size, hardness, spacing, antialiasing, and pressure | **Yes**: professional brush engine |
+| Tablet pressure | **Partial**: Qt tablet events can drive brush/eraser size and opacity; no tilt, rotation, velocity dynamics, calibration curve, or per-device settings | **Yes** through Windows Ink | **Yes** |
+| Stroke smoothing or stabilization | **Partial**: adjustable exponential pointer smoothing, without a lazy-brush cursor, predictive stabilization, or post-stroke editing | **Yes** | **Yes** |
+| Brush hardness | **Yes**: adjustable radial falloff on the fixed circular tip | **Yes** | **Yes** |
+| Brush spacing | **Yes**: adjustable from 1% to 200% of nominal brush size | **Yes** | **Yes** |
+| Brush opacity and flow | **Partial**: opacity is adjustable and pressure-aware, but there is no separate flow/airbrush accumulation model | **Yes** | **Yes** |
 | Custom brush tips and presets | **No** | No native custom-brush engine; plugins may add options | **Yes** |
-| Eraser | **Partial**: size only | **Yes**: size, hardness, spacing, and pressure | **Yes** |
+| Eraser | **Partial**: shares size, opacity, hardness, spacing, pressure, and smoothing controls, but only erases alpha and has no background-color or brush-preset modes | **Yes**: size, hardness, spacing, and pressure | **Yes** |
 | Straight line | **Yes**: width and 45-degree constraint | **Yes** | **Yes** |
 | Editable curve tool | **No** | **Yes** | **Yes** through paths and shapes |
 | Rectangle and ellipse | **Partial**: outline controls only in the UI | **Yes**: outline, fill, and styles | **Yes**: raster and vector shapes |
@@ -104,7 +106,7 @@ history accuracy, file-format coverage, and release maturity.
 | Clone stamp | **Partial**: one source point and brush size | **Yes** | **Yes**: multiple sources, alignment, transform, and overlay controls |
 | Recolor tool | **No** | **Yes** | Several equivalent workflows |
 | Healing, patch, and remove tools | **No** | No native healing workflow | **Yes** |
-| Text tool | **No**: the current placeholder stamps the literal word `TEXT` | **Yes**: real font and text controls, raster result | **Yes**: editable text layers and advanced typography |
+| Text tool | **Partial**: a non-modal Text dock provides multiline entry, installed-font selection, pixel size, alignment, bold, italic, and optional antialiasing; an eight-handle on-canvas text box controls live wrapping and clipping, but Apply still rasterizes destructively into the active layer | **Yes**: real font and text controls, raster result | **Yes**: editable text layers and advanced typography |
 | Pen and vector paths | **No** | No | **Yes** |
 | Right-button secondary drawing color | **Yes** | **Yes** | Tool-dependent |
 | Live drag previews | **Yes** for the implemented drag tools | **Yes** | **Yes** |
@@ -114,20 +116,20 @@ history accuracy, file-format coverage, and release maturity.
 | Feature | PixelArt98 | Paint.NET 5.1.12 | Photoshop desktop 27.x |
 |---|---|---|---|
 | Rectangle selection | **Yes** | **Yes** | **Yes** |
-| Ellipse selection | **No** | **Yes** | **Yes** |
+| Ellipse selection | **Yes**: live preview plus replace, add, subtract, intersect, and invert combinations | **Yes** | **Yes** |
 | Freehand lasso | **Yes** | **Yes** | **Yes** |
 | Polygonal or magnetic lasso | **No** | No magnetic lasso | **Yes** |
 | Magic wand | **Yes** | **Yes** | **Yes** |
 | Object, subject, or quick selection | **No** | No | **Yes** |
 | Replace, add, subtract, and intersect | **Yes** | **Yes** | **Yes** |
 | Select all, deselect, and invert | **Yes** | **Yes** | **Yes** |
-| Feather and edge refinement | **No** | Limited antialiasing controls | **Yes**: Select and Mask and related tools |
-| Expand, contract, or border selection | **No** | Limited | **Yes** |
+| Feather and edge refinement | **Partial**: binary majority smoothing only; no feathered mask values, edge detection, decontamination, or Select-and-Mask workspace | Limited antialiasing controls | **Yes**: Select and Mask and related tools |
+| Expand, contract, or border selection | **Yes**: undoable radius-based commands using a square morphology kernel | Limited | **Yes** |
 | Save selection to a channel | **No** | No | **Yes** |
 | Floating selection | **Yes**: one active floating selection | **Yes** | **Yes** |
-| Move selected pixels | **Partial**: translation only | **Yes**: translate, rotate, and resize | **Yes** |
-| Free scale and rotate handles | **No** | **Yes** | **Yes** |
-| Flip and 90/180-degree rotation | **Partial**: active-cel operations, not a complete image workflow | **Yes** | **Yes** |
+| Move selected pixels | **Partial**: translate, scale, and arbitrary rotate through a floating selection; one active selection and nearest-neighbor resampling only | **Yes**: translate, rotate, and resize | **Yes** |
+| Free scale and rotate handles | **Partial**: eight scale handles, a rotation handle, aspect/15-degree constraints, and numeric scale/angle fields; no pivot control, skew, transform matrix, or resampling choice | **Yes** | **Yes** |
+| Flip and 90/180-degree rotation | **Yes**: complete image operations remap every layer cel, animation frame, layer mask, and selection; 90-degree rotations swap document dimensions | **Yes** | **Yes** |
 | Arbitrary rotate and straighten | **Partial**: generic amount slider with limited controls | **Yes** | **Yes** |
 | Perspective, skew, and distort transforms | **No** | Limited | **Yes** |
 | Warp, Puppet Warp, and Liquify | **No** | No | **Yes** |
@@ -153,13 +155,13 @@ history accuracy, file-format coverage, and release maturity.
 | Layer styles | **No** | No | **Yes** |
 | Channels | **No** | No | **Yes** |
 | Merge and flatten | **Partial**: basic operations | **Yes** | **Yes** |
-| Undoable layer properties | **No**: several visibility, opacity, blend, clipping, and mask changes bypass document commands | **Yes** | **Yes** |
-| Undo and redo | **Partial**: linear history capped at 128 commands | **Yes**: primarily limited by disk and memory | **Yes**: configurable states and snapshots |
-| History operation list | **No**: the dock contains only Undo and Redo buttons | **Yes** | **Yes** |
+| Undoable layer properties | **Yes**: rename, visibility, opacity, blend mode, clipping, and mask commands use document history | **Yes** | **Yes** |
+| Undo and redo | **Partial**: pixels, selections, palettes, layer structures and properties, masks, frames, document geometry, and exposed model mutations are covered, but history remains linear and capped at 128 commands | **Yes**: primarily limited by disk and memory | **Yes**: configurable states and snapshots |
+| History operation list | **Yes**: chronological linear states, a bold current state, gray redo states, direct state selection, and Undo/Redo buttons; no thumbnails, timestamps, snapshots, search, or persistent history | **Yes** | **Yes** |
 | Branched history | **No**: a new operation clears the redo stack | No: linear history by design | No general branch tree; snapshots are available |
 | Disk-backed large history payloads | **Yes** | **Yes** | **Yes** through scratch-disk infrastructure |
 | History stored in the normal project file | **No** | No | No general persistent edit history |
-| Model-operation undo | **No** | Not applicable | Not applicable to current Photoshop 3D |
+| Model-operation undo | **Yes** for every exposed model mutation: add, remove, and imports; selection and camera navigation are intentionally not history states | Not applicable | Not applicable to current Photoshop 3D |
 | Crash recovery | **WIP**: one recovery session in the current development tree | Mature crash reporting; no persistent edit-history workflow | **Yes**: configurable automatic recovery |
 
 ## Adjustments, Effects, and AI
@@ -276,32 +278,82 @@ general parity with Paint.NET or Photoshop:
 - Cross-platform ambitions across Windows, macOS, and Linux.
 - Offline use without an account or cloud dependency.
 
-## Highest-Priority Gaps
+## Completed Gap Work (22 July 2026)
+
+The following three gaps from the previous audit are implemented in the current
+working tree:
+
+1. **Live raster text workflow.** Clicking the canvas with the Text tool now
+   positions a temporary preview and opens a non-modal dock with multiline
+   entry, installed-font selection, pixel sizing, left/center/right alignment,
+   bold, italic, and optional antialiasing. An eight-handle box on the canvas
+   resizes horizontally and vertically; its geometry immediately changes text
+   wrapping and clipping. Every parameter updates the canvas without changing
+   document pixels or history. Apply creates one destructive raster-text
+   command; Cancel removes only the preview. This is credible Paint.NET-style
+   raster text, but it is not a Photoshop-style editable text layer and it has
+   no vector typography, character-level formatting, or post-Apply editability.
+2. **Complete document geometry commands.** Image Resize supports nearest,
+   bilinear, and bicubic resampling plus aspect locking. Canvas Size provides
+   nine anchors. Crop accepts a rectangle and defaults to the active selection.
+   Flip and 90/180-degree rotation now process every cel in every animation
+   frame as well as layer masks and the selection; 90-degree rotations swap the
+   document dimensions. These commands remain less sophisticated than the
+   competitors because there is no interactive crop overlay, canvas fill mode,
+   content-aware behavior, or professional resampling policy.
+3. **Unified mutation history.** Layer properties and mask buttons now create
+   history commands; the existing layer/frame structural and frame-duration
+   commands were audited; exposed model add/remove/import operations now store
+   model snapshots; and dimension-changing document operations store complete
+   before/after geometry states. Undo and redo restore model metadata alongside
+   the document, and crash-recovery history serializes the new state. Selection
+   changes such as choosing a layer, frame, model face, or camera view remain
+   navigation state and intentionally do not create undo entries.
+
+## Completed Gap Work: History, Selection, and Brushes (22 July 2026)
+
+The next three audited gaps are also implemented in the current working tree,
+with the following limitations kept explicit:
+
+1. **A real linear history list.** The History dock now enumerates the retained
+   operation sequence, distinguishes the current state from redo states, and
+   lets the user jump backward or forward by selecting a row. It truthfully
+   represents the underlying linear undo/redo stacks: a new edit after undo
+   still discards the redo path. It is capped at 128 commands and has no branch
+   tree, named snapshots, thumbnails, timestamps, search, or project-persistent
+   edit history.
+2. **Ellipse selection, refinement, and selection transforms.** Ellipse Select
+   supports every existing combine mode. Expand, Contract, Border, and Smooth
+   are exposed as undoable Selection-menu commands. Move Pixels displays eight
+   scale handles and a rotation handle, supports constrained dragging, and also
+   offers numeric X/Y scale and rotation. Transform commits restore both pixels
+   and the selection outline through undo. Scaling and rotation use
+   nearest-neighbor rasterization; there is no feathering, subpixel mask,
+   transform pivot, skew, perspective, warp, or professional edge-refinement
+   workspace.
+3. **First-generation brush engine.** Brush and Eraser now expose sizes up to
+   256 px, opacity, radial hardness, spacing, pointer smoothing, and independent
+   pressure-to-size/pressure-to-opacity switches through Qt tablet events.
+   Pressure is interpolated across spaced stamps. This remains a basic fixed
+   circular raster engine: there are no brush presets, custom tips, flow,
+   texture, scatter, tilt/rotation dynamics, device curves, predictive
+   stabilization, or paint mixing.
+
+## Highest-Priority Remaining Gaps
 
 The most important missing work is not another effect. Product credibility
 depends first on:
 
-1. replacing the placeholder text tool with real text entry, font selection,
-   sizing, alignment, and an explicit raster or editable-layer model;
-2. implementing image resize, canvas resize, crop, and complete image-level
-   rotate/flip operations;
-3. making all layer, mask, frame, and model changes genuinely undoable;
-4. replacing the misleading history dock with a real operation list, or
-   removing all branch-history claims;
-5. adding ellipse selection, transform handles, scale, rotate, and selection
-   refinement;
-6. expanding the brush engine with opacity, hardness, spacing, pressure, and
-   smoothing;
-7. either wiring the OpenGL tiled/effect renderers into production paths or
+1. either wiring the OpenGL tiled/effect renderers into production paths or
    removing GPU and large-image claims;
-8. finishing the real animation timeline before documenting shortcuts, cues,
+2. finishing the real animation timeline before documenting shortcuts, cues,
    drag reordering, or ping-pong controls;
-9. shipping and testing the depth backend in release packages before calling it
+3. shipping and testing the depth backend in release packages before calling it
    a distributed feature;
-10. fixing the release workflow so every registered test is built and run;
-11. expanding static import/export beyond the current small format set;
-12. deciding whether PixelArt98 is a pixel-art application or a professional
-    photo editor, then aligning the roadmap and documentation with that scope.
+4. fixing the release workflow so every registered test is built and run;
+5. expanding static import/export beyond the current small format set;
+6. deciding whether PixelArt98 is a pixel-art application or a professional
+   photo editor, then aligning the roadmap and documentation with that scope.
 
 ## Maintenance Rule
 

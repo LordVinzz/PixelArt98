@@ -155,6 +155,54 @@ void test_selection_mask_combine_polygon_invert_and_translate() {
     assert(selection.selected_count() == 0);
 }
 
+void test_ellipse_selection_and_refinement() {
+    SelectionMask ellipse;
+    ellipse.resize(9, 9);
+    ellipse.select_ellipse(1, 1, 5, 5, SelectionCombineMode::Replace);
+    assert(ellipse.active);
+    assert(ellipse.selected_count() == 21);
+    assert(ellipse.contains(3, 3));
+    assert(ellipse.contains(1, 3));
+    assert(!ellipse.contains(1, 1));
+    assert((ellipse.bounds() == std::optional<std::array<int, 4>>{{1, 1, 5, 5}}));
+
+    const int first_ellipse_size = ellipse.selected_count();
+    ellipse.select_ellipse(6, 6, 8, 8, SelectionCombineMode::Add);
+    assert(ellipse.selected_count() > first_ellipse_size);
+    ellipse.select_ellipse(6, 6, 8, 8, SelectionCombineMode::Subtract);
+    assert(ellipse.selected_count() == first_ellipse_size);
+
+    SelectionMask refined;
+    refined.resize(9, 9);
+    refined.select_rect(3, 3, 5, 5, SelectionCombineMode::Replace);
+    refined.expand(1);
+    assert(refined.selected_count() == 25);
+    assert((refined.bounds() == std::optional<std::array<int, 4>>{{2, 2, 6, 6}}));
+    refined.contract(1);
+    assert(refined.selected_count() == 9);
+    assert((refined.bounds() == std::optional<std::array<int, 4>>{{3, 3, 5, 5}}));
+    refined.select_border(1);
+    assert(refined.selected_count() == 24);
+    assert(!refined.contains(4, 4));
+    assert(refined.contains(2, 2));
+
+    SelectionMask noisy;
+    noisy.resize(9, 9);
+    noisy.select_rect(3, 3, 5, 5, SelectionCombineMode::Replace);
+    noisy.select_rect(0, 4, 0, 4, SelectionCombineMode::Add);
+    noisy.smooth(1);
+    assert(noisy.active);
+    assert(noisy.contains(4, 4));
+    assert(!noisy.contains(0, 4));
+    assert(noisy.selected_count() < 10);
+
+    const auto unchanged = noisy.mask;
+    noisy.expand(0);
+    noisy.contract(-1);
+    noisy.smooth(0);
+    assert(noisy.mask == unchanged);
+}
+
 void test_document_creation_validation_and_cel_repair() {
     Document clamped = Document::create(-20, 0);
     assert(clamped.width == 1);
@@ -663,6 +711,7 @@ void test_composite_layer_branches_and_enum_names() {
 int main() {
     test_selection_mask_rectangles_and_bounds();
     test_selection_mask_combine_polygon_invert_and_translate();
+    test_ellipse_selection_and_refinement();
     test_document_creation_validation_and_cel_repair();
     test_tile_diffs_and_pixel_history();
     test_history_limit_and_recent_names();

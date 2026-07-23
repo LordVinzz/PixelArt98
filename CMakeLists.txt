@@ -232,6 +232,7 @@ endfunction()
 
 add_library(pixelart_core
     src/core/Document.cpp
+    src/core/DocumentTransforms.cpp
     src/core/Filters.cpp
     src/core/GraphEffect.cpp
     src/core/MemoryTrace.cpp
@@ -257,7 +258,8 @@ add_library(pixelart_app
     src/render/MeshUvOverlayRenderer.cpp
     src/ui/AppSettings.cpp
     src/ui/AnimationExport.cpp
-    src/ui/EditorController.cpp)
+    src/ui/EditorController.cpp
+    src/ui/TextRasterizer.cpp)
 if(APPLE)
     target_sources(pixelart_app PRIVATE src/render/MpsEffectRenderer.mm)
     set_source_files_properties(src/render/MpsEffectRenderer.mm PROPERTIES

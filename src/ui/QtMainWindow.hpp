@@ -5,6 +5,7 @@
 
 #include "ui/AppSettings.hpp"
 #include "ui/EditorController.hpp"
+#include "ui/TextRasterizer.hpp"
 #include "render/GpuEffectRenderer.hpp"
 #include "render/MpsEffectRenderer.hpp"
 
@@ -21,11 +22,15 @@
 
 class QAction;
 class QButtonGroup;
+class QCheckBox;
 class QComboBox;
 class QDockWidget;
+class QFontComboBox;
 class QLabel;
 class QListWidget;
 class QNetworkAccessManager;
+class QPlainTextEdit;
+class QPushButton;
 class QVBoxLayout;
 class QSpinBox;
 class QTabWidget;
@@ -82,6 +87,7 @@ private:
     void build_history_dock();
     void build_model_dock();
     void build_preview_docks();
+    void build_text_dock();
     void build_console_dock();
     void rebuild_tool_options();
     void restore_ui_state();
@@ -106,6 +112,7 @@ private:
     void refresh_layers();
     void refresh_frames();
     void refresh_model();
+    void refresh_history();
     void refresh_selection_status();
     void update_selection_status(const QRect& bounds);
     void update_pointer_status(std::optional<QPoint> coordinates);
@@ -128,6 +135,15 @@ private:
     [[nodiscard]] bool run_ffmpeg(const QStringList& arguments, const QString& operation,
                                   QString* error);
     void generate_depth_map();
+    void begin_raster_text_edit(int x, int y, bool secondary);
+    void update_raster_text_preview();
+    void apply_raster_text_edit();
+    void cancel_raster_text_edit(bool hide_dock = false);
+    [[nodiscard]] RasterTextOptions current_raster_text_options() const;
+    void persist_raster_text_options(const RasterTextOptions& options) const;
+    void show_image_resize_dialog();
+    void show_canvas_resize_dialog();
+    void show_crop_dialog();
     void import_model(const QString& kind);
     void export_model(const QString& kind);
     void apply_transform(const QString& name, const std::function<void(Document&)>& operation);
@@ -156,7 +172,18 @@ private:
     QListWidget* layers_list_ = nullptr;
     QListWidget* frames_list_ = nullptr;
     QListWidget* model_list_ = nullptr;
+    QListWidget* history_list_ = nullptr;
     QListWidget* console_list_ = nullptr;
+    QDockWidget* text_dock_ = nullptr;
+    QPlainTextEdit* raster_text_input_ = nullptr;
+    QFontComboBox* raster_text_font_ = nullptr;
+    QSpinBox* raster_text_size_ = nullptr;
+    QComboBox* raster_text_alignment_ = nullptr;
+    QCheckBox* raster_text_antialias_ = nullptr;
+    QCheckBox* raster_text_bold_ = nullptr;
+    QCheckBox* raster_text_italic_ = nullptr;
+    QPushButton* raster_text_apply_ = nullptr;
+    QPushButton* raster_text_cancel_ = nullptr;
     QLabel* zoom_label_ = nullptr;
     QLabel* pointer_coordinates_label_ = nullptr;
     QLabel* selection_geometry_label_ = nullptr;
@@ -187,6 +214,12 @@ private:
     std::vector<bool> canvas_dock_visibility_before_graph_;
     bool canvas_docks_hidden_for_graph_ = false;
     bool graph_effect_source_dirty_ = true;
+    bool raster_text_edit_active_ = false;
+    bool raster_text_secondary_ = false;
+    int raster_text_x_ = 0;
+    int raster_text_y_ = 0;
+    int raster_text_box_width_ = 128;
+    int raster_text_box_height_ = 64;
 };
 
 } // namespace px

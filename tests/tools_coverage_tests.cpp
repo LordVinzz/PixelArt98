@@ -61,7 +61,7 @@ void check_single_commit(Document& document, std::string_view expected) {
 }
 
 void test_tool_names_and_constrained_endpoints() {
-    const std::array<std::pair<ToolType, std::string_view>, 15> names = {{
+    const std::array<std::pair<ToolType, std::string_view>, 16> names = {{
         {ToolType::Pencil, "Pencil"},
         {ToolType::Brush, "Brush"},
         {ToolType::Eraser, "Eraser"},
@@ -73,6 +73,7 @@ void test_tool_names_and_constrained_endpoints() {
         {ToolType::Eyedropper, "Eyedropper"},
         {ToolType::CloneStamp, "Clone Stamp"},
         {ToolType::RectSelect, "Rectangle Select"},
+        {ToolType::EllipseSelect, "Ellipse Select"},
         {ToolType::LassoSelect, "Lasso Select"},
         {ToolType::MagicWand, "Magic Wand"},
         {ToolType::MovePixels, "Move Pixels"},
@@ -93,6 +94,8 @@ void test_tool_names_and_constrained_endpoints() {
            std::array<int, 2>{7, 13}));
     CHECK((constrained_tool_endpoint(ToolType::RectSelect, 10, 10, 10, 7, true) ==
            std::array<int, 2>{13, 7}));
+    CHECK((constrained_tool_endpoint(ToolType::EllipseSelect, 10, 10, 7, 10, true) ==
+           std::array<int, 2>{7, 13}));
     CHECK((constrained_tool_endpoint(ToolType::Pencil, 10, 10, 4, 19, true) ==
            std::array<int, 2>{4, 19}));
 
@@ -165,6 +168,59 @@ void test_pixels_and_brushes() {
     check_single_commit(history, "Erase");
     draw_brush(history, -20, -20, context);
     CHECK(history.consume_recent_commit_names().empty());
+
+    auto opacity = Document::create(9, 9);
+    plot_brush_raw(opacity, 4, 4, red, 1, false, 0.5f, 1.0f);
+    CHECK(a(pixel_at(opacity, 4, 4)) >= 127);
+    CHECK(a(pixel_at(opacity, 4, 4)) <= 128);
+    plot_brush_raw(opacity, 4, 4, red, 1, true, 0.5f, 1.0f);
+    CHECK(a(pixel_at(opacity, 4, 4)) >= 63);
+    CHECK(a(pixel_at(opacity, 4, 4)) <= 64);
+
+    auto soft = Document::create(9, 9);
+    plot_brush_raw(soft, 4, 4, red, 7, false, 1.0f, 0.0f);
+    CHECK(a(pixel_at(soft, 4, 4)) == 255);
+    CHECK(a(pixel_at(soft, 4, 1)) > 0);
+    CHECK(a(pixel_at(soft, 4, 1)) < a(pixel_at(soft, 4, 4)));
+}
+
+void test_floating_selection_transforms() {
+    const Pixel red = rgba(255, 0, 0, 255);
+    const Pixel green = rgba(0, 255, 0, 255);
+    FloatingSelection source;
+    source.active = true;
+    source.source_x = 2;
+    source.source_y = 3;
+    source.offset_x = 1;
+    source.offset_y = -1;
+    source.width = 2;
+    source.height = 1;
+    source.pixels = {red, green};
+    source.mask = {1, 1};
+
+    const FloatingSelection scaled = scale_floating_selection(source, 4, 5, 4, 2);
+    CHECK(scaled.active);
+    CHECK(scaled.source_x == 4);
+    CHECK(scaled.source_y == 5);
+    CHECK(scaled.offset_x == 0);
+    CHECK(scaled.offset_y == 0);
+    CHECK(scaled.width == 4);
+    CHECK(scaled.height == 2);
+    CHECK(scaled.pixels == std::vector<Pixel>({red, red, green, green,
+                                               red, red, green, green}));
+    CHECK(scaled.mask == std::vector<std::uint8_t>(8, 1));
+
+    const FloatingSelection rotated = rotate_floating_selection(source, 90.0f);
+    CHECK(rotated.active);
+    CHECK(rotated.width == 1);
+    CHECK(rotated.height == 2);
+    CHECK(rotated.pixels == std::vector<Pixel>({red, green}));
+    CHECK(rotated.mask == std::vector<std::uint8_t>({1, 1}));
+
+    FloatingSelection invalid = source;
+    invalid.mask.clear();
+    CHECK(!scale_floating_selection(invalid, 0, 0, 2, 2).active);
+    CHECK(!rotate_floating_selection(invalid, 45.0f).active);
 }
 
 void test_lines_and_rectangles() {
@@ -577,9 +633,10 @@ struct TestCase {
 } // namespace
 
 int main() {
-    const std::array<TestCase, 11> tests = {{
+    const std::array<TestCase, 12> tests = {{
         {"tool names and constrained endpoints", test_tool_names_and_constrained_endpoints},
         {"pixels and brushes", test_pixels_and_brushes},
+        {"floating selection transforms", test_floating_selection_transforms},
         {"lines and rectangles", test_lines_and_rectangles},
         {"ellipses", test_ellipses},
         {"bucket fills", test_bucket_fills},

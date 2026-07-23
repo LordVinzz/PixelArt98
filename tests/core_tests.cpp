@@ -3,6 +3,7 @@
 // See LICENSE for details.
 
 #include "core/Document.hpp"
+#include "core/DocumentTransforms.hpp"
 #include "core/Filters.hpp"
 #include "core/Model.hpp"
 #include "core/Tools.hpp"
@@ -29,6 +30,87 @@ static std::size_t checked_pixel_index(const Document& doc, int x, int y) {
 
 static bool pixel_marked(const Document& doc, int x, int y) {
     return a(doc.active_cel().pixels[checked_pixel_index(doc, x, y)]) != 0;
+}
+
+static void test_full_document_transforms_and_history() {
+    Document doc = Document::create(3, 2);
+    doc.active_cel().pixels[checked_pixel_index(doc, 0, 0)] = rgba(255, 0, 0, 255);
+    doc.active_cel().pixels[checked_pixel_index(doc, 2, 1)] = rgba(0, 255, 0, 255);
+    doc.layers[0].mask_enabled = true;
+    doc.layers[0].mask = {0, 255, 255, 255, 255, 128};
+    doc.selection.select_rect(2, 1, 2, 1, true);
+    doc.add_frame(true);
+    doc.clear_history();
+    doc.frames[1].cels[0].pixels[checked_pixel_index(doc, 1, 0)] = rgba(0, 0, 255, 255);
+    ModelDocument model = ModelDocument::create_default();
+    model.texture_width = doc.width;
+    model.texture_height = doc.height;
+
+    assert(rotate_document_90_clockwise(doc, &model));
+    assert(doc.width == 2 && doc.height == 3);
+    assert(model.texture_width == 2 && model.texture_height == 3);
+    assert(r(doc.frames[0].cels[0].pixels[static_cast<std::size_t>(doc.pixel_index(1, 0))]) == 255);
+    assert(g(doc.frames[0].cels[0].pixels[static_cast<std::size_t>(doc.pixel_index(0, 2))]) == 255);
+    assert(b(doc.frames[1].cels[0].pixels[static_cast<std::size_t>(doc.pixel_index(1, 1))]) == 255);
+    assert(doc.layers[0].mask.size() == 6);
+    assert(doc.selection.contains(0, 2));
+
+    assert(doc.undo(&model));
+    assert(doc.width == 3 && doc.height == 2);
+    assert(model.texture_width == 3 && model.texture_height == 2);
+    assert(r(doc.frames[0].cels[0].pixels[checked_pixel_index(doc, 0, 0)]) == 255);
+    assert(doc.layers[0].mask[0] == 0);
+    assert(doc.selection.contains(2, 1));
+    assert(doc.redo(&model));
+    assert(doc.width == 2 && doc.height == 3);
+
+    assert(crop_document(doc, 0, 1, 2, 2, &model));
+    assert(doc.width == 2 && doc.height == 2);
+    assert(doc.undo(&model));
+    assert(doc.width == 2 && doc.height == 3);
+
+    assert(resize_document_canvas(doc, 4, 5, 1, 1, &model));
+    assert(doc.width == 4 && doc.height == 5);
+    assert(doc.undo(&model));
+    assert(doc.width == 2 && doc.height == 3);
+
+    assert(resize_document_image(doc, 4, 6, ResamplingMode::Nearest, &model));
+    assert(doc.width == 4 && doc.height == 6);
+    assert(doc.frames[0].cels[0].pixels.size() == 24);
+    assert(doc.undo(&model));
+    assert(doc.width == 2 && doc.height == 3);
+}
+
+static void test_layer_properties_and_masks_are_undoable() {
+    Document doc = Document::create(4, 4);
+    assert(doc.set_layer_name(0, "Ink"));
+    assert(doc.layers[0].name == "Ink");
+    assert(doc.undo());
+    assert(doc.layers[0].name == "Background");
+    assert(doc.redo());
+    assert(doc.layers[0].name == "Ink");
+
+    assert(doc.set_layer_visible(0, false));
+    assert(doc.undo());
+    assert(doc.layers[0].visible);
+    assert(doc.set_layer_opacity(0, 0.25f));
+    assert(doc.undo());
+    assert(std::abs(doc.layers[0].opacity - 1.0f) < 0.001f);
+    assert(doc.set_layer_blend_mode(0, LayerBlendMode::Multiply));
+    assert(doc.undo());
+    assert(doc.layers[0].blend_mode == LayerBlendMode::Normal);
+    assert(doc.set_layer_clipped(0, true));
+    assert(doc.undo());
+    assert(!doc.layers[0].clip_to_below);
+
+    std::vector<std::uint8_t> mask(16, 0);
+    mask[5] = 255;
+    assert(doc.set_layer_mask(0, mask, true, "Mask from Selection"));
+    assert(doc.layers[0].mask_enabled && doc.layers[0].mask[5] == 255);
+    assert(doc.undo());
+    assert(!doc.layers[0].mask_enabled && doc.layers[0].mask.empty());
+    assert(doc.redo());
+    assert(doc.layers[0].mask_enabled && doc.layers[0].mask[5] == 255);
 }
 
 static void test_canvas_and_undo() {
@@ -1017,6 +1099,8 @@ static void test_project_io() {
 }
 
 int main() {
+    test_full_document_transforms_and_history();
+    test_layer_properties_and_masks_are_undoable();
     test_canvas_and_undo();
     test_fill_and_selection();
     test_selection_combine_modes_and_nudge();

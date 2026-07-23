@@ -13,10 +13,13 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPolygonF>
+#include <QTabletEvent>
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <utility>
 
 namespace px {
 
@@ -150,6 +153,7 @@ QtCanvasWidget::QtCanvasWidget(EditorController& controller, QWidget* parent)
     : QOpenGLWidget(parent), controller_(controller) {
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
+    setTabletTracking(true);
     setMinimumSize(320, 240);
 }
 
@@ -261,6 +265,23 @@ void QtCanvasWidget::paintGL() {
         }
     }
 
+    if (raster_text_preview_.width > 0 && raster_text_preview_.height > 0 &&
+        raster_text_preview_.pixels.size() ==
+            static_cast<std::size_t>(raster_text_preview_.width *
+                                     raster_text_preview_.height)) {
+        const QImage preview_image(
+            reinterpret_cast<const uchar*>(raster_text_preview_.pixels.data()),
+            raster_text_preview_.width,
+            raster_text_preview_.height,
+            raster_text_preview_.width * static_cast<int>(sizeof(Pixel)),
+            QImage::Format_RGBA8888);
+        const QRectF preview_target = pixel_rect(
+            target, zoom_, raster_text_preview_x_, raster_text_preview_y_,
+            raster_text_preview_.width, raster_text_preview_.height);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        painter.drawImage(preview_target, preview_image);
+    }
+
     if (grid_visible_ && zoom_ >= 4.0) {
         painter.setPen(QPen(QColor(0, 0, 0, 58), 1.0));
         for (int x = visible.left; x <= visible.right; ++x) {
@@ -278,19 +299,22 @@ void QtCanvasWidget::paintGL() {
 
     if (drawing_) {
         const ToolType tool = controller_.tool().tool;
-        if (tool == ToolType::Line || tool == ToolType::Rectangle || tool == ToolType::Ellipse || tool == ToolType::RectSelect) {
+        if (tool == ToolType::Line || tool == ToolType::Rectangle || tool == ToolType::Ellipse ||
+            tool == ToolType::RectSelect || tool == ToolType::EllipseSelect) {
             const auto endpoint = constrained_tool_endpoint(tool, drag_start_pixel_.x(), drag_start_pixel_.y(), drag_current_pixel_.x(), drag_current_pixel_.y(), QApplication::keyboardModifiers().testFlag(Qt::ControlModifier) || QApplication::keyboardModifiers().testFlag(Qt::MetaModifier));
             const QPointF start(target.left() + (static_cast<double>(drag_start_pixel_.x()) + 0.5) * zoom_, target.top() + (static_cast<double>(drag_start_pixel_.y()) + 0.5) * zoom_);
             const QPointF end(target.left() + (static_cast<double>(endpoint[0]) + 0.5) * zoom_, target.top() + (static_cast<double>(endpoint[1]) + 0.5) * zoom_);
-            if (tool == ToolType::RectSelect) {
+            if (tool == ToolType::RectSelect || tool == ToolType::EllipseSelect) {
                 const int min_x = std::min(drag_start_pixel_.x(), endpoint[0]);
                 const int max_x = std::max(drag_start_pixel_.x(), endpoint[0]);
                 const int min_y = std::min(drag_start_pixel_.y(), endpoint[1]);
                 const int max_y = std::max(drag_start_pixel_.y(), endpoint[1]);
                 const QRectF preview = pixel_rect(target, zoom_, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
-                painter.fillRect(preview, kSelectionFill);
+                if (tool == ToolType::EllipseSelect) painter.setBrush(kSelectionFill);
+                else painter.fillRect(preview, kSelectionFill);
                 painter.setPen(QPen(kSelectionStroke, 1.5));
-                painter.drawRect(preview);
+                if (tool == ToolType::EllipseSelect) painter.drawEllipse(preview);
+                else painter.drawRect(preview);
             } else {
                 painter.setPen(QPen(QColor(255, 255, 255, 220), 1.5, Qt::DashLine));
                 if (tool == ToolType::Line) painter.drawLine(start, end);
@@ -319,6 +343,8 @@ void QtCanvasWidget::paintGL() {
         }
     }
     painter.restore();
+    draw_selection_transform_handles(painter);
+    draw_raster_text_box_handles(painter);
 }
 
 QPoint QtCanvasWidget::pixel_at(const QPointF& position) const {
@@ -331,11 +357,168 @@ bool QtCanvasWidget::valid_pixel(const QPoint& pixel) const {
     return controller_.document().in_bounds(pixel.x(), pixel.y());
 }
 
+std::optional<QRect> QtCanvasWidget::selection_transform_bounds() const {
+    const FloatingSelection& floating = controller_.document().floating_selection;
+    if (floating.active && floating.width > 0 && floating.height > 0) {
+        return QRect(floating.source_x + floating.offset_x,
+                     floating.source_y + floating.offset_y,
+                     floating.width, floating.height);
+    }
+    if (const auto bounds = controller_.document().selection.bounds(); bounds.has_value()) {
+        return QRect((*bounds)[0], (*bounds)[1], (*bounds)[2] - (*bounds)[0] + 1,
+                     (*bounds)[3] - (*bounds)[1] + 1);
+    }
+    return std::nullopt;
+}
+
+SelectionTransformHandle QtCanvasWidget::selection_transform_handle_at(const QPointF& position) const {
+    if (controller_.tool().tool != ToolType::MovePixels) return SelectionTransformHandle::None;
+    const auto bounds = selection_transform_bounds();
+    if (!bounds.has_value()) return SelectionTransformHandle::None;
+    const QRectF box = pixel_rect(image_rect(), zoom_, bounds->x(), bounds->y(),
+                                  bounds->width(), bounds->height());
+    const qreal middle_x = box.center().x();
+    const qreal middle_y = box.center().y();
+    const qreal rotation_y = box.top() - 22.0;
+    const std::array<std::pair<SelectionTransformHandle, QPointF>, 9> handles = {{
+        {SelectionTransformHandle::Rotate, {middle_x, rotation_y}},
+        {SelectionTransformHandle::NorthWest, box.topLeft()},
+        {SelectionTransformHandle::North, {middle_x, box.top()}},
+        {SelectionTransformHandle::NorthEast, box.topRight()},
+        {SelectionTransformHandle::East, {box.right(), middle_y}},
+        {SelectionTransformHandle::SouthEast, box.bottomRight()},
+        {SelectionTransformHandle::South, {middle_x, box.bottom()}},
+        {SelectionTransformHandle::SouthWest, box.bottomLeft()},
+        {SelectionTransformHandle::West, {box.left(), middle_y}}
+    }};
+    for (const auto& [handle, center] : handles) {
+        if (QRectF(center.x() - 6.0, center.y() - 6.0, 12.0, 12.0).contains(position))
+            return handle;
+    }
+    return SelectionTransformHandle::None;
+}
+
+SelectionTransformHandle QtCanvasWidget::raster_text_box_handle_at(
+    const QPointF& position) const {
+    if (controller_.tool().tool != ToolType::Text || !raster_text_box_active_) {
+        return SelectionTransformHandle::None;
+    }
+    const QRectF box = pixel_rect(image_rect(), zoom_, raster_text_box_x_,
+                                  raster_text_box_y_, raster_text_box_width_,
+                                  raster_text_box_height_);
+    const qreal middle_x = box.center().x();
+    const qreal middle_y = box.center().y();
+    const std::array<std::pair<SelectionTransformHandle, QPointF>, 8> handles = {{
+        {SelectionTransformHandle::NorthWest, box.topLeft()},
+        {SelectionTransformHandle::North, {middle_x, box.top()}},
+        {SelectionTransformHandle::NorthEast, box.topRight()},
+        {SelectionTransformHandle::East, {box.right(), middle_y}},
+        {SelectionTransformHandle::SouthEast, box.bottomRight()},
+        {SelectionTransformHandle::South, {middle_x, box.bottom()}},
+        {SelectionTransformHandle::SouthWest, box.bottomLeft()},
+        {SelectionTransformHandle::West, {box.left(), middle_y}}
+    }};
+    for (const auto& [handle, center] : handles) {
+        if (QRectF(center.x() - 6.0, center.y() - 6.0, 12.0, 12.0)
+                .contains(position)) {
+            return handle;
+        }
+    }
+    return SelectionTransformHandle::None;
+}
+
+void QtCanvasWidget::draw_selection_transform_handles(QPainter& painter) const {
+    if (controller_.tool().tool != ToolType::MovePixels) return;
+    const auto bounds = selection_transform_bounds();
+    if (!bounds.has_value()) return;
+    const QRectF box = pixel_rect(image_rect(), zoom_, bounds->x(), bounds->y(),
+                                  bounds->width(), bounds->height());
+    paint_selection_transform_frame(painter, box);
+}
+
+void QtCanvasWidget::draw_raster_text_box_handles(QPainter& painter) const {
+    if (controller_.tool().tool != ToolType::Text || !raster_text_box_active_) return;
+    const QRectF box = pixel_rect(image_rect(), zoom_, raster_text_box_x_,
+                                  raster_text_box_y_, raster_text_box_width_,
+                                  raster_text_box_height_);
+    const qreal middle_x = box.center().x();
+    const qreal middle_y = box.center().y();
+    const std::array<QPointF, 8> handles = {{
+        box.topLeft(), {middle_x, box.top()}, box.topRight(),
+        {box.right(), middle_y}, box.bottomRight(),
+        {middle_x, box.bottom()}, box.bottomLeft(), {box.left(), middle_y}
+    }};
+    painter.save();
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(kSelectionStroke, 1.5));
+    painter.drawRect(box);
+    painter.setBrush(QColor(245, 248, 252));
+    for (const QPointF& center : handles) {
+        painter.drawRect(QRectF(center.x() - 4.0, center.y() - 4.0, 8.0, 8.0));
+    }
+    painter.restore();
+}
+
+void QtCanvasWidget::update_raster_text_box_resize(int x, int y) {
+    if (!resizing_raster_text_box_ ||
+        raster_text_box_handle_ == SelectionTransformHandle::None) {
+        return;
+    }
+    int left = raster_text_box_before_resize_.x();
+    int top = raster_text_box_before_resize_.y();
+    int right = left + raster_text_box_before_resize_.width();
+    int bottom = top + raster_text_box_before_resize_.height();
+    const bool west = raster_text_box_handle_ == SelectionTransformHandle::West ||
+                      raster_text_box_handle_ == SelectionTransformHandle::NorthWest ||
+                      raster_text_box_handle_ == SelectionTransformHandle::SouthWest;
+    const bool east = raster_text_box_handle_ == SelectionTransformHandle::East ||
+                      raster_text_box_handle_ == SelectionTransformHandle::NorthEast ||
+                      raster_text_box_handle_ == SelectionTransformHandle::SouthEast;
+    const bool north = raster_text_box_handle_ == SelectionTransformHandle::North ||
+                       raster_text_box_handle_ == SelectionTransformHandle::NorthWest ||
+                       raster_text_box_handle_ == SelectionTransformHandle::NorthEast;
+    const bool south = raster_text_box_handle_ == SelectionTransformHandle::South ||
+                       raster_text_box_handle_ == SelectionTransformHandle::SouthWest ||
+                       raster_text_box_handle_ == SelectionTransformHandle::SouthEast;
+    if (west) left = std::clamp(x, 0, right - 1);
+    if (east) right = std::clamp(x + 1, left + 1, controller_.document().width);
+    if (north) top = std::clamp(y, 0, bottom - 1);
+    if (south) bottom = std::clamp(y + 1, top + 1, controller_.document().height);
+    if (raster_text_box_changed) {
+        raster_text_box_changed(left, top, right - left, bottom - top);
+    } else {
+        set_raster_text_box(left, top, right - left, bottom - top);
+    }
+}
+
+void QtCanvasWidget::paint_selection_transform_frame(QPainter& painter, const QRectF& box) {
+    const qreal middle_x = box.center().x();
+    const qreal middle_y = box.center().y();
+    const QPointF rotation(middle_x, box.top() - 22.0);
+    const std::array<QPointF, 8> handles = {{box.topLeft(), {middle_x, box.top()}, box.topRight(),
+                                             {box.right(), middle_y}, box.bottomRight(),
+                                             {middle_x, box.bottom()}, box.bottomLeft(),
+                                             {box.left(), middle_y}}};
+    painter.save();
+    // The transform frame must never have a fill: filling this rectangle hid
+    // the floating pixels under an opaque white box while they were moved.
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(kSelectionStroke, 1.5));
+    painter.drawRect(box);
+    painter.drawLine(QPointF(middle_x, box.top()), rotation);
+    painter.setBrush(QColor(245, 248, 252));
+    for (const QPointF& center : handles) {
+        painter.drawRect(QRectF(center.x() - 4.0, center.y() - 4.0, 8.0, 8.0));
+    }
+    painter.drawEllipse(QRectF(rotation.x() - 5.0, rotation.y() - 5.0, 10.0, 10.0));
+    painter.restore();
+}
+
 std::optional<QRect> QtCanvasWidget::active_selection_preview() const {
     if (!drawing_) return std::nullopt;
 
     const ToolType tool = controller_.tool().tool;
-    if (tool == ToolType::RectSelect) {
+    if (tool == ToolType::RectSelect || tool == ToolType::EllipseSelect) {
         const auto endpoint = constrained_tool_endpoint(
             tool, drag_start_pixel_.x(), drag_start_pixel_.y(),
             drag_current_pixel_.x(), drag_current_pixel_.y(),
@@ -386,11 +569,42 @@ void QtCanvasWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (event->button() != Qt::LeftButton && event->button() != Qt::RightButton) return;
+    if (event->button() == Qt::LeftButton && controller_.tool().tool == ToolType::MovePixels) {
+        const SelectionTransformHandle handle = selection_transform_handle_at(event->position());
+        if (handle != SelectionTransformHandle::None) {
+            const QPoint transform_pixel = pixel_at(event->position());
+            transforming_selection_ = controller_.begin_selection_transform(
+                handle, transform_pixel.x(), transform_pixel.y());
+            if (transforming_selection_) {
+                drag_start_pixel_ = drag_current_pixel_ = transform_pixel;
+                event->accept();
+                update();
+                return;
+            }
+        }
+    }
+    if (event->button() == Qt::LeftButton &&
+        controller_.tool().tool == ToolType::Text) {
+        const SelectionTransformHandle handle =
+            raster_text_box_handle_at(event->position());
+        if (handle != SelectionTransformHandle::None) {
+            resizing_raster_text_box_ = true;
+            raster_text_box_handle_ = handle;
+            raster_text_box_before_resize_ = raster_text_box();
+            event->accept();
+            return;
+        }
+    }
     const QPoint pixel = pixel_at(event->position());
     if (!valid_pixel(pixel)) return;
+    const bool secondary = event->button() == Qt::RightButton;
+    if (controller_.tool().tool == ToolType::Text) {
+        if (text_requested) text_requested(pixel.x(), pixel.y(), secondary);
+        update();
+        return;
+    }
     drawing_ = true;
     drag_start_pixel_ = drag_current_pixel_ = pixel;
-    const bool secondary = event->button() == Qt::RightButton;
     controller_.begin_stroke(pixel.x(), pixel.y(), secondary, selection_mode(event->modifiers(), secondary));
     if (selection_geometry_changed) selection_geometry_changed();
     notify_selection_preview();
@@ -405,6 +619,50 @@ void QtCanvasWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
     notify_pointer_coordinates(event->position());
+    if (resizing_raster_text_box_) {
+        const QPoint pixel = pixel_at(event->position());
+        update_raster_text_box_resize(pixel.x(), pixel.y());
+        update();
+        return;
+    }
+    if (transforming_selection_) {
+        const QPoint pixel = pixel_at(event->position());
+        drag_current_pixel_ = pixel;
+        controller_.update_selection_transform(
+            pixel.x(), pixel.y(),
+            event->modifiers().testFlag(Qt::ControlModifier) ||
+                event->modifiers().testFlag(Qt::MetaModifier));
+        if (selection_geometry_changed) selection_geometry_changed();
+        update();
+        return;
+    }
+    if (controller_.tool().tool == ToolType::Text && raster_text_box_active_) {
+        const SelectionTransformHandle handle =
+            raster_text_box_handle_at(event->position());
+        switch (handle) {
+            case SelectionTransformHandle::NorthWest:
+            case SelectionTransformHandle::SouthEast:
+                setCursor(Qt::SizeFDiagCursor);
+                break;
+            case SelectionTransformHandle::NorthEast:
+            case SelectionTransformHandle::SouthWest:
+                setCursor(Qt::SizeBDiagCursor);
+                break;
+            case SelectionTransformHandle::North:
+            case SelectionTransformHandle::South:
+                setCursor(Qt::SizeVerCursor);
+                break;
+            case SelectionTransformHandle::East:
+            case SelectionTransformHandle::West:
+                setCursor(Qt::SizeHorCursor);
+                break;
+            default:
+                unsetCursor();
+                break;
+        }
+    } else {
+        unsetCursor();
+    }
     if (!drawing_) return;
     const QPoint pixel = pixel_at(event->position());
     if (valid_pixel(pixel)) {
@@ -422,12 +680,104 @@ void QtCanvasWidget::mouseReleaseEvent(QMouseEvent* event) {
         panning_ = false;
         return;
     }
+    if (resizing_raster_text_box_ && event->button() == Qt::LeftButton) {
+        resizing_raster_text_box_ = false;
+        raster_text_box_handle_ = SelectionTransformHandle::None;
+        if (raster_text_box_resize_finished) raster_text_box_resize_finished();
+        event->accept();
+        update();
+        return;
+    }
+    if (transforming_selection_ && event->button() == Qt::LeftButton) {
+        transforming_selection_ = false;
+        if (controller_.end_selection_transform()) notify_changed();
+        return;
+    }
     if (!drawing_) return;
     const QPoint pixel = valid_pixel(pixel_at(event->position())) ? pixel_at(event->position()) : drag_current_pixel_;
     controller_.end_stroke(pixel.x(), pixel.y(), event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::MetaModifier));
     drawing_ = false;
     notify_selection_preview();
     notify_changed();
+}
+
+void QtCanvasWidget::tabletEvent(QTabletEvent* event) {
+    if (controller_.tool().tool == ToolType::Text) {
+        event->ignore();
+        return;
+    }
+    const QPoint pixel = pixel_at(event->position());
+    const bool constrain = event->modifiers().testFlag(Qt::ControlModifier) ||
+                           event->modifiers().testFlag(Qt::MetaModifier);
+    const bool secondary = event->button() == Qt::RightButton;
+    if (event->type() == QEvent::TabletPress) {
+        setFocus();
+        if (controller_.tool().tool == ToolType::MovePixels) {
+            const SelectionTransformHandle handle = selection_transform_handle_at(event->position());
+            if (handle != SelectionTransformHandle::None) {
+                transforming_selection_ = controller_.begin_selection_transform(
+                    handle, pixel.x(), pixel.y());
+                if (transforming_selection_) {
+                    drag_start_pixel_ = drag_current_pixel_ = pixel;
+                    event->accept();
+                    update();
+                    return;
+                }
+            }
+        }
+        if (!valid_pixel(pixel)) {
+            event->ignore();
+            return;
+        }
+        drawing_ = true;
+        drag_start_pixel_ = drag_current_pixel_ = pixel;
+        controller_.begin_stroke(pixel.x(), pixel.y(), secondary,
+                                 selection_mode(event->modifiers(), secondary),
+                                 static_cast<float>(event->pressure()));
+        event->accept();
+        update();
+        return;
+    }
+    if (event->type() == QEvent::TabletMove) {
+        if (transforming_selection_) {
+            drag_current_pixel_ = pixel;
+            controller_.update_selection_transform(pixel.x(), pixel.y(), constrain);
+            event->accept();
+            update();
+            return;
+        }
+        if (!drawing_ || !valid_pixel(pixel)) {
+            event->ignore();
+            return;
+        }
+        drag_current_pixel_ = pixel;
+        controller_.update_stroke(pixel.x(), pixel.y(), constrain,
+                                  static_cast<float>(event->pressure()));
+        event->accept();
+        update();
+        return;
+    }
+    if (event->type() == QEvent::TabletRelease) {
+        if (transforming_selection_) {
+            transforming_selection_ = false;
+            if (controller_.end_selection_transform()) notify_changed();
+            event->accept();
+            return;
+        }
+        if (!drawing_) {
+            event->ignore();
+            return;
+        }
+        const QPoint endpoint = valid_pixel(pixel) ? pixel : drag_current_pixel_;
+        controller_.end_stroke(endpoint.x(), endpoint.y(), constrain,
+                               static_cast<float>(event->pressure()));
+        drawing_ = false;
+        notify_selection_preview();
+        notify_changed();
+        event->accept();
+        return;
+    }
+    event->ignore();
 }
 
 void QtCanvasWidget::leaveEvent(QEvent* event) {
@@ -457,13 +807,14 @@ void QtCanvasWidget::keyPressEvent(QKeyEvent* event) {
         controller_.cancel_interaction();
         controller_.clear_selection();
         drawing_ = false;
+        transforming_selection_ = false;
         notify_selection_preview();
         notify_changed();
         return;
     }
     if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) { controller_.delete_selection(); notify_changed(); return; }
     if (event->key() == Qt::Key_BracketLeft) { controller_.tool().brush_size = std::max(1, controller_.tool().brush_size - 1); notify_changed(); return; }
-    if (event->key() == Qt::Key_BracketRight) { controller_.tool().brush_size = std::min(32, controller_.tool().brush_size + 1); notify_changed(); return; }
+    if (event->key() == Qt::Key_BracketRight) { controller_.tool().brush_size = std::min(256, controller_.tool().brush_size + 1); notify_changed(); return; }
     int dx = 0;
     int dy = 0;
     if (event->key() == Qt::Key_Left) dx = -1;
@@ -504,6 +855,34 @@ void QtCanvasWidget::fit_to_canvas() {
 void QtCanvasWidget::set_grid_visible(bool visible) { grid_visible_ = visible; update(); }
 void QtCanvasWidget::set_checker_visible(bool visible) { checker_visible_ = visible; update(); }
 void QtCanvasWidget::set_onion_visible(bool visible) { onion_visible_ = visible; update(); }
+void QtCanvasWidget::set_raster_text_preview(int x, int y, RasterTextImage preview) {
+    raster_text_preview_x_ = x;
+    raster_text_preview_y_ = y;
+    raster_text_preview_ = std::move(preview);
+    ++raster_text_preview_revision_;
+    update();
+}
+void QtCanvasWidget::clear_raster_text_preview() {
+    if (raster_text_preview_.pixels.empty()) return;
+    raster_text_preview_ = {};
+    ++raster_text_preview_revision_;
+    update();
+}
+void QtCanvasWidget::set_raster_text_box(int x, int y, int width, int height) {
+    raster_text_box_active_ = true;
+    raster_text_box_x_ = x;
+    raster_text_box_y_ = y;
+    raster_text_box_width_ = std::max(1, width);
+    raster_text_box_height_ = std::max(1, height);
+    update();
+}
+void QtCanvasWidget::clear_raster_text_box() {
+    if (!raster_text_box_active_) return;
+    raster_text_box_active_ = false;
+    resizing_raster_text_box_ = false;
+    raster_text_box_handle_ = SelectionTransformHandle::None;
+    update();
+}
 void QtCanvasWidget::notify_changed() { update(); if (editor_changed) editor_changed(); }
 
 } // namespace px

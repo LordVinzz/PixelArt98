@@ -4,12 +4,14 @@
 #include "ui/QtMainWindow.hpp"
 
 #include "io/ProjectIO.hpp"
+#include "core/DocumentTransforms.hpp"
 #include "depth/DepthMapExtractor.hpp"
 #include "ui/AdjustmentWidgets.hpp"
 #include "ui/AnimationExport.hpp"
 #include "ui/GraphEffectWidget.hpp"
 #include "ui/QtCanvasWidget.hpp"
 #include "ui/QtModelPreviewWidget.hpp"
+#include "ui/TextRasterizer.hpp"
 #include "PixelArtVersion.hpp"
 
 #include <QAction>
@@ -34,6 +36,7 @@
 #include <QFileDialog>
 #include <QEventLoop>
 #include <QFormLayout>
+#include <QFontComboBox>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -55,6 +58,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QProgressDialog>
+#include <QPlainTextEdit>
 #include <QProcess>
 #include <QRadioButton>
 #include <QScrollArea>
@@ -93,6 +97,23 @@ constexpr int kWindowStateVersion = 1;
 constexpr auto kSelectionMimeType = "application/x-pixelart98-selection";
 constexpr quint32 kSelectionClipboardMagic = 0x50583938U;
 constexpr quint32 kSelectionClipboardVersion = 1U;
+
+QByteArray bundled_default_window_state() {
+    // Captured from the maintainer's reference workspace. Geometry is deliberately
+    // excluded so the main window still adapts to each user's screen.
+    return QByteArray::fromBase64(QByteArrayLiteral(
+        "AAAA/wAAAAH9AAAABAAAAAAAAAG+AAADYPwCAAAAAvwAAAAYAAADYAAAAZsA/////AEAAAAD+wAAABIAVABvAG8AbABzAEQA"
+        "bwBjAGsBAAAAAAAAAGAAAABgAAAAYPwAAABhAAABXQAAAV0A/////AIAAAAC+wAAABQAQwBvAGwAbwByAHMARABvAGMAawEA"
+        "AAAYAAADYAAAAYoA////+wAAABAAVABlAHgAdABEAG8AYwBrAAAAAi4AAAFKAAABMwD////7AAAAHgBBAGQAagB1AHMAdABt"
+        "AGUAbgB0AHMARABvAGMAawAAAABhAAABGQAAAAAAAAAA+wAAABIATQBvAGQAZQBsAEQAbwBjAGsCAAAAAgAAAbQAAAFdAAAB"
+        "bAAAAAEAAADYAAADYPwCAAAAA/sAAAAUAEwAYQB5AGUAcgBzAEQAbwBjAGsBAAAAGAAAAgcAAAFGAP////sAAAAWAEgAaQBz"
+        "AHQAbwByAHkARABvAGMAawEAAAIgAAABWAAAALMA////+wAAACAATQBvAGQAZQBsAFAAcgBlAHYAaQBlAHcARABvAGMAawgA"
+        "AAKsAAABEQAAAQYA////AAAAAgAABegAAACT/AEAAAAB+wAAABoAQQBuAGkAbQBhAHQAaQBvAG4ARABvAGMAawgAAAAAAAAF"
+        "6AAAAQ4A////AAAAAwAABegAAADW/AEAAAAC+wAAAB4AVABpAGwAZQBQAHIAZQB2AGkAZQB3AEQAbwBjAGsIAAAAAAAABegA"
+        "AADAAP////sAAAAgAEUAcgByAG8AcgBDAG8AbgBzAG8AbABlAEQAbwBjAGsAAAAAAP////8AAABNAP///wAAA04AAANgAAAA"
+        "BAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAEAAAAaAEMAYQBuAHYAYQBzAFQAbwBvAGwAYgBhAHIBAAAAAP////8AAAAAAAAA"
+        "AA=="));
+}
 
 struct ClipboardSelection {
     int x = 0;
@@ -205,6 +226,7 @@ QString tool_icon_path(ToolType tool) {
         case ToolType::Eyedropper: file = "eyedropper.png"; break;
         case ToolType::CloneStamp: file = "clone_stamp.png"; break;
         case ToolType::RectSelect: file = "rectangle_select.png"; break;
+        case ToolType::EllipseSelect: file = "ellipse.png"; break;
         case ToolType::LassoSelect: file = "lasso.png"; break;
         case ToolType::MagicWand: file = "magic_wand.png"; break;
         case ToolType::MovePixels: file = "move_pixels.png"; break;
@@ -922,6 +944,23 @@ QtMainWindow::QtMainWindow(AppSettings settings, QWidget* parent)
         if (preview.has_value()) update_selection_status(*preview);
         else refresh_selection_status();
     };
+    canvas_->text_requested = [this](int x, int y, bool secondary) {
+        begin_raster_text_edit(x, y, secondary);
+    };
+    canvas_->raster_text_box_changed = [this](int x, int y, int width, int height) {
+        if (!raster_text_edit_active_) return;
+        raster_text_x_ = x;
+        raster_text_y_ = y;
+        raster_text_box_width_ = width;
+        raster_text_box_height_ = height;
+        persist_raster_text_options(current_raster_text_options());
+        update_raster_text_preview();
+    };
+    canvas_->raster_text_box_resize_finished = [this] {
+        if (raster_text_edit_active_ && raster_text_input_ != nullptr) {
+            raster_text_input_->setFocus();
+        }
+    };
     graph_effect_widget_ = new GraphEffectWidget(workspace_tabs_);
     graph_effect_widget_->setObjectName(QStringLiteral("GraphEffectWidget"));
     graph_effect_widget_->apply_requested = [this](const std::vector<Pixel>& pixels, int width, int height) {
@@ -1076,12 +1115,46 @@ void QtMainWindow::build_menus() {
     add_action(edit, tr("Invert Selection"), QKeySequence(QStringLiteral("Ctrl+I")), [this] { controller_.invert_selection(); refresh_all(); });
     add_action(edit, tr("Delete Selection"), QKeySequence::Delete, [this] { controller_.delete_selection(); refresh_all(); });
 
+    QMenu* selection = menuBar()->addMenu(tr("&Selection"));
+    selection->setObjectName(QStringLiteral("SelectionMenu"));
+    const auto add_refinement = [this, selection](const QString& label, const QString& object_name,
+                                                   const std::function<bool(int)>& operation) {
+        QAction* action = selection->addAction(label);
+        action->setObjectName(object_name);
+        connect(action, &QAction::triggered, this, [this, label, operation] {
+            bool accepted = false;
+            const int radius = QInputDialog::getInt(this, label, tr("Radius (pixels)"), 1, 1, 256, 1,
+                                                    &accepted);
+            if (accepted && operation(radius)) refresh_all();
+        });
+    };
+    add_refinement(tr("Expand..."), QStringLiteral("SelectionExpand"),
+                   [this](int radius) { return controller_.expand_selection(radius); });
+    add_refinement(tr("Contract..."), QStringLiteral("SelectionContract"),
+                   [this](int radius) { return controller_.contract_selection(radius); });
+    add_refinement(tr("Border..."), QStringLiteral("SelectionBorder"),
+                   [this](int radius) { return controller_.border_selection(radius); });
+    add_refinement(tr("Smooth..."), QStringLiteral("SelectionSmooth"),
+                   [this](int radius) { return controller_.smooth_selection(radius); });
+
     QMenu* image = menuBar()->addMenu(tr("&Image"));
-    add_action(image, tr("Flip Horizontal"), {}, [this] { apply_transform(tr("Flip Horizontal"), apply_flip_horizontal); });
-    add_action(image, tr("Flip Vertical"), {}, [this] { apply_transform(tr("Flip Vertical"), apply_flip_vertical); });
-    add_action(image, tr("Rotate 90 Clockwise"), {}, [this] { apply_transform(tr("Rotate 90 Clockwise"), apply_rotate_90_clockwise); });
-    add_action(image, tr("Rotate 90 Counter-Clockwise"), {}, [this] { apply_transform(tr("Rotate 90 Counter-Clockwise"), apply_rotate_90_counter_clockwise); });
-    add_action(image, tr("Rotate 180"), {}, [this] { apply_transform(tr("Rotate 180"), apply_rotate_180); });
+    QAction* image_resize = add_action(image, tr("Resize Image..."), {}, [this] { show_image_resize_dialog(); });
+    QAction* canvas_resize = add_action(image, tr("Canvas Size..."), {}, [this] { show_canvas_resize_dialog(); });
+    QAction* crop = add_action(image, tr("Crop..."), {}, [this] { show_crop_dialog(); });
+    image_resize->setObjectName(QStringLiteral("ImageResize"));
+    canvas_resize->setObjectName(QStringLiteral("CanvasResize"));
+    crop->setObjectName(QStringLiteral("ImageCrop"));
+    image->addSeparator();
+    QAction* flip_horizontal = add_action(image, tr("Flip Horizontal"), {}, [this] { if (flip_document_horizontal(controller_.document(), &controller_.model())) { controller_.mark_changed("Flip Image Horizontally"); refresh_all(); } });
+    QAction* flip_vertical = add_action(image, tr("Flip Vertical"), {}, [this] { if (flip_document_vertical(controller_.document(), &controller_.model())) { controller_.mark_changed("Flip Image Vertically"); refresh_all(); } });
+    QAction* rotate_clockwise = add_action(image, tr("Rotate 90 Clockwise"), {}, [this] { if (rotate_document_90_clockwise(controller_.document(), &controller_.model())) { controller_.mark_changed("Rotate Image 90 Clockwise"); refresh_all(); canvas_->fit_to_canvas(); } });
+    QAction* rotate_counter_clockwise = add_action(image, tr("Rotate 90 Counter-Clockwise"), {}, [this] { if (rotate_document_90_counter_clockwise(controller_.document(), &controller_.model())) { controller_.mark_changed("Rotate Image 90 Counter-Clockwise"); refresh_all(); canvas_->fit_to_canvas(); } });
+    QAction* rotate_180 = add_action(image, tr("Rotate 180"), {}, [this] { if (rotate_document_180(controller_.document(), &controller_.model())) { controller_.mark_changed("Rotate Image 180"); refresh_all(); } });
+    flip_horizontal->setObjectName(QStringLiteral("ImageFlipHorizontal"));
+    flip_vertical->setObjectName(QStringLiteral("ImageFlipVertical"));
+    rotate_clockwise->setObjectName(QStringLiteral("ImageRotate90Clockwise"));
+    rotate_counter_clockwise->setObjectName(QStringLiteral("ImageRotate90CounterClockwise"));
+    rotate_180->setObjectName(QStringLiteral("ImageRotate180"));
     add_action(image, tr("Straighten..."), {}, [this] { show_effect_preview(tr("Straighten"), [](Document& doc, int amount) { apply_straighten(doc, static_cast<float>(amount - 50) * 0.4f, ResamplingMode::Bicubic); }); });
     add_action(image, tr("Rotate / Zoom..."), {}, [this] { show_effect_preview(tr("Rotate / Zoom"), [](Document& doc, int amount) { apply_rotate_zoom(doc, static_cast<float>(amount - 50) * 3.6f, 1.0f, 0, 0, ResamplingMode::Bicubic); }); });
 
@@ -1243,9 +1316,10 @@ void QtMainWindow::build_menus() {
 
 void QtMainWindow::build_docks() {
     build_tools_dock(); build_colors_dock(); build_layers_dock();
-    build_animation_dock(); build_history_dock(); build_model_dock(); build_preview_docks(); build_console_dock();
-    constexpr std::array<const char*, 5> canvas_only_dock_names = {
-        "ToolsDock", "ColorsDock", "ModelPreviewDock", "TilePreviewDock", "ModelDock"};
+    build_animation_dock(); build_history_dock(); build_model_dock(); build_preview_docks();
+    build_text_dock(); build_console_dock();
+    constexpr std::array<const char*, 6> canvas_only_dock_names = {
+        "ToolsDock", "ColorsDock", "ModelPreviewDock", "TilePreviewDock", "ModelDock", "TextDock"};
     canvas_only_docks_.clear();
     canvas_only_docks_.reserve(canvas_only_dock_names.size());
     for (const char* name : canvas_only_dock_names) {
@@ -1281,10 +1355,10 @@ void QtMainWindow::build_tools_dock() {
     tool_buttons_ = new QButtonGroup(this);
     tool_buttons_->setExclusive(true);
 
-    constexpr std::array<ToolType, 15> tools = {
+    constexpr std::array<ToolType, 16> tools = {
         ToolType::Pencil, ToolType::Brush, ToolType::Eraser, ToolType::Line, ToolType::Rectangle,
         ToolType::Ellipse, ToolType::Bucket, ToolType::Gradient, ToolType::Eyedropper, ToolType::CloneStamp,
-        ToolType::RectSelect, ToolType::LassoSelect, ToolType::MagicWand, ToolType::MovePixels, ToolType::Text
+        ToolType::RectSelect, ToolType::EllipseSelect, ToolType::LassoSelect, ToolType::MagicWand, ToolType::MovePixels, ToolType::Text
     };
     for (int index = 0; index < static_cast<int>(tools.size()); ++index) {
         const ToolType tool = tools[static_cast<std::size_t>(index)];
@@ -1301,6 +1375,9 @@ void QtMainWindow::build_tools_dock() {
     }
 
     connect(tool_buttons_, &QButtonGroup::idClicked, this, [this](int tool_id) {
+        if (static_cast<ToolType>(tool_id) != ToolType::Text) {
+            cancel_raster_text_edit(true);
+        }
         controller_.tool().tool = static_cast<ToolType>(tool_id);
         rebuild_tool_options();
         set_status(QString::fromUtf8(tool_name(controller_.tool().tool)));
@@ -1332,6 +1409,7 @@ void QtMainWindow::build_colors_dock() {
     dock->setObjectName(QStringLiteral("ColorsDock"));
     color_panel_ = new QtColorPanel(controller_);
     color_panel_->changed = [this] {
+        update_raster_text_preview();
         canvas_->update();
         set_status(tr("Primary %1  Secondary %2")
                        .arg(rgba_hex(qcolor(controller_.tool().primary)), rgba_hex(qcolor(controller_.tool().secondary))));
@@ -1381,9 +1459,7 @@ void QtMainWindow::build_layers_dock() {
         const int row = layers_list_->row(item);
         if (row < 0 || row >= static_cast<int>(controller_.document().layers.size())) return;
         const bool checked = item->checkState() == Qt::Checked;
-        Layer& layer = controller_.document().layers[static_cast<std::size_t>(row)];
-        if (layer.visible == checked) return;
-        layer.visible = checked;
+        if (!controller_.document().set_layer_visible(row, checked)) return;
         if (row == controller_.document().active_layer) {
             const QSignalBlocker blocker(visible);
             visible->setChecked(checked);
@@ -1394,21 +1470,21 @@ void QtMainWindow::build_layers_dock() {
         if (model_preview_ != nullptr) model_preview_->update();
         setWindowModified(controller_.modified());
     });
-    connect(layers_list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) { bool ok = false; const QString name = QInputDialog::getText(this, tr("Rename Layer"), tr("Name"), QLineEdit::Normal, item->text(), &ok); if (ok && !name.isEmpty()) { controller_.document().layers[static_cast<std::size_t>(layers_list_->row(item))].name = name.toStdString(); controller_.mark_changed("Rename Layer"); refresh_all(); } });
+    connect(layers_list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) { bool ok = false; const QString name = QInputDialog::getText(this, tr("Rename Layer"), tr("Name"), QLineEdit::Normal, item->text(), &ok); if (ok && controller_.document().set_layer_name(layers_list_->row(item), name.toStdString())) { controller_.mark_changed("Rename Layer"); refresh_all(); } });
     connect(add, &QToolButton::clicked, this, [this] { controller_.document().add_layer("Layer"); controller_.mark_changed("Add Layer"); refresh_all(); });
     connect(duplicate, &QToolButton::clicked, this, [this] { controller_.document().duplicate_layer(controller_.document().active_layer); controller_.mark_changed("Duplicate Layer"); refresh_all(); });
     connect(remove, &QToolButton::clicked, this, [this] { if (controller_.document().remove_layer(controller_.document().active_layer)) controller_.mark_changed("Remove Layer"); refresh_all(); });
     connect(up, &QToolButton::clicked, this, [this] { const int from = controller_.document().active_layer; controller_.document().move_layer(from, std::max(0, from - 1)); controller_.mark_changed("Move Layer"); refresh_all(); });
     connect(down, &QToolButton::clicked, this, [this] { const int from = controller_.document().active_layer; controller_.document().move_layer(from, std::min(static_cast<int>(controller_.document().layers.size()) - 1, from + 1)); controller_.mark_changed("Move Layer"); refresh_all(); });
-    connect(blend_mode_, &QComboBox::currentIndexChanged, this, [this](int index) { if (controller_.document().active_layer < static_cast<int>(controller_.document().layers.size())) { controller_.document().layers[static_cast<std::size_t>(controller_.document().active_layer)].blend_mode = static_cast<LayerBlendMode>(index); controller_.mark_changed("Blend Mode"); refresh_all(); } });
-    connect(opacity, &QSlider::valueChanged, this, [this](int value) { controller_.document().layers[static_cast<std::size_t>(controller_.document().active_layer)].opacity = static_cast<float>(value) / 100.0f; controller_.mark_changed("Layer Opacity"); refresh_all(); });
-    connect(visible, &QCheckBox::toggled, this, [this](bool checked) { controller_.document().layers[static_cast<std::size_t>(controller_.document().active_layer)].visible = checked; controller_.mark_changed("Layer Visibility"); refresh_all(); });
-    connect(clip, &QCheckBox::toggled, this, [this](bool checked) { controller_.document().layers[static_cast<std::size_t>(controller_.document().active_layer)].clip_to_below = checked; controller_.mark_changed("Layer Clipping"); refresh_all(); });
-    connect(mask, &QCheckBox::toggled, this, [this](bool checked) { Layer& layer = controller_.document().layers[static_cast<std::size_t>(controller_.document().active_layer)]; layer.mask_enabled = checked; if (checked && layer.mask.size() != controller_.document().active_cel().pixels.size()) layer.mask.assign(controller_.document().active_cel().pixels.size(), 255); controller_.mark_changed("Layer Mask"); refresh_all(); });
-    connect(reveal_mask, &QToolButton::clicked, this, [this] { Layer& layer = controller_.document().layers[static_cast<std::size_t>(controller_.document().active_layer)]; layer.mask.assign(controller_.document().active_cel().pixels.size(), 255); layer.mask_enabled = true; controller_.mark_changed("Reveal Mask"); refresh_all(); });
-    connect(hide_mask, &QToolButton::clicked, this, [this] { Layer& layer = controller_.document().layers[static_cast<std::size_t>(controller_.document().active_layer)]; layer.mask.assign(controller_.document().active_cel().pixels.size(), 0); layer.mask_enabled = true; controller_.mark_changed("Hide Mask"); refresh_all(); });
-    connect(selection_mask, &QToolButton::clicked, this, [this] { Layer& layer = controller_.document().layers[static_cast<std::size_t>(controller_.document().active_layer)]; layer.mask.resize(controller_.document().selection.mask.size()); for (std::size_t i = 0; i < layer.mask.size(); ++i) layer.mask[i] = controller_.document().selection.active && controller_.document().selection.mask[i] != 0 ? 255 : 0; layer.mask_enabled = true; controller_.mark_changed("Mask from Selection"); refresh_all(); });
-    connect(clear_mask, &QToolButton::clicked, this, [this] { Layer& layer = controller_.document().layers[static_cast<std::size_t>(controller_.document().active_layer)]; layer.mask.clear(); layer.mask_enabled = false; controller_.mark_changed("Clear Mask"); refresh_all(); });
+    connect(blend_mode_, &QComboBox::currentIndexChanged, this, [this](int index) { if (controller_.document().set_layer_blend_mode(controller_.document().active_layer, static_cast<LayerBlendMode>(index))) { controller_.mark_changed("Layer Blend Mode"); refresh_all(); } });
+    connect(opacity, &QSlider::valueChanged, this, [this](int value) { if (controller_.document().set_layer_opacity(controller_.document().active_layer, static_cast<float>(value) / 100.0f)) { controller_.mark_changed("Layer Opacity"); refresh_all(); } });
+    connect(visible, &QCheckBox::toggled, this, [this](bool checked) { if (controller_.document().set_layer_visible(controller_.document().active_layer, checked)) { controller_.mark_changed("Layer Visibility"); refresh_all(); } });
+    connect(clip, &QCheckBox::toggled, this, [this](bool checked) { if (controller_.document().set_layer_clipped(controller_.document().active_layer, checked)) { controller_.mark_changed("Layer Clipping"); refresh_all(); } });
+    connect(mask, &QCheckBox::toggled, this, [this](bool checked) { const int index = controller_.document().active_layer; if (index < 0 || index >= static_cast<int>(controller_.document().layers.size())) return; std::vector<std::uint8_t> values = controller_.document().layers[static_cast<std::size_t>(index)].mask; if (checked && values.size() != static_cast<std::size_t>(controller_.document().width * controller_.document().height)) values.assign(static_cast<std::size_t>(controller_.document().width * controller_.document().height), 255); if (controller_.document().set_layer_mask(index, std::move(values), checked, "Toggle Layer Mask")) { controller_.mark_changed("Toggle Layer Mask"); refresh_all(); } });
+    connect(reveal_mask, &QToolButton::clicked, this, [this] { std::vector<std::uint8_t> values(static_cast<std::size_t>(controller_.document().width * controller_.document().height), 255); if (controller_.document().set_layer_mask(controller_.document().active_layer, std::move(values), true, "Reveal Layer Mask")) { controller_.mark_changed("Reveal Layer Mask"); refresh_all(); } });
+    connect(hide_mask, &QToolButton::clicked, this, [this] { std::vector<std::uint8_t> values(static_cast<std::size_t>(controller_.document().width * controller_.document().height), 0); if (controller_.document().set_layer_mask(controller_.document().active_layer, std::move(values), true, "Hide Layer Mask")) { controller_.mark_changed("Hide Layer Mask"); refresh_all(); } });
+    connect(selection_mask, &QToolButton::clicked, this, [this] { std::vector<std::uint8_t> values(controller_.document().selection.mask.size(), 0); for (std::size_t i = 0; i < values.size(); ++i) values[i] = controller_.document().selection.active && controller_.document().selection.mask[i] != 0 ? 255 : 0; if (controller_.document().set_layer_mask(controller_.document().active_layer, std::move(values), true, "Mask from Selection")) { controller_.mark_changed("Mask from Selection"); refresh_all(); } });
+    connect(clear_mask, &QToolButton::clicked, this, [this] { if (controller_.document().set_layer_mask(controller_.document().active_layer, {}, false, "Clear Layer Mask")) { controller_.mark_changed("Clear Layer Mask"); refresh_all(); } });
     dock->setWidget(vertical_panel({layers_list_, layer_actions, visible, clip, blend_mode_, opacity, mask, mask_actions})); addDockWidget(Qt::RightDockWidgetArea, dock); docks_.push_back(dock);
 }
 
@@ -1556,16 +1632,53 @@ void QtMainWindow::build_animation_dock() {
 }
 
 void QtMainWindow::build_history_dock() {
-    auto* dock = new QDockWidget(tr("History"), this); dock->setObjectName(QStringLiteral("HistoryDock")); auto* undo = new QPushButton(tr("Undo")); auto* redo = new QPushButton(tr("Redo"));
-    connect(undo, &QPushButton::clicked, this, [this] { if (controller_.undo()) refresh_all(); }); connect(redo, &QPushButton::clicked, this, [this] { if (controller_.redo()) refresh_all(); });
-    dock->setWidget(vertical_panel({undo, redo, new QLabel(tr("Document history preserves operation labels and redo branches."))})); addDockWidget(Qt::LeftDockWidgetArea, dock); docks_.push_back(dock);
+    auto* dock = new QDockWidget(tr("History"), this);
+    dock->setObjectName(QStringLiteral("HistoryDock"));
+    history_list_ = new QListWidget;
+    history_list_->setObjectName(QStringLiteral("HistoryList"));
+    history_list_->setSelectionMode(QAbstractItemView::SingleSelection);
+    history_list_->setSortingEnabled(false);
+    auto* undo = new QPushButton(tr("Undo"));
+    undo->setObjectName(QStringLiteral("HistoryUndo"));
+    auto* redo = new QPushButton(tr("Redo"));
+    redo->setObjectName(QStringLiteral("HistoryRedo"));
+    auto* controls = new QWidget;
+    auto* controls_layout = new QHBoxLayout(controls);
+    controls_layout->setContentsMargins(0, 0, 0, 0);
+    controls_layout->addWidget(undo);
+    controls_layout->addWidget(redo);
+    connect(undo, &QPushButton::clicked, this, [this] { if (controller_.undo()) refresh_all(); });
+    connect(redo, &QPushButton::clicked, this, [this] { if (controller_.redo()) refresh_all(); });
+    connect(history_list_, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (row < 0) return;
+        const int available = static_cast<int>(controller_.document().undo_history_for_recovery().size() +
+                                               controller_.document().redo_history_for_recovery().size());
+        const int target = std::clamp(row, 0, available);
+        bool changed = false;
+        while (static_cast<int>(controller_.document().undo_history_for_recovery().size()) > target) {
+            if (!controller_.undo()) break;
+            changed = true;
+        }
+        while (static_cast<int>(controller_.document().undo_history_for_recovery().size()) < target) {
+            if (!controller_.redo()) break;
+            changed = true;
+        }
+        if (changed) refresh_all();
+    });
+    auto* explanation = new QLabel(tr("Select any entry to restore that document state. "
+                                      "Future redo states are shown in gray."));
+    explanation->setWordWrap(true);
+    dock->setWidget(vertical_panel({history_list_, controls, explanation}));
+    addDockWidget(Qt::LeftDockWidgetArea, dock);
+    docks_.push_back(dock);
+    refresh_history();
 }
 
 void QtMainWindow::build_model_dock() {
     auto* dock = new QDockWidget(tr("Cuboid / UV Editor"), this); dock->setObjectName(QStringLiteral("ModelDock")); model_list_ = new QListWidget; auto* add = new QPushButton(tr("Add Cuboid")); auto* remove = new QPushButton(tr("Remove")); auto* face = new QComboBox; for (int i = 0; i < 6; ++i) face->addItem(QString::fromUtf8(model_face_name(i)), i);
     connect(model_list_, &QListWidget::currentRowChanged, this, [this](int row) { if (row >= 0) controller_.model().selected_cuboid = row; });
-    connect(add, &QPushButton::clicked, this, [this] { controller_.model().add_cuboid(); controller_.mark_changed("Add Cuboid"); refresh_model(); });
-    connect(remove, &QPushButton::clicked, this, [this] { if (controller_.model().remove_selected()) controller_.mark_changed("Remove Cuboid"); refresh_model(); });
+    connect(add, &QPushButton::clicked, this, [this] { controller_.add_cuboid(); refresh_model(); });
+    connect(remove, &QPushButton::clicked, this, [this] { if (controller_.remove_selected_cuboid()) refresh_model(); });
     connect(face, &QComboBox::currentIndexChanged, this, [this](int index) { controller_.model().selected_face = index; });
     dock->setWidget(vertical_panel({model_list_, add, remove, face})); addDockWidget(Qt::LeftDockWidgetArea, dock); docks_.push_back(dock);
 }
@@ -1573,6 +1686,131 @@ void QtMainWindow::build_model_dock() {
 void QtMainWindow::build_preview_docks() {
     auto* tile = new QDockWidget(tr("Tile Preview"), this); tile->setObjectName(QStringLiteral("TilePreviewDock")); tile_preview_label_ = new QLabel(tr("Tile preview follows the active canvas.")); tile_preview_label_->setAlignment(Qt::AlignCenter); tile->setWidget(tile_preview_label_); addDockWidget(Qt::BottomDockWidgetArea, tile); docks_.push_back(tile); tile->hide();
     auto* model = new QDockWidget(tr("3D Preview"), this); model->setObjectName(QStringLiteral("ModelPreviewDock")); model_preview_ = new QtModelPreviewWidget(controller_); model_preview_->model_changed = [this] { refresh_model(); }; model->setWidget(model_preview_); addDockWidget(Qt::RightDockWidgetArea, model); docks_.push_back(model); model->hide();
+}
+
+void QtMainWindow::build_text_dock() {
+    text_dock_ = new QDockWidget(tr("Text"), this);
+    text_dock_->setObjectName(QStringLiteral("TextDock"));
+    text_dock_->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    text_dock_->setMinimumWidth(300);
+
+    auto* panel = new QWidget(text_dock_);
+    auto* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(8, 8, 8, 8);
+
+    raster_text_input_ = new QPlainTextEdit(panel);
+    raster_text_input_->setObjectName(QStringLiteral("RasterTextInput"));
+    raster_text_input_->setPlaceholderText(tr("Enter text…"));
+    raster_text_input_->setMaximumHeight(110);
+    layout->addWidget(raster_text_input_);
+
+    auto* options = new QWidget(panel);
+    auto* form = new QFormLayout(options);
+    form->setContentsMargins(0, 0, 0, 0);
+    QSettings preferences;
+
+    raster_text_font_ = new QFontComboBox(options);
+    raster_text_font_->setObjectName(QStringLiteral("RasterTextFont"));
+    raster_text_font_->setCurrentFont(QFont(preferences.value(
+        QStringLiteral("text/fontFamily"),
+        raster_text_font_->currentFont().family()).toString()));
+
+    raster_text_size_ = new QSpinBox(options);
+    raster_text_size_->setObjectName(QStringLiteral("RasterTextSize"));
+    raster_text_size_->setRange(1, 512);
+    raster_text_size_->setValue(std::clamp(
+        preferences.value(QStringLiteral("text/pixelSize"), 16).toInt(), 1, 512));
+    raster_text_size_->setSuffix(tr(" px"));
+
+    raster_text_box_width_ = std::max(
+        1, preferences.value(QStringLiteral("text/boxWidth"), 128).toInt());
+    raster_text_box_height_ = std::max(
+        1, preferences.value(QStringLiteral("text/boxHeight"), 64).toInt());
+
+    raster_text_alignment_ = new QComboBox(options);
+    raster_text_alignment_->setObjectName(QStringLiteral("RasterTextAlignment"));
+    raster_text_alignment_->addItem(tr("Left"), static_cast<int>(RasterTextAlignment::Left));
+    raster_text_alignment_->addItem(tr("Center"), static_cast<int>(RasterTextAlignment::Center));
+    raster_text_alignment_->addItem(tr("Right"), static_cast<int>(RasterTextAlignment::Right));
+    raster_text_alignment_->setCurrentIndex(std::clamp(
+        preferences.value(QStringLiteral("text/alignment"), 0).toInt(), 0, 2));
+
+    raster_text_bold_ = new QCheckBox(tr("Bold"), options);
+    raster_text_bold_->setObjectName(QStringLiteral("RasterTextBold"));
+    raster_text_bold_->setChecked(
+        preferences.value(QStringLiteral("text/bold"), false).toBool());
+    raster_text_italic_ = new QCheckBox(tr("Italic"), options);
+    raster_text_italic_->setObjectName(QStringLiteral("RasterTextItalic"));
+    raster_text_italic_->setChecked(
+        preferences.value(QStringLiteral("text/italic"), false).toBool());
+    raster_text_antialias_ = new QCheckBox(tr("Antialias"), options);
+    raster_text_antialias_->setObjectName(QStringLiteral("RasterTextAntialias"));
+    raster_text_antialias_->setChecked(
+        preferences.value(QStringLiteral("text/antialias"), false).toBool());
+
+    auto* styles = new QWidget(options);
+    auto* styles_layout = new QGridLayout(styles);
+    styles_layout->setContentsMargins(0, 0, 0, 0);
+    styles_layout->setHorizontalSpacing(12);
+    styles_layout->setVerticalSpacing(4);
+    styles_layout->addWidget(raster_text_bold_, 0, 0);
+    styles_layout->addWidget(raster_text_italic_, 0, 1);
+    styles_layout->addWidget(raster_text_antialias_, 1, 0, 1, 2);
+    styles_layout->setColumnStretch(1, 1);
+
+    form->addRow(tr("Font"), raster_text_font_);
+    form->addRow(tr("Pixel size"), raster_text_size_);
+    form->addRow(tr("Alignment"), raster_text_alignment_);
+    form->addRow(tr("Style"), styles);
+    layout->addWidget(options);
+
+    auto* buttons = new QWidget(panel);
+    auto* buttons_layout = new QHBoxLayout(buttons);
+    buttons_layout->setContentsMargins(0, 0, 0, 0);
+    buttons_layout->addStretch(1);
+    raster_text_cancel_ = new QPushButton(tr("Cancel"), buttons);
+    raster_text_cancel_->setObjectName(QStringLiteral("RasterTextCancel"));
+    raster_text_apply_ = new QPushButton(tr("Apply"), buttons);
+    raster_text_apply_->setObjectName(QStringLiteral("RasterTextApply"));
+    raster_text_apply_->setDefault(true);
+    raster_text_apply_->setEnabled(false);
+    raster_text_cancel_->setEnabled(false);
+    buttons_layout->addWidget(raster_text_cancel_);
+    buttons_layout->addWidget(raster_text_apply_);
+    layout->addWidget(buttons);
+    layout->addStretch(1);
+
+    connect(raster_text_input_, &QPlainTextEdit::textChanged, this,
+            &QtMainWindow::update_raster_text_preview);
+    const auto parameter_changed = [this] {
+        const RasterTextOptions options = current_raster_text_options();
+        persist_raster_text_options(options);
+        update_raster_text_preview();
+    };
+    connect(raster_text_font_, &QFontComboBox::currentFontChanged, this,
+            [parameter_changed](const QFont&) { parameter_changed(); });
+    connect(raster_text_size_, &QSpinBox::valueChanged, this,
+            [parameter_changed](int) { parameter_changed(); });
+    connect(raster_text_alignment_, &QComboBox::currentIndexChanged, this,
+            [parameter_changed](int) { parameter_changed(); });
+    connect(raster_text_bold_, &QCheckBox::toggled, this,
+            [parameter_changed](bool) { parameter_changed(); });
+    connect(raster_text_italic_, &QCheckBox::toggled, this,
+            [parameter_changed](bool) { parameter_changed(); });
+    connect(raster_text_antialias_, &QCheckBox::toggled, this,
+            [parameter_changed](bool) { parameter_changed(); });
+    connect(raster_text_apply_, &QPushButton::clicked, this,
+            &QtMainWindow::apply_raster_text_edit);
+    connect(raster_text_cancel_, &QPushButton::clicked, this,
+            [this] { cancel_raster_text_edit(false); });
+    connect(text_dock_, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+        if (!visible && raster_text_edit_active_) cancel_raster_text_edit(false);
+    });
+
+    text_dock_->setWidget(panel);
+    addDockWidget(Qt::RightDockWidgetArea, text_dock_);
+    docks_.push_back(text_dock_);
+    text_dock_->hide();
 }
 
 void QtMainWindow::build_console_dock() { auto* dock = new QDockWidget(tr("Error Console"), this); dock->setObjectName(QStringLiteral("ErrorConsoleDock")); console_list_ = new QListWidget; dock->setWidget(console_list_); addDockWidget(Qt::BottomDockWidgetArea, dock); docks_.push_back(dock); dock->hide(); }
@@ -1593,13 +1831,58 @@ void QtMainWindow::rebuild_tool_options() {
         row->setContentsMargins(0, 0, 0, 0);
         auto* text = new QLabel(label);
         tool_size_spin_ = new QSpinBox;
-        tool_size_spin_->setRange(1, 32);
+        tool_size_spin_->setRange(1, 256);
         tool_size_spin_->setValue(controller_.tool().brush_size);
         connect(tool_size_spin_, &QSpinBox::valueChanged, this, [this](int value) { controller_.tool().brush_size = value; });
         row->addWidget(text);
         row->addStretch(1);
         row->addWidget(tool_size_spin_);
         tool_options_layout_->addWidget(control);
+    };
+
+    auto add_brush_engine_controls = [this]() {
+        const auto add_percentage = [this](const QString& label, const QString& object_name,
+                                           int value, const std::function<void(int)>& changed,
+                                           int minimum = 0, int maximum = 100) {
+            auto* control = new QWidget;
+            auto* row = new QHBoxLayout(control);
+            row->setContentsMargins(0, 0, 0, 0);
+            auto* text = new QLabel(label);
+            auto* spin = new QSpinBox;
+            spin->setObjectName(object_name);
+            spin->setRange(minimum, maximum);
+            spin->setValue(value);
+            spin->setSuffix(tr(" %"));
+            connect(spin, &QSpinBox::valueChanged, this, changed);
+            row->addWidget(text);
+            row->addStretch(1);
+            row->addWidget(spin);
+            tool_options_layout_->addWidget(control);
+        };
+        add_percentage(tr("Opacity"), QStringLiteral("BrushOpacity"),
+                       static_cast<int>(std::lround(controller_.tool().brush_opacity * 100.0f)),
+                       [this](int value) { controller_.tool().brush_opacity = static_cast<float>(value) / 100.0f; }, 1);
+        add_percentage(tr("Hardness"), QStringLiteral("BrushHardness"),
+                       static_cast<int>(std::lround(controller_.tool().brush_hardness * 100.0f)),
+                       [this](int value) { controller_.tool().brush_hardness = static_cast<float>(value) / 100.0f; });
+        add_percentage(tr("Spacing"), QStringLiteral("BrushSpacing"),
+                       static_cast<int>(std::lround(controller_.tool().brush_spacing * 100.0f)),
+                       [this](int value) { controller_.tool().brush_spacing = static_cast<float>(value) / 100.0f; }, 1, 200);
+        add_percentage(tr("Smoothing"), QStringLiteral("BrushSmoothing"),
+                       static_cast<int>(std::lround(controller_.tool().brush_smoothing * 100.0f)),
+                       [this](int value) { controller_.tool().brush_smoothing = static_cast<float>(value) / 100.0f; });
+        auto* pressure_size = new QCheckBox(tr("Pressure controls size"));
+        pressure_size->setObjectName(QStringLiteral("BrushPressureSize"));
+        pressure_size->setChecked(controller_.tool().pressure_controls_size);
+        connect(pressure_size, &QCheckBox::toggled, this,
+                [this](bool checked) { controller_.tool().pressure_controls_size = checked; });
+        tool_options_layout_->addWidget(pressure_size);
+        auto* pressure_opacity = new QCheckBox(tr("Pressure controls opacity"));
+        pressure_opacity->setObjectName(QStringLiteral("BrushPressureOpacity"));
+        pressure_opacity->setChecked(controller_.tool().pressure_controls_opacity);
+        connect(pressure_opacity, &QCheckBox::toggled, this,
+                [this](bool checked) { controller_.tool().pressure_controls_opacity = checked; });
+        tool_options_layout_->addWidget(pressure_opacity);
     };
 
     auto add_tolerance_control = [this]() {
@@ -1627,9 +1910,11 @@ void QtMainWindow::rebuild_tool_options() {
             break;
         case ToolType::Brush:
             add_size_control(tr("Brush size"));
+            add_brush_engine_controls();
             break;
         case ToolType::Eraser:
             add_size_control(tr("Brush size"));
+            add_brush_engine_controls();
             break;
         case ToolType::Line:
             add_size_control(tr("Stroke width"));
@@ -1654,6 +1939,7 @@ void QtMainWindow::rebuild_tool_options() {
             tool_options_layout_->addWidget(clone_source_label_);
             break;
         case ToolType::RectSelect:
+        case ToolType::EllipseSelect:
             break;
         case ToolType::LassoSelect:
             break;
@@ -1661,6 +1947,55 @@ void QtMainWindow::rebuild_tool_options() {
             add_tolerance_control();
             break;
         case ToolType::MovePixels:
+            {
+                auto* controls = new QWidget;
+                auto* form = new QFormLayout(controls);
+                form->setContentsMargins(0, 0, 0, 0);
+                auto* scale_x = new QDoubleSpinBox;
+                scale_x->setObjectName(QStringLiteral("SelectionScaleX"));
+                scale_x->setRange(1.0, 1000.0);
+                scale_x->setValue(100.0);
+                scale_x->setSuffix(tr(" %"));
+                auto* scale_y = new QDoubleSpinBox;
+                scale_y->setObjectName(QStringLiteral("SelectionScaleY"));
+                scale_y->setRange(1.0, 1000.0);
+                scale_y->setValue(100.0);
+                scale_y->setSuffix(tr(" %"));
+                auto* rotation = new QDoubleSpinBox;
+                rotation->setObjectName(QStringLiteral("SelectionRotation"));
+                rotation->setRange(-180.0, 180.0);
+                rotation->setDecimals(1);
+                rotation->setSuffix(tr("°"));
+                auto* lock_aspect = new QCheckBox(tr("Lock scale ratio"));
+                lock_aspect->setObjectName(QStringLiteral("SelectionScaleLock"));
+                lock_aspect->setChecked(true);
+                connect(scale_x, &QDoubleSpinBox::valueChanged, controls,
+                        [scale_y, lock_aspect](double value) {
+                            if (!lock_aspect->isChecked()) return;
+                            const QSignalBlocker blocker(scale_y);
+                            scale_y->setValue(value);
+                        });
+                connect(scale_y, &QDoubleSpinBox::valueChanged, controls,
+                        [scale_x, lock_aspect](double value) {
+                            if (!lock_aspect->isChecked()) return;
+                            const QSignalBlocker blocker(scale_x);
+                            scale_x->setValue(value);
+                        });
+                form->addRow(tr("Scale X"), scale_x);
+                form->addRow(tr("Scale Y"), scale_y);
+                form->addRow(tr("Rotation"), rotation);
+                form->addRow(lock_aspect);
+                auto* apply = new QPushButton(tr("Apply transform"));
+                apply->setObjectName(QStringLiteral("SelectionTransformApply"));
+                connect(apply, &QPushButton::clicked, this, [this, scale_x, scale_y, rotation] {
+                    if (controller_.apply_selection_transform(
+                            static_cast<float>(scale_x->value() / 100.0),
+                            static_cast<float>(scale_y->value() / 100.0),
+                            static_cast<float>(rotation->value()))) refresh_all();
+                });
+                form->addRow(apply);
+                tool_options_layout_->addWidget(controls);
+            }
             break;
         case ToolType::Text:
             break;
@@ -1787,7 +2122,7 @@ void QtMainWindow::refresh_all(bool graph_source_changed) {
     canvas_->update();
     sync_graph_effect_source();
     if (model_preview_ != nullptr) model_preview_->update();
-    refresh_layers(); refresh_frames(); refresh_model(); refresh_selection_status();
+    refresh_layers(); refresh_frames(); refresh_model(); refresh_history(); refresh_selection_status();
     if (color_panel_ != nullptr) color_panel_->refresh_from_tool();
     if (tool_buttons_ != nullptr) {
         if (QAbstractButton* button = tool_buttons_->button(static_cast<int>(controller_.tool().tool)); button != nullptr) {
@@ -1830,6 +2165,41 @@ void QtMainWindow::refresh_frames() {
     frames_list_->setCurrentRow(controller_.document().active_frame);
 }
 void QtMainWindow::refresh_model() { if (model_list_ == nullptr) return; const QSignalBlocker blocker(model_list_); model_list_->clear(); for (const Cuboid& cuboid : controller_.model().cuboids) model_list_->addItem(QString::fromStdString(cuboid.name)); model_list_->setCurrentRow(controller_.model().selected_cuboid); }
+void QtMainWindow::refresh_history() {
+    if (history_list_ == nullptr) return;
+    const QSignalBlocker blocker(history_list_);
+    history_list_->setUpdatesEnabled(false);
+    history_list_->clear();
+    auto* initial = new QListWidgetItem(tr("History baseline"));
+    initial->setData(Qt::UserRole, 0);
+    history_list_->addItem(initial);
+    int state = 0;
+    for (const UndoCommand& command : controller_.document().undo_history_for_recovery()) {
+        ++state;
+        auto* item = new QListWidgetItem(QStringLiteral("%1  %2").arg(state).arg(QString::fromStdString(command.name)));
+        item->setData(Qt::UserRole, state);
+        history_list_->addItem(item);
+    }
+    const int current_state = state;
+    const auto& redo = controller_.document().redo_history_for_recovery();
+    for (auto command = redo.rbegin(); command != redo.rend(); ++command) {
+        ++state;
+        auto* item = new QListWidgetItem(QStringLiteral("%1  %2").arg(state).arg(QString::fromStdString(command->name)));
+        item->setData(Qt::UserRole, state);
+        item->setForeground(palette().color(QPalette::Disabled, QPalette::Text));
+        QFont font = item->font();
+        font.setItalic(true);
+        item->setFont(font);
+        history_list_->addItem(item);
+    }
+    history_list_->setCurrentRow(current_state);
+    if (QListWidgetItem* current = history_list_->currentItem(); current != nullptr) {
+        QFont font = current->font();
+        font.setBold(true);
+        current->setFont(font);
+    }
+    history_list_->setUpdatesEnabled(true);
+}
 void QtMainWindow::refresh_selection_status() {
     if (selection_geometry_label_ == nullptr) return;
 
@@ -2433,8 +2803,304 @@ void QtMainWindow::generate_depth_map() {
     else if (!cancel.load()) report_error(tr("Generate Depth Map"), error.message);
 }
 
-void QtMainWindow::import_model(const QString& kind) { const QString filter = kind.startsWith(QStringLiteral("STL")) ? tr("STL (*.stl)") : tr("JSON (*.json)"); const QString path = QFileDialog::getOpenFileName(this, tr("Import %1").arg(kind), {}, filter); if (path.isEmpty()) return; std::string error; bool ok = false; if (kind.startsWith(QStringLiteral("STL"))) ok = import_stl_model(path.toStdString(), controller_.model(), &error); else if (kind.startsWith(QStringLiteral("Minecraft"))) ok = import_minecraft_model(path.toStdString(), controller_.model(), &error); else ok = import_model_json(path.toStdString(), controller_.model(), &error); if (!ok) report_error(tr("Import %1").arg(kind), error); else { controller_.mark_changed("Import Model"); refresh_all(); } }
+void QtMainWindow::import_model(const QString& kind) { const QString filter = kind.startsWith(QStringLiteral("STL")) ? tr("STL (*.stl)") : tr("JSON (*.json)"); const QString path = QFileDialog::getOpenFileName(this, tr("Import %1").arg(kind), {}, filter); if (path.isEmpty()) return; ModelDocument before = controller_.model(); std::string error; bool ok = false; if (kind.startsWith(QStringLiteral("STL"))) ok = import_stl_model(path.toStdString(), controller_.model(), &error); else if (kind.startsWith(QStringLiteral("Minecraft"))) ok = import_minecraft_model(path.toStdString(), controller_.model(), &error); else ok = import_model_json(path.toStdString(), controller_.model(), &error); if (!ok) { controller_.model() = std::move(before); report_error(tr("Import %1").arg(kind), error); } else { controller_.commit_model_edit("Import Model", std::move(before)); refresh_all(); } }
 void QtMainWindow::export_model(const QString& kind) { QString extension = QStringLiteral("json"); if (kind.startsWith(QStringLiteral("glTF"))) extension = QStringLiteral("gltf"); if (kind.startsWith(QStringLiteral("Three"))) extension = QStringLiteral("zip"); if (kind.startsWith(QStringLiteral("STL"))) extension = QStringLiteral("stl"); const QString path = QFileDialog::getSaveFileName(this, tr("Export %1").arg(kind), QStringLiteral("model.") + extension); if (path.isEmpty()) return; std::string error; bool ok = false; if (kind.startsWith(QStringLiteral("glTF"))) ok = export_gltf_model(path.toStdString(), controller_.model(), "texture.png", &error); else if (kind.startsWith(QStringLiteral("Three"))) ok = export_threejs_pack(path.toStdString(), controller_.document(), controller_.model(), &error); else if (kind.startsWith(QStringLiteral("STL"))) ok = export_stl_model(path.toStdString(), controller_.model(), &error); else if (kind.startsWith(QStringLiteral("Minecraft"))) ok = export_minecraft_model(path.toStdString(), controller_.model(), "texture.png", &error); else ok = export_model_json(path.toStdString(), controller_.model(), &error); if (!ok) report_error(tr("Export %1").arg(kind), error); }
+
+void QtMainWindow::show_image_resize_dialog() {
+    const Document& document = controller_.document();
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("ImageResizeDialog"));
+    dialog.setWindowTitle(tr("Resize Image"));
+    QFormLayout form(&dialog);
+    QSpinBox width(&dialog);
+    width.setObjectName(QStringLiteral("ImageResizeWidth"));
+    width.setRange(1, 32768);
+    width.setValue(document.width);
+    QSpinBox height(&dialog);
+    height.setObjectName(QStringLiteral("ImageResizeHeight"));
+    height.setRange(1, 32768);
+    height.setValue(document.height);
+    QCheckBox aspect(tr("Preserve aspect ratio"), &dialog);
+    aspect.setObjectName(QStringLiteral("ImageResizeAspect"));
+    aspect.setChecked(true);
+    QComboBox resampling(&dialog);
+    resampling.setObjectName(QStringLiteral("ImageResizeResampling"));
+    resampling.addItem(tr("Nearest neighbor (pixel art)"), static_cast<int>(ResamplingMode::Nearest));
+    resampling.addItem(tr("Bilinear"), static_cast<int>(ResamplingMode::Bilinear));
+    resampling.addItem(tr("Bicubic"), static_cast<int>(ResamplingMode::Bicubic));
+    bool syncing = false;
+    connect(&width, &QSpinBox::valueChanged, &dialog, [&](int value) {
+        if (!aspect.isChecked() || syncing) return;
+        syncing = true;
+        height.setValue(std::max(1, static_cast<int>(std::lround(
+            static_cast<double>(value) * document.height / document.width))));
+        syncing = false;
+    });
+    connect(&height, &QSpinBox::valueChanged, &dialog, [&](int value) {
+        if (!aspect.isChecked() || syncing) return;
+        syncing = true;
+        width.setValue(std::max(1, static_cast<int>(std::lround(
+            static_cast<double>(value) * document.width / document.height))));
+        syncing = false;
+    });
+    form.addRow(tr("Width"), &width);
+    form.addRow(tr("Height"), &height);
+    form.addRow(&aspect);
+    form.addRow(tr("Resampling"), &resampling);
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons.setObjectName(QStringLiteral("ImageResizeButtons"));
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form.addRow(&buttons);
+    if (dialog.exec() != QDialog::Accepted) return;
+    if (!resize_document_image(controller_.document(), width.value(), height.value(),
+                               static_cast<ResamplingMode>(resampling.currentData().toInt()),
+                               &controller_.model())) {
+        set_status(tr("Resize Image: dimensions are unchanged or exceed the supported pixel limit"));
+        return;
+    }
+    controller_.mark_changed("Resize Image");
+    canvas_->fit_to_canvas();
+    refresh_all();
+}
+
+void QtMainWindow::show_canvas_resize_dialog() {
+    const Document& document = controller_.document();
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("CanvasResizeDialog"));
+    dialog.setWindowTitle(tr("Canvas Size"));
+    QFormLayout form(&dialog);
+    QSpinBox width(&dialog);
+    width.setObjectName(QStringLiteral("CanvasResizeWidth"));
+    width.setRange(1, 32768);
+    width.setValue(document.width);
+    QSpinBox height(&dialog);
+    height.setObjectName(QStringLiteral("CanvasResizeHeight"));
+    height.setRange(1, 32768);
+    height.setValue(document.height);
+    QComboBox anchor(&dialog);
+    anchor.setObjectName(QStringLiteral("CanvasResizeAnchor"));
+    for (const QString& label : {tr("Top left"), tr("Top center"), tr("Top right"),
+                                 tr("Middle left"), tr("Center"), tr("Middle right"),
+                                 tr("Bottom left"), tr("Bottom center"), tr("Bottom right")}) {
+        anchor.addItem(label);
+    }
+    anchor.setCurrentIndex(4);
+    form.addRow(tr("Width"), &width);
+    form.addRow(tr("Height"), &height);
+    form.addRow(tr("Anchor"), &anchor);
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons.setObjectName(QStringLiteral("CanvasResizeButtons"));
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form.addRow(&buttons);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const int column = anchor.currentIndex() % 3;
+    const int row = anchor.currentIndex() / 3;
+    const int horizontal_space = width.value() - document.width;
+    const int vertical_space = height.value() - document.height;
+    const int offset_x = column == 0 ? 0 : column == 1 ? horizontal_space / 2 : horizontal_space;
+    const int offset_y = row == 0 ? 0 : row == 1 ? vertical_space / 2 : vertical_space;
+    if (!resize_document_canvas(controller_.document(), width.value(), height.value(),
+                                offset_x, offset_y, &controller_.model())) {
+        set_status(tr("Canvas Size: dimensions are unchanged or exceed the supported pixel limit"));
+        return;
+    }
+    controller_.mark_changed("Resize Canvas");
+    canvas_->fit_to_canvas();
+    refresh_all();
+}
+
+void QtMainWindow::show_crop_dialog() {
+    const Document& document = controller_.document();
+    int initial_x = 0;
+    int initial_y = 0;
+    int initial_width = document.width;
+    int initial_height = document.height;
+    if (const auto bounds = document.selection.bounds(); bounds.has_value()) {
+        initial_x = (*bounds)[0];
+        initial_y = (*bounds)[1];
+        initial_width = (*bounds)[2] - (*bounds)[0] + 1;
+        initial_height = (*bounds)[3] - (*bounds)[1] + 1;
+    }
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("ImageCropDialog"));
+    dialog.setWindowTitle(tr("Crop Image"));
+    QFormLayout form(&dialog);
+    QSpinBox x(&dialog);
+    x.setObjectName(QStringLiteral("ImageCropX"));
+    x.setRange(0, document.width - 1);
+    x.setValue(initial_x);
+    QSpinBox y(&dialog);
+    y.setObjectName(QStringLiteral("ImageCropY"));
+    y.setRange(0, document.height - 1);
+    y.setValue(initial_y);
+    QSpinBox width(&dialog);
+    width.setObjectName(QStringLiteral("ImageCropWidth"));
+    width.setRange(1, document.width - initial_x);
+    width.setValue(initial_width);
+    QSpinBox height(&dialog);
+    height.setObjectName(QStringLiteral("ImageCropHeight"));
+    height.setRange(1, document.height - initial_y);
+    height.setValue(initial_height);
+    connect(&x, &QSpinBox::valueChanged, &dialog, [&](int value) {
+        width.setMaximum(document.width - value);
+    });
+    connect(&y, &QSpinBox::valueChanged, &dialog, [&](int value) {
+        height.setMaximum(document.height - value);
+    });
+    form.addRow(tr("Left"), &x);
+    form.addRow(tr("Top"), &y);
+    form.addRow(tr("Width"), &width);
+    form.addRow(tr("Height"), &height);
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons.setObjectName(QStringLiteral("ImageCropButtons"));
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form.addRow(&buttons);
+    if (dialog.exec() != QDialog::Accepted) return;
+    if (!crop_document(controller_.document(), x.value(), y.value(), width.value(), height.value(),
+                       &controller_.model())) {
+        set_status(tr("Crop Image: the crop is invalid or leaves the document unchanged"));
+        return;
+    }
+    controller_.mark_changed("Crop Image");
+    canvas_->fit_to_canvas();
+    refresh_all();
+}
+
+RasterTextOptions QtMainWindow::current_raster_text_options() const {
+    RasterTextOptions options;
+    if (raster_text_input_ == nullptr || raster_text_font_ == nullptr ||
+        raster_text_size_ == nullptr || raster_text_alignment_ == nullptr ||
+        raster_text_antialias_ == nullptr ||
+        raster_text_bold_ == nullptr || raster_text_italic_ == nullptr) {
+        return options;
+    }
+    options.text = raster_text_input_->toPlainText();
+    options.font_family = raster_text_font_->currentFont().family();
+    options.pixel_size = raster_text_size_->value();
+    options.box_width = raster_text_box_width_;
+    options.box_height = raster_text_box_height_;
+    options.alignment = static_cast<RasterTextAlignment>(
+        raster_text_alignment_->currentData().toInt());
+    options.antialias = raster_text_antialias_->isChecked();
+    options.bold = raster_text_bold_->isChecked();
+    options.italic = raster_text_italic_->isChecked();
+    return options;
+}
+
+void QtMainWindow::persist_raster_text_options(const RasterTextOptions& options) const {
+    QSettings preferences;
+    preferences.setValue(QStringLiteral("text/fontFamily"), options.font_family);
+    preferences.setValue(QStringLiteral("text/pixelSize"), options.pixel_size);
+    preferences.setValue(QStringLiteral("text/boxWidth"), options.box_width);
+    preferences.setValue(QStringLiteral("text/boxHeight"), options.box_height);
+    preferences.setValue(QStringLiteral("text/alignment"),
+                         raster_text_alignment_ == nullptr
+                             ? 0
+                             : raster_text_alignment_->currentIndex());
+    preferences.setValue(QStringLiteral("text/antialias"), options.antialias);
+    preferences.setValue(QStringLiteral("text/bold"), options.bold);
+    preferences.setValue(QStringLiteral("text/italic"), options.italic);
+}
+
+void QtMainWindow::begin_raster_text_edit(int x, int y, bool secondary) {
+    Document& document = controller_.document();
+    if (!document.in_bounds(x, y) || text_dock_ == nullptr ||
+        raster_text_input_ == nullptr) {
+        return;
+    }
+    if (document.floating_selection.active) {
+        static_cast<void>(controller_.commit_pasted_selection());
+    }
+    raster_text_x_ = x;
+    raster_text_y_ = y;
+    raster_text_secondary_ = secondary;
+    raster_text_edit_active_ = true;
+    raster_text_box_width_ = std::clamp(
+        raster_text_box_width_, 1, std::max(1, document.width - x));
+    raster_text_box_height_ = std::clamp(
+        raster_text_box_height_, 1, std::max(1, document.height - y));
+    raster_text_cancel_->setEnabled(true);
+    text_dock_->show();
+    text_dock_->raise();
+    raster_text_input_->setFocus();
+    update_raster_text_preview();
+}
+
+void QtMainWindow::update_raster_text_preview() {
+    if (canvas_ == nullptr || raster_text_apply_ == nullptr ||
+        raster_text_cancel_ == nullptr) {
+        return;
+    }
+    const RasterTextOptions options = current_raster_text_options();
+    if (raster_text_edit_active_) {
+        canvas_->set_raster_text_box(raster_text_x_, raster_text_y_,
+                                     raster_text_box_width_,
+                                     raster_text_box_height_);
+    }
+    const bool valid = raster_text_edit_active_ && !options.text.trimmed().isEmpty() &&
+                       controller_.document().in_bounds(raster_text_x_, raster_text_y_);
+    raster_text_apply_->setEnabled(valid);
+    raster_text_cancel_->setEnabled(raster_text_edit_active_);
+    if (!valid) {
+        canvas_->clear_raster_text_preview();
+        return;
+    }
+
+    const Document& document = controller_.document();
+    const Pixel color = raster_text_secondary_ ? controller_.tool().secondary
+                                               : controller_.tool().primary;
+    RasterTextImage preview = rasterize_text(
+        options, color, document.width - raster_text_x_,
+        document.height - raster_text_y_);
+    if (document.selection.active) {
+        for (int source_y = 0; source_y < preview.height; ++source_y) {
+            for (int source_x = 0; source_x < preview.width; ++source_x) {
+                if (!document.selection.contains(raster_text_x_ + source_x,
+                                                 raster_text_y_ + source_y)) {
+                    preview.pixels[static_cast<std::size_t>(
+                        source_y * preview.width + source_x)] = 0;
+                }
+            }
+        }
+    }
+    canvas_->set_raster_text_preview(raster_text_x_, raster_text_y_,
+                                     std::move(preview));
+}
+
+void QtMainWindow::apply_raster_text_edit() {
+    if (!raster_text_edit_active_) return;
+    const RasterTextOptions options = current_raster_text_options();
+    const Pixel color = raster_text_secondary_ ? controller_.tool().secondary
+                                               : controller_.tool().primary;
+    std::string error;
+    if (!stamp_raster_text(controller_.document(), raster_text_x_, raster_text_y_,
+                           options, color, &error)) {
+        report_error(tr("Raster Text"), error);
+        return;
+    }
+    persist_raster_text_options(options);
+    raster_text_edit_active_ = false;
+    canvas_->clear_raster_text_preview();
+    canvas_->clear_raster_text_box();
+    canvas_->unsetCursor();
+    raster_text_apply_->setEnabled(false);
+    raster_text_cancel_->setEnabled(false);
+    controller_.mark_changed("Raster Text");
+    refresh_all();
+}
+
+void QtMainWindow::cancel_raster_text_edit(bool hide_dock) {
+    raster_text_edit_active_ = false;
+    if (canvas_ != nullptr) canvas_->clear_raster_text_preview();
+    if (canvas_ != nullptr) canvas_->clear_raster_text_box();
+    if (canvas_ != nullptr) canvas_->unsetCursor();
+    if (raster_text_apply_ != nullptr) raster_text_apply_->setEnabled(false);
+    if (raster_text_cancel_ != nullptr) raster_text_cancel_->setEnabled(false);
+    if (hide_dock && text_dock_ != nullptr) text_dock_->hide();
+}
 
 void QtMainWindow::apply_transform(const QString& name, const std::function<void(Document&)>& operation) { operation(controller_.document()); controller_.mark_changed(name.toStdString()); refresh_all(); }
 QAction* QtMainWindow::add_effect_action(QMenu* menu, const QString& name, EffectOperation operation,
@@ -2949,9 +3615,15 @@ void QtMainWindow::check_for_updates() {
 
 void QtMainWindow::restore_ui_state() {
     QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
-    restoreGeometry(state.value(QStringLiteral("windowGeometry")).toByteArray());
-    const QByteArray window_state = state.value(QStringLiteral("windowState")).toByteArray();
-    if (!window_state.isEmpty() && !restoreState(window_state, kWindowStateVersion)) {
+    if (state.contains(QStringLiteral("windowGeometry"))) {
+        restoreGeometry(state.value(QStringLiteral("windowGeometry")).toByteArray());
+    }
+
+    const bool has_saved_state = state.contains(QStringLiteral("windowState"));
+    const QByteArray window_state = has_saved_state
+                                        ? state.value(QStringLiteral("windowState")).toByteArray()
+                                        : bundled_default_window_state();
+    if (!restoreState(window_state, kWindowStateVersion) && has_saved_state) {
         state.remove(QStringLiteral("windowState"));
     }
 }

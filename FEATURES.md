@@ -18,12 +18,13 @@ change is incomplete if it removes or changes any behavior listed here.
 
 - Display transparency checkerboard, pixel grid, onion skin, UV overlays, tiled previews, nearest-neighbor pixels, and large-image level-of-detail data.
 - Zoom around the pointer, zoom in/out, use actual size, fit the document, and pan with the middle button or Space-drag.
-- Draw with Pencil, Brush, Eraser, Line, Rectangle, Ellipse, Bucket, Gradient, Eyedropper, Clone Stamp, Rectangle Select, Lasso Select, Magic Wand, Move Pixels, and Text.
-- Configure primary/secondary colors, brush size, tolerance, contiguous matching, clone source, mask editing, and mask overlay.
+- Draw with Pencil, Brush, Eraser, Line, Rectangle, Ellipse, Bucket, Gradient, Eyedropper, Clone Stamp, Rectangle Select, Ellipse Select, Lasso Select, Magic Wand, Move Pixels, and Text.
+- Edit raster text in a non-modal dock with a live canvas preview and an eight-handle resizable text box that controls wrapping and clipping; Apply commits one destructive history operation and Cancel leaves the document unchanged.
+- Configure primary/secondary colors, brush size, opacity, hardness, spacing, smoothing, pressure-to-size, pressure-to-opacity, tolerance, contiguous matching, clone source, mask editing, and mask overlay.
 - Preview drag tools live; constrain rectangles and ellipses to 1:1 and lines to 45-degree increments with Ctrl/Cmd.
 - Use the secondary color/action with the right button and adjust brush size with the bracket keys.
 - Replace, add, subtract, intersect, or invert selections with pointer-button and modifier combinations.
-- Select all, deselect, invert, delete, nudge, float, move, commit, or cancel selected pixels.
+- Select all, deselect, invert, expand, contract, border, smooth, delete, nudge, float, move, scale, rotate, commit, or cancel selected pixels.
 
 ## Layers, Masks, and Color
 
@@ -35,8 +36,8 @@ change is incomplete if it removes or changes any behavior listed here.
 
 ## History and Transforms
 
-- Undo and redo document and model operations with Ctrl/Cmd shortcuts and the branched history view.
-- Preserve labeled branches, preferred redo paths, bounded pruning, and lightweight disk-backed history for very large documents.
+- Undo and redo document and model operations with Ctrl/Cmd shortcuts and a selectable chronological history list.
+- Preserve up to 128 linear labeled operations, clear the redo path after a new edit, and spill large dense pixel payloads to a private disk journal.
 - Flip horizontally or vertically and rotate 90 degrees clockwise/counter-clockwise or 180 degrees.
 - Straighten interactively and preview rotate, zoom, pan, and Nearest/Bilinear/Bicubic resampling before applying or cancelling.
 

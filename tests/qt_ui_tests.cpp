@@ -6,6 +6,7 @@
 #include "ui/GraphEffectWidget.hpp"
 #include "ui/QtCanvasWidget.hpp"
 #include "ui/QtMainWindow.hpp"
+#include "ui/TextRasterizer.hpp"
 
 #include <QAbstractButton>
 #include <QAction>
@@ -20,14 +21,18 @@
 #include <QFileInfo>
 #include <QGraphicsView>
 #include <QGridLayout>
+#include <QImage>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSettings>
 #include <QSlider>
+#include <QSpinBox>
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTest>
@@ -36,6 +41,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <vector>
@@ -91,7 +97,7 @@ private slots:
         QVERIFY(window.findChild<QWidget*>(QStringLiteral("GraphEffectWidget")) != nullptr);
         QVERIFY(window.findChild<QMenu*>(QStringLiteral("AdjustmentsMenu")) != nullptr);
         for (const char* name : {"ToolsDock", "ColorsDock", "LayersDock", "AnimationDock",
-                                 "HistoryDock", "ModelDock", "ErrorConsoleDock"}) {
+                                 "HistoryDock", "ModelDock", "TextDock", "ErrorConsoleDock"}) {
             QVERIFY2(window.findChild<QDockWidget*>(QString::fromLatin1(name)) != nullptr, name);
         }
         QVERIFY(window.findChild<QLabel*>(QStringLiteral("PointerCoordinatesLabel")) != nullptr);
@@ -101,6 +107,11 @@ private slots:
         QVERIFY(window.findChild<QAction*>(QStringLiteral("EditPaste")) != nullptr);
         QVERIFY(window.findChild<QAction*>(QStringLiteral("ExportAnimationGif")) != nullptr);
         QVERIFY(window.findChild<QAction*>(QStringLiteral("ExportAnimationMp4")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("ImageResize")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("CanvasResize")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("ImageCrop")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("ImageFlipHorizontal")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("ImageRotate90Clockwise")) != nullptr);
         QVERIFY(window.findChild<QAction*>(QStringLiteral("OptionsFfmpegExecutable")) != nullptr);
         QVERIFY(window.findChild<QAction*>(QStringLiteral("OptionsFfmpegAutoDetect")) != nullptr);
         QVERIFY(window.findChild<QAction*>(QStringLiteral("OptionsHeavyGpu")) != nullptr);
@@ -114,6 +125,221 @@ private slots:
         window.show();
         QApplication::processEvents();
         QVERIFY(window.isVisible());
+    }
+
+    void first_launch_uses_the_bundled_window_layout() {
+        QSettings state(QStringLiteral("PixelArt98"), QStringLiteral("PixelArt98"));
+        state.remove(QStringLiteral("windowGeometry"));
+        state.remove(QStringLiteral("windowState"));
+        state.sync();
+
+        {
+            QtMainWindow window(cpu_settings());
+            window.show();
+            QApplication::processEvents();
+
+            const auto dock = [&window](const char* name) {
+                return window.findChild<QDockWidget*>(QString::fromLatin1(name));
+            };
+            QDockWidget* tools = dock("ToolsDock");
+            QDockWidget* colors = dock("ColorsDock");
+            QDockWidget* layers = dock("LayersDock");
+            QDockWidget* history = dock("HistoryDock");
+            QDockWidget* animation = dock("AnimationDock");
+            QDockWidget* model = dock("ModelDock");
+            QDockWidget* model_preview = dock("ModelPreviewDock");
+            QDockWidget* tile_preview = dock("TilePreviewDock");
+            QDockWidget* text = dock("TextDock");
+            QDockWidget* console = dock("ErrorConsoleDock");
+            for (QDockWidget* widget : {tools, colors, layers, history, animation, model,
+                                        model_preview, tile_preview, text, console}) {
+                QVERIFY(widget != nullptr);
+            }
+
+            QCOMPARE(window.dockWidgetArea(tools), Qt::LeftDockWidgetArea);
+            QCOMPARE(window.dockWidgetArea(colors), Qt::LeftDockWidgetArea);
+            QCOMPARE(window.dockWidgetArea(layers), Qt::RightDockWidgetArea);
+            QCOMPARE(window.dockWidgetArea(history), Qt::RightDockWidgetArea);
+            QVERIFY(!tools->isHidden());
+            QVERIFY(!colors->isHidden());
+            QVERIFY(!layers->isHidden());
+            QVERIFY(!history->isHidden());
+            QVERIFY(animation->isHidden());
+            QVERIFY(model->isHidden());
+            QVERIFY(model->isFloating());
+            QVERIFY(model_preview->isHidden());
+            QVERIFY(tile_preview->isHidden());
+            QVERIFY(text->isHidden());
+            QVERIFY(console->isHidden());
+            QVERIFY(colors->width() > tools->width());
+            QVERIFY(layers->height() > history->height());
+
+            // A subsequently saved user layout must take precedence over the
+            // bundled first-launch default.
+            window.addDockWidget(Qt::BottomDockWidgetArea, colors);
+            history->hide();
+            state.setValue(QStringLiteral("windowState"), window.saveState(1));
+            state.sync();
+        }
+
+        state.sync();
+        {
+            QtMainWindow restored(cpu_settings());
+            auto* colors =
+                restored.findChild<QDockWidget*>(QStringLiteral("ColorsDock"));
+            auto* history =
+                restored.findChild<QDockWidget*>(QStringLiteral("HistoryDock"));
+            QVERIFY(colors != nullptr);
+            QVERIFY(history != nullptr);
+            QCOMPARE(restored.dockWidgetArea(colors), Qt::BottomDockWidgetArea);
+            QVERIFY(history->isHidden());
+        }
+    }
+
+    void raster_text_supports_real_fonts_sizes_alignment_and_undo() {
+        Document document = Document::create(96, 48);
+        RasterTextOptions options;
+        options.text = QStringLiteral("Pixel\nArt");
+        options.font_family = QApplication::font().family();
+        options.pixel_size = 14;
+        options.box_width = 72;
+        options.box_height = 32;
+        options.alignment = RasterTextAlignment::Center;
+        options.bold = true;
+        options.antialias = false;
+        const RasterTextImage image = rasterize_text(options, rgba(240, 20, 10, 255), 72, 48);
+        QVERIFY(image.width == 72);
+        QCOMPARE(image.height, 32);
+        QVERIFY(std::any_of(image.pixels.begin(), image.pixels.end(),
+                            [](Pixel pixel) { return a(pixel) != 0; }));
+        std::string error;
+        QVERIFY(stamp_raster_text(document, 4, 3, options, rgba(240, 20, 10, 255), &error));
+        QVERIFY(std::any_of(document.active_cel().pixels.begin(), document.active_cel().pixels.end(),
+                            [](Pixel pixel) { return a(pixel) != 0; }));
+        QVERIFY(document.undo());
+        QVERIFY(std::all_of(document.active_cel().pixels.begin(), document.active_cel().pixels.end(),
+                            [](Pixel pixel) { return pixel == 0; }));
+        QVERIFY(document.redo());
+        QVERIFY(std::any_of(document.active_cel().pixels.begin(), document.active_cel().pixels.end(),
+                            [](Pixel pixel) { return a(pixel) != 0; }));
+    }
+
+    void raster_text_dock_updates_the_canvas_live_before_apply() {
+        QtMainWindow window(cpu_settings());
+        window.replace_document_for_testing(Document::create(32, 24));
+        window.show();
+        QApplication::processEvents();
+
+        auto* canvas = dynamic_cast<QtCanvasWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("CanvasWidget")));
+        auto* tools = window.findChild<QButtonGroup*>();
+        auto* dock = window.findChild<QDockWidget*>(QStringLiteral("TextDock"));
+        auto* input = window.findChild<QPlainTextEdit*>(QStringLiteral("RasterTextInput"));
+        auto* size = window.findChild<QSpinBox*>(QStringLiteral("RasterTextSize"));
+        auto* antialias =
+            window.findChild<QCheckBox*>(QStringLiteral("RasterTextAntialias"));
+        auto* apply = window.findChild<QPushButton*>(QStringLiteral("RasterTextApply"));
+        auto* cancel = window.findChild<QPushButton*>(QStringLiteral("RasterTextCancel"));
+        QVERIFY(canvas != nullptr);
+        QVERIFY(tools != nullptr);
+        QVERIFY(dock != nullptr);
+        QVERIFY(input != nullptr);
+        QVERIFY(size != nullptr);
+        QVERIFY(antialias != nullptr);
+        QVERIFY(apply != nullptr);
+        QVERIFY(cancel != nullptr);
+        QVERIFY(window.findChild<QSpinBox*>(QStringLiteral("RasterTextWidth")) == nullptr);
+        QVERIFY(window.findChild<QDialog*>(QStringLiteral("RasterTextDialog")) == nullptr);
+
+        QAbstractButton* text_tool = tools->button(static_cast<int>(ToolType::Text));
+        QVERIFY(text_tool != nullptr);
+        text_tool->click();
+        QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, canvas->rect().center());
+        QApplication::processEvents();
+        QVERIFY(dock->isVisible());
+        QVERIFY(QApplication::activeModalWidget() == nullptr);
+        QVERIFY(antialias->width() >= antialias->sizeHint().width());
+        QVERIFY(!canvas->has_raster_text_preview());
+        QVERIFY(canvas->has_raster_text_box());
+        size->setValue(8);
+
+        input->setPlainText(QStringLiteral("Live preview"));
+        QTRY_VERIFY(canvas->has_raster_text_preview());
+        QVERIFY(apply->isEnabled());
+        QVERIFY(std::all_of(window.document().active_cel().pixels.begin(),
+                            window.document().active_cel().pixels.end(),
+                            [](Pixel pixel) { return pixel == 0; }));
+        QVERIFY(window.document().undo_history_for_recovery().empty());
+
+        const int revision = canvas->raster_text_preview_revision();
+        size->setValue(std::min(size->maximum(), size->value() + 7));
+        QTRY_VERIFY(canvas->raster_text_preview_revision() > revision);
+        QVERIFY(canvas->has_raster_text_preview());
+        QVERIFY(std::any_of(canvas->raster_text_preview().pixels.begin(),
+                            canvas->raster_text_preview().pixels.end(),
+                            [](Pixel pixel) { return a(pixel) != 0; }));
+
+        const QRect initial_box = canvas->raster_text_box();
+        const auto canvas_boundary = [canvas](double x, double y) {
+            const QPointF center(static_cast<double>(canvas->width()) * 0.5,
+                                 static_cast<double>(canvas->height()) * 0.5);
+            return QPoint(
+                static_cast<int>(std::lround(center.x() + (x - 16.0) * canvas->zoom())),
+                static_cast<int>(std::lround(center.y() + (y - 12.0) * canvas->zoom())));
+        };
+        const QPoint south_east = canvas_boundary(
+            initial_box.x() + initial_box.width(),
+            initial_box.y() + initial_box.height());
+        const QPoint smaller = canvas_boundary(
+            initial_box.x() + initial_box.width() - 4,
+            initial_box.y() + initial_box.height() - 3);
+        const int resize_revision = canvas->raster_text_preview_revision();
+        QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, south_east);
+        QTest::mouseMove(canvas, smaller);
+        QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, smaller);
+        const QRect resized_box = canvas->raster_text_box();
+        QVERIFY(resized_box.width() < initial_box.width());
+        QVERIFY(resized_box.height() < initial_box.height());
+        QVERIFY(canvas->raster_text_preview_revision() > resize_revision);
+        QCOMPARE(canvas->raster_text_preview().width, resized_box.width());
+        QCOMPARE(canvas->raster_text_preview().height, resized_box.height());
+
+        apply->click();
+        QVERIFY(!canvas->has_raster_text_preview());
+        QVERIFY(window.document().undo_history_for_recovery().size() == 1U);
+        QVERIFY(std::any_of(window.document().active_cel().pixels.begin(),
+                            window.document().active_cel().pixels.end(),
+                            [](Pixel pixel) { return a(pixel) != 0; }));
+        const std::vector<Pixel> applied = window.document().active_cel().pixels;
+
+        QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier,
+                          canvas->rect().center() - QPoint(80, 40));
+        input->setPlainText(QStringLiteral("Cancel this preview"));
+        QTRY_VERIFY(canvas->has_raster_text_preview());
+        cancel->click();
+        QVERIFY(!canvas->has_raster_text_preview());
+        QVERIFY(!canvas->has_raster_text_box());
+        QVERIFY(window.document().active_cel().pixels == applied);
+        QVERIFY(window.document().undo_history_for_recovery().size() == 1U);
+    }
+
+    void document_geometry_dialogs_expose_complete_controls() {
+        QtMainWindow window(cpu_settings());
+        struct DialogCase { const char* action; const char* dialog; const char* control; };
+        const std::array<DialogCase, 3> cases = {{{"ImageResize", "ImageResizeDialog", "ImageResizeResampling"},
+                                                  {"CanvasResize", "CanvasResizeDialog", "CanvasResizeAnchor"},
+                                                  {"ImageCrop", "ImageCropDialog", "ImageCropWidth"}}};
+        for (const DialogCase& test : cases) {
+            auto* action = window.findChild<QAction*>(QString::fromLatin1(test.action));
+            QVERIFY(action != nullptr);
+            QTimer::singleShot(0, &window, [&window, test] {
+                auto* dialog = window.findChild<QDialog*>(QString::fromLatin1(test.dialog));
+                QVERIFY(dialog != nullptr);
+                QVERIFY(dialog->findChild<QWidget*>(QString::fromLatin1(test.control)) != nullptr);
+                dialog->reject();
+            });
+            action->trigger();
+        }
     }
 
     void option_changes_are_saved_immediately_in_pixelart_home() {
@@ -279,9 +505,10 @@ private slots:
         QVERIFY(workspace != nullptr);
         QCOMPARE(workspace->currentIndex(), 0);
 
-        const std::array<const char*, 5> canvas_only_dock_names = {
-            "ToolsDock", "ColorsDock", "ModelPreviewDock", "TilePreviewDock", "ModelDock"};
-        std::array<QDockWidget*, 5> canvas_only_docks{};
+        const std::array<const char*, 6> canvas_only_dock_names = {
+            "ToolsDock", "ColorsDock", "ModelPreviewDock", "TilePreviewDock", "ModelDock",
+            "TextDock"};
+        std::array<QDockWidget*, 6> canvas_only_docks{};
         for (std::size_t index = 0; index < canvas_only_dock_names.size(); ++index) {
             canvas_only_docks[index] = window.findChild<QDockWidget*>(
                 QString::fromLatin1(canvas_only_dock_names[index]));
@@ -359,6 +586,82 @@ private slots:
         QTest::mouseMove(canvas, end);
         QTRY_VERIFY(selection->text().endsWith(QStringLiteral("· 5 × 4")));
         QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, end);
+    }
+
+    void history_selection_transform_and_brush_controls_are_real() {
+        QtMainWindow window(cpu_settings());
+        window.replace_document_for_testing(Document::create(16, 16));
+        window.show();
+        QApplication::processEvents();
+
+        auto* canvas = dynamic_cast<QtCanvasWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("CanvasWidget")));
+        auto* history = window.findChild<QListWidget*>(QStringLiteral("HistoryList"));
+        auto* history_undo = window.findChild<QPushButton*>(QStringLiteral("HistoryUndo"));
+        auto* history_redo = window.findChild<QPushButton*>(QStringLiteral("HistoryRedo"));
+        QVERIFY(canvas != nullptr);
+        QVERIFY(history != nullptr);
+        QVERIFY(history_undo != nullptr);
+        QVERIFY(history_redo != nullptr);
+        QCOMPARE(history->count(), 1);
+        QCOMPARE(history->item(0)->text(), QStringLiteral("History baseline"));
+
+        canvas->setFocus();
+        QTest::keySequence(canvas, QKeySequence(QKeySequence::SelectAll));
+        QTRY_COMPARE(history->count(), 2);
+        QVERIFY(history->item(1)->text().contains(QStringLiteral("Select All")));
+        QVERIFY(window.document().selection.active);
+        history->setCurrentRow(0);
+        QTRY_VERIFY(!window.document().selection.active);
+        QCOMPARE(history->currentRow(), 0);
+        QVERIFY(history->item(1)->font().italic());
+        history->setCurrentRow(1);
+        QTRY_VERIFY(window.document().selection.active);
+        QCOMPARE(history->currentRow(), 1);
+
+        QVERIFY(window.findChild<QMenu*>(QStringLiteral("SelectionMenu")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("SelectionExpand")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("SelectionContract")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("SelectionBorder")) != nullptr);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("SelectionSmooth")) != nullptr);
+
+        auto* tools = window.findChild<QButtonGroup*>();
+        QVERIFY(tools != nullptr);
+        QAbstractButton* ellipse_select = tools->button(static_cast<int>(ToolType::EllipseSelect));
+        QAbstractButton* move_pixels = tools->button(static_cast<int>(ToolType::MovePixels));
+        QAbstractButton* brush = tools->button(static_cast<int>(ToolType::Brush));
+        QVERIFY(ellipse_select != nullptr);
+        QVERIFY(move_pixels != nullptr);
+        QVERIFY(brush != nullptr);
+
+        ellipse_select->click();
+        QCOMPARE(ellipse_select->isChecked(), true);
+        move_pixels->click();
+        QVERIFY(window.findChild<QLabel*>(QStringLiteral("SelectionTransformHelp")) == nullptr);
+        QVERIFY(window.findChild<QDoubleSpinBox*>(QStringLiteral("SelectionScaleX")) != nullptr);
+        QVERIFY(window.findChild<QDoubleSpinBox*>(QStringLiteral("SelectionScaleY")) != nullptr);
+        QVERIFY(window.findChild<QDoubleSpinBox*>(QStringLiteral("SelectionRotation")) != nullptr);
+        QVERIFY(window.findChild<QPushButton*>(QStringLiteral("SelectionTransformApply")) != nullptr);
+
+        brush->click();
+        QVERIFY(window.findChild<QSpinBox*>(QStringLiteral("BrushOpacity")) != nullptr);
+        QVERIFY(window.findChild<QSpinBox*>(QStringLiteral("BrushHardness")) != nullptr);
+        QVERIFY(window.findChild<QSpinBox*>(QStringLiteral("BrushSpacing")) != nullptr);
+        QVERIFY(window.findChild<QSpinBox*>(QStringLiteral("BrushSmoothing")) != nullptr);
+        QVERIFY(window.findChild<QCheckBox*>(QStringLiteral("BrushPressureSize")) != nullptr);
+        QVERIFY(window.findChild<QCheckBox*>(QStringLiteral("BrushPressureOpacity")) != nullptr);
+    }
+
+    void selection_transform_frame_does_not_cover_floating_content() {
+        const QColor content_color(190, 35, 55, 255);
+        QImage rendered(120, 120, QImage::Format_RGBA8888);
+        rendered.fill(content_color);
+        {
+            QPainter painter(&rendered);
+            QtCanvasWidget::paint_selection_transform_frame(
+                painter, QRectF(20.0, 30.0, 80.0, 70.0));
+        }
+        QCOMPARE(rendered.pixelColor(QPoint(60, 65)), content_color);
     }
 
     void layer_visibility_is_synchronized_in_both_directions() {

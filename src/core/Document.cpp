@@ -77,6 +77,33 @@ void SelectionMask::select_rect(int x0, int y0, int x1, int y1, SelectionCombine
     combine_with_mask(source, mode);
 }
 
+void SelectionMask::select_ellipse(int x0, int y0, int x1, int y1,
+                                   SelectionCombineMode mode) {
+    if (width <= 0 || height <= 0) {
+        active = false;
+        return;
+    }
+    std::vector<std::uint8_t> source(mask.size(), 0);
+    const int min_x = std::min(x0, x1);
+    const int max_x = std::max(x0, x1);
+    const int min_y = std::min(y0, y1);
+    const int max_y = std::max(y0, y1);
+    const double center_x = (static_cast<double>(min_x) + static_cast<double>(max_x) + 1.0) * 0.5;
+    const double center_y = (static_cast<double>(min_y) + static_cast<double>(max_y) + 1.0) * 0.5;
+    const double radius_x = std::max(0.5, static_cast<double>(max_x - min_x + 1) * 0.5);
+    const double radius_y = std::max(0.5, static_cast<double>(max_y - min_y + 1) * 0.5);
+    for (int y = std::max(0, min_y); y <= std::min(height - 1, max_y); ++y) {
+        for (int x = std::max(0, min_x); x <= std::min(width - 1, max_x); ++x) {
+            const double normalized_x = (static_cast<double>(x) + 0.5 - center_x) / radius_x;
+            const double normalized_y = (static_cast<double>(y) + 0.5 - center_y) / radius_y;
+            if (normalized_x * normalized_x + normalized_y * normalized_y <= 1.0) {
+                source[static_cast<std::size_t>(y * width + x)] = 1;
+            }
+        }
+    }
+    combine_with_mask(source, mode);
+}
+
 void SelectionMask::select_polygon(const std::vector<std::array<int, 2>>& points, bool replace) {
     select_polygon(points, replace ? SelectionCombineMode::Replace : SelectionCombineMode::Add);
 }
@@ -175,6 +202,91 @@ void SelectionMask::translate(int dx, int dy) {
     active = selected_count() > 0;
 }
 
+void SelectionMask::expand(int radius) {
+    radius = std::max(0, radius);
+    if (!active || radius == 0 || width <= 0 || height <= 0) return;
+    const std::vector<std::uint8_t> source = mask;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            bool selected = false;
+            for (int dy = -radius; dy <= radius && !selected; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int sample_x = x + dx;
+                    const int sample_y = y + dy;
+                    if (sample_x >= 0 && sample_y >= 0 && sample_x < width && sample_y < height &&
+                        source[static_cast<std::size_t>(sample_y * width + sample_x)] != 0) {
+                        selected = true;
+                        break;
+                    }
+                }
+            }
+            mask[static_cast<std::size_t>(y * width + x)] = selected ? 1 : 0;
+        }
+    }
+    active = selected_count() > 0;
+}
+
+void SelectionMask::contract(int radius) {
+    radius = std::max(0, radius);
+    if (!active || radius == 0 || width <= 0 || height <= 0) return;
+    const std::vector<std::uint8_t> source = mask;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            bool selected = true;
+            for (int dy = -radius; dy <= radius && selected; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int sample_x = x + dx;
+                    const int sample_y = y + dy;
+                    if (sample_x < 0 || sample_y < 0 || sample_x >= width || sample_y >= height ||
+                        source[static_cast<std::size_t>(sample_y * width + sample_x)] == 0) {
+                        selected = false;
+                        break;
+                    }
+                }
+            }
+            mask[static_cast<std::size_t>(y * width + x)] = selected ? 1 : 0;
+        }
+    }
+    active = selected_count() > 0;
+}
+
+void SelectionMask::select_border(int radius) {
+    radius = std::max(1, radius);
+    if (!active) return;
+    SelectionMask expanded = *this;
+    SelectionMask contracted = *this;
+    expanded.expand(radius);
+    contracted.contract(radius);
+    for (std::size_t index = 0; index < mask.size(); ++index) {
+        mask[index] = expanded.mask[index] != 0 && contracted.mask[index] == 0 ? 1 : 0;
+    }
+    active = selected_count() > 0;
+}
+
+void SelectionMask::smooth(int radius) {
+    radius = std::max(0, radius);
+    if (!active || radius == 0 || width <= 0 || height <= 0) return;
+    const std::vector<std::uint8_t> source = mask;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int selected = 0;
+            int samples = 0;
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int sample_x = x + dx;
+                    const int sample_y = y + dy;
+                    if (sample_x < 0 || sample_y < 0 || sample_x >= width || sample_y >= height)
+                        continue;
+                    ++samples;
+                    if (source[static_cast<std::size_t>(sample_y * width + sample_x)] != 0) ++selected;
+                }
+            }
+            mask[static_cast<std::size_t>(y * width + x)] = selected * 2 >= samples ? 1 : 0;
+        }
+    }
+    active = selected_count() > 0;
+}
+
 bool SelectionMask::contains(int x, int y) const {
     if (!active) {
         return true;
@@ -186,7 +298,8 @@ bool SelectionMask::contains(int x, int y) const {
 }
 
 int SelectionMask::selected_count() const {
-    return static_cast<int>(std::count(mask.begin(), mask.end(), static_cast<std::uint8_t>(1)));
+    return static_cast<int>(std::count_if(mask.begin(), mask.end(),
+                                         [](std::uint8_t value) { return value != 0; }));
 }
 
 std::optional<std::array<int, 4>> SelectionMask::bounds() const {
@@ -1051,6 +1164,7 @@ void Document::commit_selection_edit(const std::string& name, const SelectionMas
     command.before_active_frame = command.after_active_frame = active_frame;
     command.before_active_layer = command.after_active_layer = active_layer;
     undo_stack_.push_back(std::move(command));
+    if (undo_stack_.size() > 128U) undo_stack_.pop_front();
     redo_stack_.clear();
 }
 
@@ -1066,6 +1180,7 @@ void Document::commit_palette_edit(const std::string& name, const Palette& befor
     command.before_active_frame = command.after_active_frame = active_frame;
     command.before_active_layer = command.after_active_layer = active_layer;
     undo_stack_.push_back(std::move(command));
+    if (undo_stack_.size() > 128U) undo_stack_.pop_front();
     redo_stack_.clear();
 }
 
@@ -1089,6 +1204,68 @@ void Document::commit_structure_edit(const std::string& name,
     command.after_active_layer = active_layer;
     command.after_active_frame = active_frame;
     undo_stack_.push_back(std::move(command));
+    if (undo_stack_.size() > 128U) undo_stack_.pop_front();
+    redo_stack_.clear();
+}
+
+void Document::commit_document_edit(const std::string& name,
+                                    int old_width,
+                                    int old_height,
+                                    std::vector<Layer> before_layers,
+                                    std::vector<Frame> before_frames,
+                                    SelectionMask before_selection,
+                                    FloatingSelection before_floating_selection,
+                                    std::optional<ModelDocument> before_model,
+                                    std::optional<ModelDocument> after_model) {
+    UndoCommand command;
+    command.name = name;
+    command.before_width = old_width;
+    command.before_height = old_height;
+    command.after_width = width;
+    command.after_height = height;
+    command.before_layers = std::move(before_layers);
+    command.after_layers = layers;
+    command.before_frames = std::move(before_frames);
+    command.after_frames = frames;
+    command.before_selection = std::move(before_selection);
+    command.after_selection = selection;
+    command.before_floating_selection = std::move(before_floating_selection);
+    command.after_floating_selection = floating_selection;
+    command.before_model = std::move(before_model);
+    command.after_model = std::move(after_model);
+    command.before_active_layer = command.after_active_layer = active_layer;
+    command.before_active_frame = command.after_active_frame = active_frame;
+    recent_commit_names_.push_back(name);
+    undo_stack_.push_back(std::move(command));
+    if (undo_stack_.size() > 128U) undo_stack_.pop_front();
+    redo_stack_.clear();
+}
+
+void Document::commit_model_edit(const std::string& name,
+                                 ModelDocument before_model,
+                                 ModelDocument after_model) {
+    UndoCommand command;
+    command.name = name;
+    command.before_model = std::move(before_model);
+    command.after_model = std::move(after_model);
+    command.before_active_layer = command.after_active_layer = active_layer;
+    command.before_active_frame = command.after_active_frame = active_frame;
+    recent_commit_names_.push_back(name);
+    undo_stack_.push_back(std::move(command));
+    if (undo_stack_.size() > 128U) undo_stack_.pop_front();
+    redo_stack_.clear();
+}
+
+void Document::commit_layer_edit(const std::string& name, std::vector<Layer> before_layers) {
+    UndoCommand command;
+    command.name = name;
+    command.before_layers = std::move(before_layers);
+    command.after_layers = layers;
+    command.before_active_layer = command.after_active_layer = active_layer;
+    command.before_active_frame = command.after_active_frame = active_frame;
+    recent_commit_names_.push_back(name);
+    undo_stack_.push_back(std::move(command));
+    if (undo_stack_.size() > 128U) undo_stack_.pop_front();
     redo_stack_.clear();
 }
 
@@ -1119,21 +1296,26 @@ static void apply_tile_diffs(Document& doc, const std::vector<TileDiff>& diffs, 
     }
 }
 
-bool Document::undo() {
+bool Document::undo(ModelDocument* model) {
     if (undo_stack_.empty()) {
         return false;
     }
+    if (undo_stack_.back().before_model && model == nullptr) return false;
     UndoCommand cmd = std::move(undo_stack_.back());
     undo_stack_.pop_back();
     capture_current_pixels_as_after(*this, cmd.pixel_diffs);
     if (cmd.dense_pixel_diff) {
         static_cast<void>(capture_dense_after_pixels(*this, *cmd.dense_pixel_diff));
     }
+    if (cmd.before_width) width = *cmd.before_width;
+    if (cmd.before_height) height = *cmd.before_height;
     if (cmd.before_layers) layers = *cmd.before_layers;
     if (cmd.before_frames) frames = *cmd.before_frames;
     if (cmd.before_tags) tags = *cmd.before_tags;
     if (cmd.before_selection) selection = *cmd.before_selection;
+    if (cmd.before_floating_selection) floating_selection = *cmd.before_floating_selection;
     if (cmd.before_palette) palette = *cmd.before_palette;
+    if (cmd.before_model) *model = *cmd.before_model;
     if (cmd.before_frame_duration_ms && cmd.frame >= 0 && cmd.frame < static_cast<int>(frames.size())) {
         frames[static_cast<std::size_t>(cmd.frame)].duration_ms = *cmd.before_frame_duration_ms;
     }
@@ -1147,17 +1329,22 @@ bool Document::undo() {
     return true;
 }
 
-bool Document::redo() {
+bool Document::redo(ModelDocument* model) {
     if (redo_stack_.empty()) {
         return false;
     }
+    if (redo_stack_.back().after_model && model == nullptr) return false;
     UndoCommand cmd = std::move(redo_stack_.back());
     redo_stack_.pop_back();
+    if (cmd.after_width) width = *cmd.after_width;
+    if (cmd.after_height) height = *cmd.after_height;
     if (cmd.after_layers) layers = *cmd.after_layers;
     if (cmd.after_frames) frames = *cmd.after_frames;
     if (cmd.after_tags) tags = *cmd.after_tags;
     if (cmd.after_selection) selection = *cmd.after_selection;
+    if (cmd.after_floating_selection) floating_selection = *cmd.after_floating_selection;
     if (cmd.after_palette) palette = *cmd.after_palette;
+    if (cmd.after_model) *model = *cmd.after_model;
     if (cmd.after_frame_duration_ms && cmd.frame >= 0 && cmd.frame < static_cast<int>(frames.size())) {
         frames[static_cast<std::size_t>(cmd.frame)].duration_ms = *cmd.after_frame_duration_ms;
     }
@@ -1465,6 +1652,66 @@ bool Document::merge_layer_down(int index) {
     return true;
 }
 
+bool Document::set_layer_name(int index, const std::string& name) {
+    if (index < 0 || index >= static_cast<int>(layers.size()) || name.empty() ||
+        layers[static_cast<std::size_t>(index)].name == name) return false;
+    auto before = layers;
+    layers[static_cast<std::size_t>(index)].name = name;
+    commit_layer_edit("Rename Layer", std::move(before));
+    return true;
+}
+
+bool Document::set_layer_visible(int index, bool visible) {
+    if (index < 0 || index >= static_cast<int>(layers.size()) ||
+        layers[static_cast<std::size_t>(index)].visible == visible) return false;
+    auto before = layers;
+    layers[static_cast<std::size_t>(index)].visible = visible;
+    commit_layer_edit("Layer Visibility", std::move(before));
+    return true;
+}
+
+bool Document::set_layer_opacity(int index, float opacity) {
+    if (index < 0 || index >= static_cast<int>(layers.size())) return false;
+    const float value = std::clamp(opacity, 0.0f, 1.0f);
+    if (std::abs(layers[static_cast<std::size_t>(index)].opacity - value) < 0.0001f) return false;
+    auto before = layers;
+    layers[static_cast<std::size_t>(index)].opacity = value;
+    commit_layer_edit("Layer Opacity", std::move(before));
+    return true;
+}
+
+bool Document::set_layer_blend_mode(int index, LayerBlendMode blend_mode) {
+    if (index < 0 || index >= static_cast<int>(layers.size()) ||
+        layers[static_cast<std::size_t>(index)].blend_mode == blend_mode) return false;
+    auto before = layers;
+    layers[static_cast<std::size_t>(index)].blend_mode = blend_mode;
+    commit_layer_edit("Layer Blend Mode", std::move(before));
+    return true;
+}
+
+bool Document::set_layer_clipped(int index, bool clipped) {
+    if (index < 0 || index >= static_cast<int>(layers.size()) ||
+        layers[static_cast<std::size_t>(index)].clip_to_below == clipped) return false;
+    auto before = layers;
+    layers[static_cast<std::size_t>(index)].clip_to_below = clipped;
+    commit_layer_edit("Layer Clipping", std::move(before));
+    return true;
+}
+
+bool Document::set_layer_mask(int index, std::vector<std::uint8_t> mask, bool enabled,
+                              const std::string& undo_name) {
+    if (index < 0 || index >= static_cast<int>(layers.size())) return false;
+    const std::size_t expected = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (!mask.empty() && mask.size() != expected) return false;
+    Layer& layer = layers[static_cast<std::size_t>(index)];
+    if (layer.mask == mask && layer.mask_enabled == enabled) return false;
+    auto before = layers;
+    layer.mask = std::move(mask);
+    layer.mask_enabled = enabled;
+    commit_layer_edit(undo_name.empty() ? "Layer Mask" : undo_name, std::move(before));
+    return true;
+}
+
 void Document::add_frame(bool duplicate_current) {
     auto before_layers = layers;
     auto before_frames = frames;
@@ -1556,6 +1803,7 @@ bool Document::set_frame_duration(int index, int duration_ms) {
     frame.duration_ms = clamped_duration;
     recent_commit_names_.push_back(command.name);
     undo_stack_.push_back(std::move(command));
+    if (undo_stack_.size() > 128U) undo_stack_.pop_front();
     redo_stack_.clear();
     return true;
 }
@@ -1809,8 +2057,10 @@ void Document::commit_floating_selection(const std::string& undo_name, std::vect
     if (!floating_selection.active || !has_active_cel()) {
         return;
     }
+    const SelectionMask before_selection = selection;
     auto& pixels = active_cel().pixels;
     selection.clear();
+    bool any_selected = false;
     for (int y = 0; y < floating_selection.height; ++y) {
         for (int x = 0; x < floating_selection.width; ++x) {
             if (!floating_selection.contains_local(x, y)) {
@@ -1820,12 +2070,26 @@ void Document::commit_floating_selection(const std::string& undo_name, std::vect
             int dy = floating_selection.source_y + floating_selection.offset_y + y;
             if (in_bounds(dx, dy)) {
                 pixels[static_cast<std::size_t>(pixel_index(dx, dy))] = floating_selection.pixels[static_cast<std::size_t>(y * floating_selection.width + x)];
-                selection.select_rect(dx, dy, dx, dy, false);
+                selection.mask[static_cast<std::size_t>(pixel_index(dx, dy))] = 1;
+                any_selected = true;
             }
         }
     }
+    selection.active = any_selected;
     floating_selection.clear();
-    commit_active_cel_edit(undo_name, std::move(before));
+    const bool pixels_changed = before != pixels;
+    if (pixels_changed) {
+        commit_active_cel_edit(undo_name, std::move(before));
+        if (!undo_stack_.empty()) {
+            // Moving or transforming pixels also changes the selection shape.
+            // Keep both state changes in one operation instead of requiring a
+            // second undo just to restore the selection outline.
+            undo_stack_.back().before_selection = before_selection;
+            undo_stack_.back().after_selection = selection;
+        }
+    } else {
+        commit_selection_edit(undo_name, before_selection);
+    }
 }
 
 } // namespace px
