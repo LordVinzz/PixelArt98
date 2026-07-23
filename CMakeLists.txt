@@ -122,9 +122,26 @@ option(PIXELART_ENABLE_MODEL "Enable cuboid model texturing features" ON)
 option(PIXELART_BUILD_TESTS "Build unit tests" ON)
 option(PIXELART_ENABLE_SANITIZERS "Enable ASan/UBSan for Debug builds with supported compilers" ON)
 option(PIXELART_MEMORY_PROFILE_BUILD "Build with debug symbols, -O1, and frame pointers for allocation profiling" OFF)
+option(PIXELART_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
 option(PIXELART_ENABLE_ONNXRUNTIME "Enable ONNX Runtime-backed depth map extraction when ONNX Runtime is installed" ON)
 option(PIXELART_ENABLE_OPENCV_DNN "Enable OpenCV DNN-backed depth map extraction when OpenCV is installed" OFF)
 set(ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime SDK root directory")
+
+set(PIXELART_IPO_SUPPORTED OFF)
+if(PIXELART_ENABLE_IPO AND NOT PIXELART_MEMORY_PROFILE_BUILD)
+    include(CheckIPOSupported)
+    check_ipo_supported(
+        RESULT PIXELART_IPO_SUPPORTED
+        OUTPUT PIXELART_IPO_ERROR
+        LANGUAGES C CXX)
+    if(PIXELART_IPO_SUPPORTED)
+        message(STATUS "Release interprocedural optimization enabled")
+    else()
+        message(WARNING
+            "Release interprocedural optimization is unavailable: "
+            "${PIXELART_IPO_ERROR}")
+    endif()
+endif()
 
 if(PIXELART_ENABLE_ONNXRUNTIME)
     find_path(ONNXRUNTIME_INCLUDE_DIR
@@ -233,6 +250,10 @@ function(pixelart_configure_project_target target)
     target_compile_definitions(${target} PRIVATE
         $<$<COMPILE_LANG_AND_ID:C,MSVC>:_CRT_SECURE_NO_WARNINGS>
         $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:_CRT_SECURE_NO_WARNINGS>)
+    if(PIXELART_IPO_SUPPORTED)
+        set_property(TARGET ${target} PROPERTY
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
     pixelart_enable_project_warnings(${target})
     pixelart_enable_debug_sanitizers(${target})
     pixelart_enable_memory_profile_flags(${target})

@@ -6,48 +6,52 @@ if(NOT DEFINED PIXELART_SOURCE_ROOT)
     message(FATAL_ERROR "PIXELART_SOURCE_ROOT must point to the repository root")
 endif()
 
-set(pixelart_default_line_limited_sources
-    src/ui/QtMainWindow.cpp
-    src/io/ProjectIO.cpp
-    src/core/Document.cpp
-    src/ui/GraphEffectWidget.cpp
-    src/core/GraphEffect.cpp
-    src/core/Filters.cpp
-    src/core/Model.cpp
-    tests/core_tests.cpp
-    src/render/GpuEffectRenderer.cpp
-    src/render/Renderer3D.cpp
-    src/core/Svg.cpp
-    tests/graph_effect_ui_tests.cpp
-    tests/qt_ui_tests.cpp
-    tests/graph_effect_tests.cpp
-    src/ui/EmbeddedAssets.cpp
-    src/ui/QtCanvasWidget.cpp
-    src/render/MpsEffectRenderer.mm
-    src/depth/DepthMapExtractor.cpp)
+find_program(pixelart_rg rg REQUIRED)
+find_program(pixelart_xargs xargs REQUIRED)
+find_program(pixelart_wc wc REQUIRED)
+find_program(pixelart_sed sed REQUIRED)
+find_program(pixelart_sort sort REQUIRED)
 
-set(pixelart_source_list "${PIXELART_SOURCE_ROOT}/list.txt")
-if(EXISTS "${pixelart_source_list}")
-    file(STRINGS "${pixelart_source_list}" pixelart_source_list_entries)
-    set(pixelart_line_limited_sources)
-    foreach(source_list_entry IN LISTS pixelart_source_list_entries)
-        string(STRIP "${source_list_entry}" source_list_entry)
-        if(source_list_entry STREQUAL "")
-            continue()
-        endif()
-        if(NOT source_list_entry MATCHES "^[0-9]+[ \t]+.+$")
-            message(FATAL_ERROR "Invalid list.txt entry: ${source_list_entry}")
-        endif()
-        string(REGEX REPLACE "^[0-9]+[ \t]+" "" relative_path "${source_list_entry}")
-        list(APPEND pixelart_line_limited_sources "${relative_path}")
-    endforeach()
-    if(NOT pixelart_line_limited_sources)
-        message(FATAL_ERROR "list.txt does not contain any source paths")
+execute_process(
+    COMMAND "${pixelart_rg}" --files -0
+        -g "*.{c,cc,cpp,cxx,h,hh,hpp,hxx,ipp,inl,inc,tpp,m,mm,cu,cuh,metal,glsl,vert,frag,qml,py,js,jsx,ts,tsx,java,kt,kts,swift,rs,go,sh,bash,zsh,ps1,cmake}"
+        -g "CMakeLists.txt"
+        -g "Makefile"
+        -g "!build*/**"
+        -g "!third_party/**"
+        -g "!vendor/**"
+    COMMAND "${pixelart_xargs}" -0 "${pixelart_wc}" -l
+    COMMAND "${pixelart_sed}" "/ total$/d"
+    COMMAND "${pixelart_sort}" -nr
+    WORKING_DIRECTORY "${PIXELART_SOURCE_ROOT}"
+    RESULTS_VARIABLE pixelart_source_list_results
+    OUTPUT_VARIABLE pixelart_source_list_output
+    ERROR_VARIABLE pixelart_source_list_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+foreach(command_result IN LISTS pixelart_source_list_results)
+    if(NOT command_result EQUAL 0)
+        message(FATAL_ERROR
+            "Failed to generate the source line list "
+            "(pipeline results: ${pixelart_source_list_results}):\n"
+            "${pixelart_source_list_error}")
     endif()
-else()
-    # Keep CI useful if the task manifest is not distributed with the sources.
-    set(pixelart_line_limited_sources ${pixelart_default_line_limited_sources})
+endforeach()
+
+if(pixelart_source_list_output STREQUAL "")
+    message(FATAL_ERROR "The generated source line list is empty")
 endif()
+
+string(REPLACE "\n" ";" pixelart_source_list_entries "${pixelart_source_list_output}")
+set(pixelart_line_limited_sources)
+foreach(source_list_entry IN LISTS pixelart_source_list_entries)
+    string(STRIP "${source_list_entry}" source_list_entry)
+    if(NOT source_list_entry MATCHES "^[0-9]+[ \t]+.+$")
+        message(FATAL_ERROR "Invalid generated source-list entry: ${source_list_entry}")
+    endif()
+    string(REGEX REPLACE "^[0-9]+[ \t]+" "" relative_path "${source_list_entry}")
+    list(APPEND pixelart_line_limited_sources "${relative_path}")
+endforeach()
 
 set(pixelart_max_source_lines 800)
 foreach(relative_path IN LISTS pixelart_line_limited_sources)

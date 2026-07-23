@@ -2,58 +2,30 @@
 // Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
 // See LICENSE for details.
 
-#include "core/Filters.hpp"
+#include "core/FiltersCommon.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <functional>
 #include <limits>
 #include <numeric>
 #include <vector>
 
 namespace px::filter_detail {
 
-bool editable(const Document& doc, int x, int y, Pixel p) {
-    return doc.selection.contains(x, y) && a(p) > 0;
-}
-
-Pixel transform_pixels(Document& doc, const char* name, const std::function<Pixel(int, int, Pixel)>& fn) {
-    auto before = doc.snapshot_active_cel();
-    auto& pixels = doc.active_cel().pixels;
-    Pixel last = 0;
-    for (int y = 0; y < doc.height; ++y) {
-        for (int x = 0; x < doc.width; ++x) {
-            std::size_t i = static_cast<std::size_t>(doc.pixel_index(x, y));
-            pixels[i] = fn(x, y, pixels[i]);
-            last = pixels[i];
-        }
-    }
-    doc.commit_active_cel_edit(name, std::move(before));
-    return last;
-}
-
-std::uint8_t to_u8(float value) {
-    return static_cast<std::uint8_t>(std::clamp(value, 0.0f, 255.0f) + 0.5f);
-}
-
-std::uint8_t to_u8_int(int value) {
-    return static_cast<std::uint8_t>(std::clamp(value, 0, 255));
-}
-
 Pixel sample_clamped(const std::vector<Pixel>& pixels, int width, int height, int x, int y) {
-    const int sx = std::clamp(x, 0, width - 1);
-    const int sy = std::clamp(y, 0, height - 1);
-    return pixels[static_cast<std::size_t>(sy * width + sx)];
+    const int sample_x = std::clamp(x, 0, width - 1);
+    const int sample_y = std::clamp(y, 0, height - 1);
+    return pixels[static_cast<std::size_t>(sample_y * width + sample_x)];
 }
 
 Pixel sample_nearest(const std::vector<Pixel>& pixels, int width, int height, float x, float y) {
-    const int sx = static_cast<int>(std::floor(x + 0.5f));
-    const int sy = static_cast<int>(std::floor(y + 0.5f));
-    if (sx < 0 || sy < 0 || sx >= width || sy >= height) {
+    const int sample_x = static_cast<int>(std::floor(x + 0.5f));
+    const int sample_y = static_cast<int>(std::floor(y + 0.5f));
+    if (sample_x < 0 || sample_y < 0 || sample_x >= width || sample_y >= height) {
         return 0;
     }
-    return pixels[static_cast<std::size_t>(sy * width + sx)];
+    return pixels[static_cast<std::size_t>(sample_y * width + sample_x)];
 }
 
 static Pixel sample_transparent(const std::vector<Pixel>& pixels, int width, int height, int x, int y) {
@@ -142,28 +114,16 @@ static Pixel sample_resampled(const std::vector<Pixel>& pixels,
 }
 
 Pixel mix_pixels(Pixel first, Pixel second, float amount) {
-    const float t = std::clamp(amount, 0.0f, 1.0f);
-    const float inv = 1.0f - t;
-    return rgba(to_u8(static_cast<float>(r(first)) * inv + static_cast<float>(r(second)) * t),
-                to_u8(static_cast<float>(g(first)) * inv + static_cast<float>(g(second)) * t),
-                to_u8(static_cast<float>(b(first)) * inv + static_cast<float>(b(second)) * t),
-                to_u8(static_cast<float>(a(first)) * inv + static_cast<float>(a(second)) * t));
-}
-
-void transform_from_source(Document& doc,
-                           const char* name,
-                           const std::function<Pixel(int, int, const std::vector<Pixel>&)>& fn) {
-    auto before = doc.snapshot_active_cel();
-    auto source = before;
-    auto& pixels = doc.active_cel().pixels;
-    for (int y = 0; y < doc.height; ++y) {
-        for (int x = 0; x < doc.width; ++x) {
-            if (doc.selection.contains(x, y)) {
-                pixels[static_cast<std::size_t>(doc.pixel_index(x, y))] = fn(x, y, source);
-            }
-        }
-    }
-    doc.commit_active_cel_edit(name, std::move(before));
+    const float weight = std::clamp(amount, 0.0f, 1.0f);
+    const float inverse_weight = 1.0f - weight;
+    return rgba(to_u8(static_cast<float>(r(first)) * inverse_weight +
+                      static_cast<float>(r(second)) * weight),
+                to_u8(static_cast<float>(g(first)) * inverse_weight +
+                      static_cast<float>(g(second)) * weight),
+                to_u8(static_cast<float>(b(first)) * inverse_weight +
+                      static_cast<float>(b(second)) * weight),
+                to_u8(static_cast<float>(a(first)) * inverse_weight +
+                      static_cast<float>(a(second)) * weight));
 }
 
 void apply_affine(Document& doc,
@@ -198,10 +158,15 @@ static std::uint32_t hash_u32(std::uint32_t value) {
 }
 
 float noise01(int x, int y, int seed) {
-    const auto ux = static_cast<std::uint32_t>(x);
-    const auto uy = static_cast<std::uint32_t>(y);
-    const auto us = static_cast<std::uint32_t>(seed);
-    return static_cast<float>(hash_u32(ux * 374761393U + uy * 668265263U + us * 2246822519U) & 0xffffU) / 65535.0f;
+    const auto unsigned_x = static_cast<std::uint32_t>(x);
+    const auto unsigned_y = static_cast<std::uint32_t>(y);
+    const auto unsigned_seed = static_cast<std::uint32_t>(seed);
+    return static_cast<float>(
+               hash_u32(unsigned_x * 374761393U +
+                        unsigned_y * 668265263U +
+                        unsigned_seed * 2246822519U) &
+               0xffffU) /
+           65535.0f;
 }
 
 float value_noise(float x, float y, int seed) {
@@ -209,15 +174,15 @@ float value_noise(float x, float y, int seed) {
     const int y0 = static_cast<int>(std::floor(y));
     const float tx = x - static_cast<float>(x0);
     const float ty = y - static_cast<float>(y0);
-    const float sx = tx * tx * (3.0f - 2.0f * tx);
-    const float sy = ty * ty * (3.0f - 2.0f * ty);
-    const float n00 = noise01(x0, y0, seed);
-    const float n10 = noise01(x0 + 1, y0, seed);
-    const float n01 = noise01(x0, y0 + 1, seed);
-    const float n11 = noise01(x0 + 1, y0 + 1, seed);
-    const float nx0 = n00 + (n10 - n00) * sx;
-    const float nx1 = n01 + (n11 - n01) * sx;
-    return nx0 + (nx1 - nx0) * sy;
+    const float smooth_x = tx * tx * (3.0f - 2.0f * tx);
+    const float smooth_y = ty * ty * (3.0f - 2.0f * ty);
+    const float top_left = noise01(x0, y0, seed);
+    const float top_right = noise01(x0 + 1, y0, seed);
+    const float bottom_left = noise01(x0, y0 + 1, seed);
+    const float bottom_right = noise01(x0 + 1, y0 + 1, seed);
+    const float top = top_left + (top_right - top_left) * smooth_x;
+    const float bottom = bottom_left + (bottom_right - bottom_left) * smooth_x;
+    return top + (bottom - top) * smooth_y;
 }
 
 Pixel blur_at(const std::vector<Pixel>& source, int width, int height, int x, int y, int radius) {
