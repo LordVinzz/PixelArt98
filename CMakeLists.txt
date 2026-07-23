@@ -171,6 +171,12 @@ function(pixelart_enable_project_warnings target)
             -Wdouble-promotion
             -Wformat=2
         >
+        $<$<COMPILE_LANG_AND_ID:C,GNU>:
+            -Wno-error=null-dereference
+        >
+        $<$<COMPILE_LANG_AND_ID:CXX,GNU>:
+            -Wno-error=null-dereference
+        >
         $<$<COMPILE_LANG_AND_ID:C,MSVC>:
             /W4
             /WX
@@ -529,6 +535,9 @@ if(PIXELART_BUILD_TESTS)
 
     add_executable(pixelart_gpu_backend_benchmark tests/gpu_backend_benchmark.cpp)
     target_link_libraries(pixelart_gpu_backend_benchmark PRIVATE pixelart_app Qt6::Gui)
+    if(WIN32)
+        target_link_libraries(pixelart_gpu_backend_benchmark PRIVATE Psapi)
+    endif()
     target_compile_definitions(pixelart_gpu_backend_benchmark PRIVATE GL_SILENCE_DEPRECATION)
     pixelart_configure_project_target(pixelart_gpu_backend_benchmark)
 endif()

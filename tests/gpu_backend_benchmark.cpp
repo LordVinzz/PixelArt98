@@ -20,8 +20,14 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <sys/resource.h>
 #include <vector>
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
+#else
+#include <sys/resource.h>
+#endif
 
 using namespace px;
 
@@ -42,6 +48,14 @@ struct BenchResult {
 };
 
 std::uint64_t max_rss_bytes() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters = {};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters,
+                             static_cast<DWORD>(sizeof(counters))) == 0) {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(counters.PeakWorkingSetSize);
+#else
     rusage usage = {};
     if (getrusage(RUSAGE_SELF, &usage) != 0) {
         return 0;
@@ -50,6 +64,7 @@ std::uint64_t max_rss_bytes() {
     return static_cast<std::uint64_t>(std::max<decltype(usage.ru_maxrss)>(0, usage.ru_maxrss));
 #else
     return static_cast<std::uint64_t>(std::max<decltype(usage.ru_maxrss)>(0, usage.ru_maxrss)) * 1024ULL;
+#endif
 #endif
 }
 
