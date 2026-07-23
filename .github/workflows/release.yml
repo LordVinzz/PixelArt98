@@ -125,9 +125,14 @@ jobs:
           $env:PATH = "$packageDir\bin;$env:SystemRoot\System32;$env:SystemRoot"
           Remove-Item Env:QT_PLUGIN_PATH -ErrorAction SilentlyContinue
           Remove-Item Env:QML2_IMPORT_PATH -ErrorAction SilentlyContinue
-          & "$packageDir\bin\PixelArt98.exe" --deployment-smoke-test
-          if ($LASTEXITCODE -ne 0) {
-            throw "The deployed Windows application exited with code $LASTEXITCODE."
+          $smokeTest = Start-Process `
+            -FilePath "$packageDir\bin\PixelArt98.exe" `
+            -ArgumentList "--deployment-smoke-test" `
+            -WorkingDirectory "$packageDir\bin" `
+            -Wait `
+            -PassThru
+          if ($smokeTest.ExitCode -ne 0) {
+            throw "The deployed Windows application exited with code $($smokeTest.ExitCode)."
           }
 
       - name: Smoke-test deployed application on Linux
