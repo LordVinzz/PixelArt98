@@ -186,7 +186,7 @@ void main() {
 }
 )GLSL";
 
-constexpr const char* kFragmentShader = R"GLSL(
+constexpr const char* kFragmentShaderPreamble = R"GLSL(
 #version 330 core
 in vec2 v_uv;
 out vec4 frag_color;
@@ -418,6 +418,9 @@ vec4 edge_color(vec2 uv) {
     return vec4(vec3(edge), sample_source(uv).a);
 }
 
+)GLSL";
+
+constexpr const char* kFragmentShaderEffects = R"GLSL(
 vec4 apply_effect(vec2 uv, vec4 src) {
     vec2 pixel = uv * u_size.xy;
     int mode = u_mode;
@@ -666,6 +669,12 @@ void main() {
 }
 )GLSL";
 
+const std::string& combined_fragment_shader_source() {
+    static const std::string source =
+        std::string(kFragmentShaderPreamble) + kFragmentShaderEffects;
+    return source;
+}
+
 } // namespace
 
 GpuEffectRenderer::~GpuEffectRenderer() {
@@ -677,7 +686,7 @@ const char* GpuEffectRenderer::vertex_shader_source() {
 }
 
 const char* GpuEffectRenderer::fragment_shader_source() {
-    return kFragmentShader;
+    return combined_fragment_shader_source().c_str();
 }
 
 void GpuEffectRenderer::set_error(std::string value) {
@@ -760,7 +769,8 @@ bool GpuEffectRenderer::ensure_program() {
     if (vertex_shader == 0) {
         return false;
     }
-    unsigned int fragment_shader = compile_shader(GL_FRAGMENT_SHADER, kFragmentShader, last_error_);
+    unsigned int fragment_shader =
+        compile_shader(GL_FRAGMENT_SHADER, fragment_shader_source(), last_error_);
     if (fragment_shader == 0) {
         glDeleteShader(vertex_shader);
         return false;
