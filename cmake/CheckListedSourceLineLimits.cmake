@@ -2,56 +2,107 @@
 # Licensed under the DOMINGUEZ Non-Commercial Software License v1.0.
 # See LICENSE for details.
 
+cmake_minimum_required(VERSION 3.24)
+
 if(NOT DEFINED PIXELART_SOURCE_ROOT)
     message(FATAL_ERROR "PIXELART_SOURCE_ROOT must point to the repository root")
 endif()
-
-find_program(pixelart_rg rg REQUIRED)
-find_program(pixelart_xargs xargs REQUIRED)
-find_program(pixelart_wc wc REQUIRED)
-find_program(pixelart_sed sed REQUIRED)
-find_program(pixelart_sort sort REQUIRED)
-
-execute_process(
-    COMMAND "${pixelart_rg}" --files -0
-        -g "*.{c,cc,cpp,cxx,h,hh,hpp,hxx,ipp,inl,inc,tpp,m,mm,cu,cuh,metal,glsl,vert,frag,qml,py,js,jsx,ts,tsx,java,kt,kts,swift,rs,go,sh,bash,zsh,ps1,cmake}"
-        -g "CMakeLists.txt"
-        -g "Makefile"
-        -g "!build*/**"
-        -g "!third_party/**"
-        -g "!vendor/**"
-    COMMAND "${pixelart_xargs}" -0 "${pixelart_wc}" -l
-    COMMAND "${pixelart_sed}" "/ total$/d"
-    COMMAND "${pixelart_sort}" -nr
-    WORKING_DIRECTORY "${PIXELART_SOURCE_ROOT}"
-    RESULTS_VARIABLE pixelart_source_list_results
-    OUTPUT_VARIABLE pixelart_source_list_output
-    ERROR_VARIABLE pixelart_source_list_error
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-foreach(command_result IN LISTS pixelart_source_list_results)
-    if(NOT command_result EQUAL 0)
-        message(FATAL_ERROR
-            "Failed to generate the source line list "
-            "(pipeline results: ${pixelart_source_list_results}):\n"
-            "${pixelart_source_list_error}")
-    endif()
-endforeach()
-
-if(pixelart_source_list_output STREQUAL "")
-    message(FATAL_ERROR "The generated source line list is empty")
+if(NOT IS_DIRECTORY "${PIXELART_SOURCE_ROOT}")
+    message(FATAL_ERROR "PIXELART_SOURCE_ROOT is not a directory: ${PIXELART_SOURCE_ROOT}")
 endif()
 
-string(REPLACE "\n" ";" pixelart_source_list_entries "${pixelart_source_list_output}")
-set(pixelart_line_limited_sources)
-foreach(source_list_entry IN LISTS pixelart_source_list_entries)
-    string(STRIP "${source_list_entry}" source_list_entry)
-    if(NOT source_list_entry MATCHES "^[0-9]+[ \t]+.+$")
-        message(FATAL_ERROR "Invalid generated source-list entry: ${source_list_entry}")
+cmake_path(ABSOLUTE_PATH PIXELART_SOURCE_ROOT NORMALIZE
+    OUTPUT_VARIABLE pixelart_source_root)
+
+set(pixelart_source_extensions
+    c cc cpp cxx h hh hpp hxx ipp inl inc tpp m mm cu cuh metal
+    glsl vert frag qml py js jsx ts tsx java kt kts swift rs go
+    sh bash zsh ps1 cmake)
+set(pixelart_gitignored_directory_names
+    out dist package CMakeFiles Testing _deps examples logs models)
+
+function(pixelart_should_prune_directory relative_path directory_name output_variable)
+    set(should_prune FALSE)
+    if(directory_name MATCHES "^[.]")
+        set(should_prune TRUE)
+    elseif(relative_path STREQUAL directory_name AND
+           (directory_name MATCHES "^build" OR
+            directory_name STREQUAL "third_party" OR
+            directory_name STREQUAL "vendor"))
+        set(should_prune TRUE)
+    else()
+        list(FIND pixelart_gitignored_directory_names
+            "${directory_name}" ignored_index)
+        if(NOT ignored_index EQUAL -1 OR
+           directory_name STREQUAL "build" OR
+           directory_name MATCHES "^build-" OR
+           directory_name MATCHES "^cmake-build-" OR
+           directory_name MATCHES ".+-build$" OR
+           directory_name MATCHES ".+-subbuild$" OR
+           directory_name MATCHES "[.]app$" OR
+           directory_name MATCHES "[.]dSYM$")
+            set(should_prune TRUE)
+        endif()
     endif()
-    string(REGEX REPLACE "^[0-9]+[ \t]+" "" relative_path "${source_list_entry}")
-    list(APPEND pixelart_line_limited_sources "${relative_path}")
-endforeach()
+    set(${output_variable} "${should_prune}" PARENT_SCOPE)
+endfunction()
+
+set_property(GLOBAL PROPERTY PIXELART_LINE_LIMIT_SOURCE_FILES "")
+function(pixelart_collect_source_files absolute_directory relative_directory)
+    file(GLOB directory_entries LIST_DIRECTORIES TRUE
+        RELATIVE "${absolute_directory}" "${absolute_directory}/*")
+    foreach(entry IN LISTS directory_entries)
+        if(relative_directory STREQUAL "")
+            set(relative_path "${entry}")
+        else()
+            set(relative_path "${relative_directory}/${entry}")
+        endif()
+        set(absolute_path "${absolute_directory}/${entry}")
+
+        if(IS_SYMLINK "${absolute_path}")
+            continue()
+        endif()
+        if(IS_DIRECTORY "${absolute_path}")
+            pixelart_should_prune_directory(
+                "${relative_path}" "${entry}" should_prune)
+            if(NOT should_prune)
+                pixelart_collect_source_files(
+                    "${absolute_path}" "${relative_path}")
+            endif()
+            continue()
+        endif()
+
+        if(entry MATCHES "^[.]" OR
+           entry STREQUAL "CTestTestfile.cmake" OR
+           entry STREQUAL "cmake_install.cmake")
+            continue()
+        endif()
+        if(entry STREQUAL "CMakeLists.txt" OR entry STREQUAL "Makefile")
+            set_property(GLOBAL APPEND PROPERTY
+                PIXELART_LINE_LIMIT_SOURCE_FILES "${relative_path}")
+            continue()
+        endif()
+        get_filename_component(source_extension "${entry}" LAST_EXT)
+        if(NOT source_extension STREQUAL "")
+            string(SUBSTRING "${source_extension}" 1 -1 source_extension)
+            list(FIND pixelart_source_extensions
+                "${source_extension}" extension_index)
+            if(NOT extension_index EQUAL -1)
+                set_property(GLOBAL APPEND PROPERTY
+                    PIXELART_LINE_LIMIT_SOURCE_FILES "${relative_path}")
+            endif()
+        endif()
+    endforeach()
+endfunction()
+
+pixelart_collect_source_files("${pixelart_source_root}" "")
+get_property(pixelart_line_limited_sources GLOBAL PROPERTY
+    PIXELART_LINE_LIMIT_SOURCE_FILES)
+if(NOT pixelart_line_limited_sources)
+    message(FATAL_ERROR "The generated source line list is empty")
+endif()
+list(REMOVE_DUPLICATES pixelart_line_limited_sources)
+list(SORT pixelart_line_limited_sources)
 
 set(pixelart_max_source_lines 800)
 foreach(relative_path IN LISTS pixelart_line_limited_sources)

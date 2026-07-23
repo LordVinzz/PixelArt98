@@ -123,12 +123,17 @@ option(PIXELART_BUILD_TESTS "Build unit tests" ON)
 option(PIXELART_ENABLE_SANITIZERS "Enable ASan/UBSan for Debug builds with supported compilers" ON)
 option(PIXELART_MEMORY_PROFILE_BUILD "Build with debug symbols, -O1, and frame pointers for allocation profiling" OFF)
 option(PIXELART_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
+option(PIXELART_ENABLE_MSVC_IPO "Enable experimental MSVC interprocedural optimization" OFF)
 option(PIXELART_ENABLE_ONNXRUNTIME "Enable ONNX Runtime-backed depth map extraction when ONNX Runtime is installed" ON)
 option(PIXELART_ENABLE_OPENCV_DNN "Enable OpenCV DNN-backed depth map extraction when OpenCV is installed" OFF)
 set(ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime SDK root directory")
 
 set(PIXELART_IPO_SUPPORTED OFF)
-if(PIXELART_ENABLE_IPO AND NOT PIXELART_MEMORY_PROFILE_BUILD)
+if(PIXELART_ENABLE_IPO AND MSVC AND NOT PIXELART_ENABLE_MSVC_IPO)
+    message(STATUS
+        "Release interprocedural optimization disabled for MSVC; "
+        "set PIXELART_ENABLE_MSVC_IPO=ON to opt in")
+elseif(PIXELART_ENABLE_IPO AND NOT PIXELART_MEMORY_PROFILE_BUILD)
     include(CheckIPOSupported)
     check_ipo_supported(
         RESULT PIXELART_IPO_SUPPORTED
@@ -547,8 +552,14 @@ if(PIXELART_BUILD_TESTS)
         pixelart_app pixelart_version Qt6::Core Qt6::Gui Qt6::Network
         Qt6::Widgets Qt6::OpenGLWidgets Qt6::Test)
     target_compile_definitions(pixelart_qt_ui_tests PRIVATE GL_SILENCE_DEPRECATION)
+    set_target_properties(pixelart_qt_ui_tests PROPERTIES WIN32_EXECUTABLE FALSE)
     pixelart_configure_project_target(pixelart_qt_ui_tests)
-    add_test(NAME pixelart_qt_ui_tests COMMAND pixelart_qt_ui_tests)
+    add_test(
+        NAME pixelart_qt_ui_tests
+        COMMAND pixelart_qt_ui_tests
+            -v1
+            -o -,txt
+            -o qt-ui-test-log.txt,txt)
     set_tests_properties(pixelart_qt_ui_tests PROPERTIES
         TIMEOUT 30
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

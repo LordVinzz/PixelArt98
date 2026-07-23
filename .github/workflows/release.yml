@@ -106,6 +106,17 @@ jobs:
       - name: Test
         run: ctest --test-dir build --build-config ${{ env.BUILD_TYPE }} --output-on-failure
 
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pixelart98-test-diagnostics-${{ matrix.platform }}
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/qt-ui-test-log.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Install package files
         run: cmake --install build --config ${{ env.BUILD_TYPE }} --prefix "${{ github.workspace }}/package/PixelArt98-${{ matrix.platform }}"
 

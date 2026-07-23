@@ -204,6 +204,10 @@ void style_color_button(QPushButton* button, Pixel pixel) {
             .arg(color.name(QColor::HexArgb), text.name()));
 }
 
+} // namespace
+
+namespace graph_effect_ui_detail {
+
 class GraphNodeItem;
 
 class GraphPortItem final : public QGraphicsEllipseItem {
@@ -663,5 +667,9 @@ private:
     QImage image_;
 };
 
-} // namespace
+} // namespace graph_effect_ui_detail
 
+using graph_effect_ui_detail::GraphPreview;
+using graph_effect_ui_detail::GraphScene;
+using graph_effect_ui_detail::GraphNodeItem;
+using graph_effect_ui_detail::GraphView;
