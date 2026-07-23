@@ -323,6 +323,7 @@ void QtMainWindow::build_tools_dock() {
     constexpr int tool_grid_columns = 2;
     constexpr int tool_grid_width = tool_grid_columns * tool_button_size + (tool_grid_columns - 1) * tool_grid_spacing;
     constexpr int tool_options_minimum_width = 220;
+    layout->addStrut(tool_options_minimum_width);
     tools_panel->setFixedWidth(tool_grid_width);
     tool_buttons_ = new QButtonGroup(this);
     tool_buttons_->setExclusive(true);
@@ -357,7 +358,6 @@ void QtMainWindow::build_tools_dock() {
 
     auto* tool_options_panel = new QWidget;
     tool_options_panel->setObjectName(QStringLiteral("ToolOptionsPanel"));
-    tool_options_panel->setMinimumWidth(tool_options_minimum_width);
     tool_options_layout_ = new QVBoxLayout(tool_options_panel);
     tool_options_layout_->setContentsMargins(0, 0, 0, 0);
     tool_options_layout_->setSpacing(6);
@@ -366,11 +366,6 @@ void QtMainWindow::build_tools_dock() {
     layout->addWidget(tool_options_panel);
     layout->addStretch(1);
 
-    const int tools_dock_minimum_width =
-        tool_options_minimum_width + layout->contentsMargins().left() +
-        layout->contentsMargins().right();
-    panel->setMinimumWidth(tools_dock_minimum_width);
-    dock->setMinimumWidth(tools_dock_minimum_width);
     dock->setWidget(panel);
     addDockWidget(Qt::LeftDockWidgetArea, dock);
     docks_.push_back(dock);
