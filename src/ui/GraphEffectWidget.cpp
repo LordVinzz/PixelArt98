@@ -1419,7 +1419,7 @@ public:
             const QSignalBlocker blocker(rgb_mode);
             rgb_mode->setChecked(!luminance);
         }
-        for (const auto [editor, checked] :
+        for (const auto& [editor, checked] :
              {std::pair<QCheckBox*, bool>{red, red_enabled},
               std::pair<QCheckBox*, bool>{green, green_enabled},
               std::pair<QCheckBox*, bool>{blue, blue_enabled}}) {

@@ -305,6 +305,9 @@ BenchResult benchmark_mps(const std::vector<Pixel>& input, int width, int height
         result.estimated_gpu_memory = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * sizeof(Pixel) * 3ULL;
     }
 #else
+    static_cast<void>(input);
+    static_cast<void>(width);
+    static_cast<void>(height);
     result.note = "Skipped: MPS is only available on macOS";
 #endif
     return result;

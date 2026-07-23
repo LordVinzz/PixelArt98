@@ -506,8 +506,10 @@ bool EditorController::apply_selection_transform(float scale_x, float scale_y,
     const FloatingSelection source = document_.floating_selection;
     const int left = source.source_x + source.offset_x;
     const int top = source.source_y + source.offset_y;
-    const int width = std::max(1, static_cast<int>(std::lround(source.width * scale_x)));
-    const int height = std::max(1, static_cast<int>(std::lround(source.height * scale_y)));
+    const int width = std::max(
+        1, static_cast<int>(std::lround(static_cast<float>(source.width) * scale_x)));
+    const int height = std::max(
+        1, static_cast<int>(std::lround(static_cast<float>(source.height) * scale_y)));
     FloatingSelection transformed = scale_floating_selection(source, left, top, width, height);
     if (std::abs(angle_degrees) >= 0.0001f) {
         transformed = rotate_floating_selection(transformed, angle_degrees);

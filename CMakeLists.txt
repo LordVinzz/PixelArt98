@@ -455,6 +455,10 @@ if(PIXELART_BUILD_TESTS)
         tests/graph_effect_ui_tests.cpp
         src/ui/AdjustmentWidgets.cpp
         src/ui/GraphEffectWidget.cpp)
+    # Qt 6.8's QTRY_* macros trigger GCC conversion diagnostics inside QtTest.
+    # Keep conversion warnings fatal for the application sources compiled into these targets.
+    set_source_files_properties(tests/graph_effect_ui_tests.cpp PROPERTIES
+        COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU>:-Wno-error=conversion>")
     target_link_libraries(pixelart_graph_effect_ui_tests PRIVATE
         pixelart_core Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Test)
     pixelart_configure_project_target(pixelart_graph_effect_ui_tests)
@@ -470,6 +474,8 @@ if(PIXELART_BUILD_TESTS)
         src/ui/QtCanvasWidget.cpp
         src/ui/QtMainWindow.cpp
         src/ui/QtModelPreviewWidget.cpp)
+    set_source_files_properties(tests/qt_ui_tests.cpp PROPERTIES
+        COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU>:-Wno-error=conversion>")
     qt_add_resources(pixelart_qt_ui_tests ui_test_tool_icons
         PREFIX "/"
         BASE "${CMAKE_SOURCE_DIR}/res"
