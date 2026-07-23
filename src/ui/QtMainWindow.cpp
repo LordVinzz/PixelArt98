@@ -1704,18 +1704,18 @@ void QtMainWindow::build_text_dock() {
     raster_text_input_->setMaximumHeight(110);
     layout->addWidget(raster_text_input_);
 
-    auto* options = new QWidget(panel);
-    auto* form = new QFormLayout(options);
+    auto* options_panel = new QWidget(panel);
+    auto* form = new QFormLayout(options_panel);
     form->setContentsMargins(0, 0, 0, 0);
     QSettings preferences;
 
-    raster_text_font_ = new QFontComboBox(options);
+    raster_text_font_ = new QFontComboBox(options_panel);
     raster_text_font_->setObjectName(QStringLiteral("RasterTextFont"));
     raster_text_font_->setCurrentFont(QFont(preferences.value(
         QStringLiteral("text/fontFamily"),
         raster_text_font_->currentFont().family()).toString()));
 
-    raster_text_size_ = new QSpinBox(options);
+    raster_text_size_ = new QSpinBox(options_panel);
     raster_text_size_->setObjectName(QStringLiteral("RasterTextSize"));
     raster_text_size_->setRange(1, 512);
     raster_text_size_->setValue(std::clamp(
@@ -1727,7 +1727,7 @@ void QtMainWindow::build_text_dock() {
     raster_text_box_height_ = std::max(
         1, preferences.value(QStringLiteral("text/boxHeight"), 64).toInt());
 
-    raster_text_alignment_ = new QComboBox(options);
+    raster_text_alignment_ = new QComboBox(options_panel);
     raster_text_alignment_->setObjectName(QStringLiteral("RasterTextAlignment"));
     raster_text_alignment_->addItem(tr("Left"), static_cast<int>(RasterTextAlignment::Left));
     raster_text_alignment_->addItem(tr("Center"), static_cast<int>(RasterTextAlignment::Center));
@@ -1735,20 +1735,20 @@ void QtMainWindow::build_text_dock() {
     raster_text_alignment_->setCurrentIndex(std::clamp(
         preferences.value(QStringLiteral("text/alignment"), 0).toInt(), 0, 2));
 
-    raster_text_bold_ = new QCheckBox(tr("Bold"), options);
+    raster_text_bold_ = new QCheckBox(tr("Bold"), options_panel);
     raster_text_bold_->setObjectName(QStringLiteral("RasterTextBold"));
     raster_text_bold_->setChecked(
         preferences.value(QStringLiteral("text/bold"), false).toBool());
-    raster_text_italic_ = new QCheckBox(tr("Italic"), options);
+    raster_text_italic_ = new QCheckBox(tr("Italic"), options_panel);
     raster_text_italic_->setObjectName(QStringLiteral("RasterTextItalic"));
     raster_text_italic_->setChecked(
         preferences.value(QStringLiteral("text/italic"), false).toBool());
-    raster_text_antialias_ = new QCheckBox(tr("Antialias"), options);
+    raster_text_antialias_ = new QCheckBox(tr("Antialias"), options_panel);
     raster_text_antialias_->setObjectName(QStringLiteral("RasterTextAntialias"));
     raster_text_antialias_->setChecked(
         preferences.value(QStringLiteral("text/antialias"), false).toBool());
 
-    auto* styles = new QWidget(options);
+    auto* styles = new QWidget(options_panel);
     auto* styles_layout = new QGridLayout(styles);
     styles_layout->setContentsMargins(0, 0, 0, 0);
     styles_layout->setHorizontalSpacing(12);
@@ -1762,7 +1762,7 @@ void QtMainWindow::build_text_dock() {
     form->addRow(tr("Pixel size"), raster_text_size_);
     form->addRow(tr("Alignment"), raster_text_alignment_);
     form->addRow(tr("Style"), styles);
-    layout->addWidget(options);
+    layout->addWidget(options_panel);
 
     auto* buttons = new QWidget(panel);
     auto* buttons_layout = new QHBoxLayout(buttons);
