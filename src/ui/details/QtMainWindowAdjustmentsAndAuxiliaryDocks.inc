@@ -384,12 +384,14 @@ void QtMainWindow::rebuild_tool_options() {
         auto* pressure_size = new QCheckBox(tr("Pressure controls size"));
         pressure_size->setObjectName(QStringLiteral("BrushPressureSize"));
         pressure_size->setChecked(controller_.tool().pressure_controls_size);
+        pressure_size->setMinimumWidth(pressure_size->sizeHint().width());
         connect(pressure_size, &QCheckBox::toggled, this,
                 [this](bool checked) { controller_.tool().pressure_controls_size = checked; });
         tool_options_layout_->addWidget(pressure_size);
         auto* pressure_opacity = new QCheckBox(tr("Pressure controls opacity"));
         pressure_opacity->setObjectName(QStringLiteral("BrushPressureOpacity"));
         pressure_opacity->setChecked(controller_.tool().pressure_controls_opacity);
+        pressure_opacity->setMinimumWidth(pressure_opacity->sizeHint().width());
         connect(pressure_opacity, &QCheckBox::toggled, this,
                 [this](bool checked) { controller_.tool().pressure_controls_opacity = checked; });
         tool_options_layout_->addWidget(pressure_opacity);
@@ -520,4 +522,3 @@ void QtMainWindow::rebuild_tool_options() {
     }
     tool_options_layout_->addStretch(1);
 }
-
