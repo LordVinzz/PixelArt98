@@ -9,6 +9,8 @@ project(PixelArt98
     DESCRIPTION "A native pixel-art editor inspired by classic Paint workflows"
     LANGUAGES C CXX)
 
+include(GNUInstallDirs)
+
 set(PIXELART_VERSION_OVERRIDE "" CACHE STRING
     "Version embedded in PixelArt98 instead of PROJECT_VERSION")
 set(PIXELART_BUILD_COMMIT "" CACHE STRING
@@ -275,7 +277,8 @@ else()
     target_sources(pixelart_app PRIVATE src/render/MpsEffectRenderer.cpp)
 endif()
 target_include_directories(pixelart_app PUBLIC src)
-if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
+if(PIXELART_ENABLE_ONNXRUNTIME AND
+   ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
     target_include_directories(pixelart_app SYSTEM PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
     target_link_libraries(pixelart_app PRIVATE ${ONNXRUNTIME_LIBRARY})
     target_compile_definitions(pixelart_app PUBLIC PIXELART_HAS_ONNXRUNTIME=1)
@@ -285,7 +288,7 @@ else()
         message(STATUS "ONNX Runtime not found; depth extraction will try other model backends or stay unavailable.")
     endif()
 endif()
-if(OpenCV_FOUND)
+if(PIXELART_ENABLE_OPENCV_DNN AND OpenCV_FOUND)
     target_include_directories(pixelart_app SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
     target_link_libraries(pixelart_app PRIVATE ${OpenCV_LIBS})
     target_compile_definitions(pixelart_app PUBLIC PIXELART_HAS_OPENCV_DNN=1)
@@ -365,27 +368,46 @@ target_link_libraries(PixelArt98 PRIVATE
 target_compile_definitions(PixelArt98 PRIVATE GL_SILENCE_DEPRECATION)
 set_target_properties(PixelArt98 PROPERTIES
     MACOSX_BUNDLE TRUE
+    MACOSX_BUNDLE_BUNDLE_NAME PixelArt98
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PIXELART_BUILD_VERSION}"
     MACOSX_BUNDLE_ICON_FILE PixelArt98.icns
+    MACOSX_BUNDLE_GUI_IDENTIFIER "fr.master-developpement-logiciel.pixelart98"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PIXELART_BUILD_VERSION}"
     WIN32_EXECUTABLE TRUE)
 pixelart_configure_project_target(PixelArt98)
 add_custom_target(pixelart DEPENDS PixelArt98)
 
 install(TARGETS PixelArt98
     BUNDLE DESTINATION .
-    RUNTIME DESTINATION .)
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
-qt_generate_deploy_app_script(
-    TARGET PixelArt98
-    OUTPUT_SCRIPT pixelart_deploy_script
-    NO_UNSUPPORTED_PLATFORM_ERROR)
+if(WIN32)
+    qt_generate_deploy_app_script(
+        TARGET PixelArt98
+        OUTPUT_SCRIPT pixelart_deploy_script
+        DEPLOY_TOOL_OPTIONS --compiler-runtime
+        NO_UNSUPPORTED_PLATFORM_ERROR)
+elseif(APPLE)
+    qt_generate_deploy_app_script(
+        TARGET PixelArt98
+        OUTPUT_SCRIPT pixelart_deploy_script
+        DEPLOY_TOOL_OPTIONS -codesign=-
+        NO_UNSUPPORTED_PLATFORM_ERROR)
+else()
+    qt_generate_deploy_app_script(
+        TARGET PixelArt98
+        OUTPUT_SCRIPT pixelart_deploy_script
+        NO_UNSUPPORTED_PLATFORM_ERROR)
+endif()
 install(SCRIPT ${pixelart_deploy_script})
 
 if(UNIX AND NOT APPLE)
     install(FILES ${PIXELART_APP_LOGO}
-        DESTINATION share/pixmaps
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/pixmaps
         RENAME pixelart98.png)
     install(FILES ${CMAKE_SOURCE_DIR}/res/pixelart98.desktop
-        DESTINATION share/applications)
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 endif()
 
 install(DIRECTORY res/skyboxes DESTINATION res)

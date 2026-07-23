@@ -12,6 +12,7 @@
 #include <QPixmap>
 #include <QScreen>
 #include <QSplashScreen>
+#include <QStringList>
 #include <QSurfaceFormat>
 #include <QTimer>
 
@@ -31,10 +32,13 @@ int main(int argc, char** argv) {
     QApplication::setApplicationVersion(QString::fromLatin1(px::version::kVersion));
     QApplication::setOrganizationName(QStringLiteral("PixelArt98"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/logo.png")));
+
+    const QStringList arguments = application.arguments();
+    if (arguments.contains(QStringLiteral("--deployment-smoke-test"))) return 0;
+
     px::configure_qt_settings_storage();
 
     QString import_path;
-    const QStringList arguments = application.arguments();
     for (qsizetype index = 1; index + 1 < arguments.size(); ++index) {
         if (arguments[index] == QStringLiteral("--import-image")) import_path = arguments[++index];
     }

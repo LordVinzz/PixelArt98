@@ -44,7 +44,15 @@ Tagged releases are built by GitHub Actions and publish:
 - `PixelArt98-linux-x64.zip`
 - `PixelArt98-source-<tag>.zip`
 
-Each platform ZIP contains the embedded executable and this README. Linux still requires the usual desktop OpenGL/window-system runtime libraries supplied by the distribution.
+Each platform ZIP contains the application, the Qt runtime, the required Qt platform
+and image-format plugins, `qt.conf`, and this README. The executable is in `bin` on
+Windows and Linux; the macOS archive contains `PixelArt98.app`.
+
+The Windows archive also includes Microsoft's Visual C++ x64 redistributable. Linux
+builds target Ubuntu 22.04's runtime baseline and still require the usual desktop
+OpenGL/window-system libraries supplied by the distribution. The macOS application
+is ad-hoc signed for bundle-integrity checks in CI; public notarization requires a
+Developer ID certificate and Apple notarization credentials.
 
 ## Build Locally
 
@@ -92,6 +100,8 @@ On macOS, run `build/PixelArt98.app`; on Windows multi-config builds, run `build
 The deployment workflow is in `.github/workflows/release.yml`.
 
 - Pushes and pull requests build and test Windows, macOS, and Linux.
+- Each job installs the application into its final ZIP layout, checks the deployed
+  Qt runtime and plugins, and launches that installed copy in a smoke test.
 - Workflow artifacts include zipped executables for each platform and a zipped source archive.
 - Pushing a tag matching `v*` creates or updates a GitHub Release and uploads the ZIP assets.
 
