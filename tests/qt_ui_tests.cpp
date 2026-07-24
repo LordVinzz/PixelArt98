@@ -161,10 +161,14 @@ private slots:
                 QVERIFY(widget != nullptr);
             }
 
-            QVERIFY(tools->isFloating());
-            QVERIFY(colors->isFloating());
-            QVERIFY(layers->isFloating());
-            QVERIFY(history->isFloating());
+            QVERIFY(!tools->isFloating());
+            QVERIFY(!colors->isFloating());
+            QVERIFY(!layers->isFloating());
+            QVERIFY(!history->isFloating());
+            QCOMPARE(window.dockWidgetArea(tools), Qt::LeftDockWidgetArea);
+            QCOMPARE(window.dockWidgetArea(colors), Qt::RightDockWidgetArea);
+            QCOMPARE(window.dockWidgetArea(layers), Qt::RightDockWidgetArea);
+            QCOMPARE(window.dockWidgetArea(history), Qt::RightDockWidgetArea);
             QVERIFY(!tools->isHidden());
             QVERIFY(!colors->isHidden());
             QVERIFY(!layers->isHidden());
