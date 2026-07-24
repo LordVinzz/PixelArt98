@@ -67,7 +67,7 @@ controls in the current working tree does not change that broader assessment.
 | Rulers, guides, and smart snapping | **No** | Limited | **Yes** |
 | Canvas rotation | **No** | No | **Yes** |
 | Tile preview | **Yes** | No dedicated pixel-art preview | Pattern Preview |
-| Large-image tiled rendering | **Dormant**: `GLTiledCanvasTexture` is not used by the Qt canvas | Mature multithreaded renderer | Mature tile, cache, GPU, and scratch-disk pipeline |
+| Large-image tiled rendering | **Yes**: the Qt canvas uses 512-pixel OpenGL tiles, visible-tile upload budgets, and CPU-built LOD pyramids for zoomed-out images of at least 8192 × 8192 pixels, with the previous QPainter path as a fallback when OpenGL is unavailable | Mature multithreaded renderer | Mature tile, cache, GPU, and scratch-disk pipeline |
 | Internal pixel precision | RGBA, 8 bits per channel only | 8-bit document editing with modern display color management | 8, 16, and 32 bits per channel |
 | ICC color profiles | **No** | **Yes** | **Yes** |
 | RGB, CMYK, Lab, grayscale, and indexed modes | **No**: RGBA only | Primarily RGB | **Yes** |
@@ -177,9 +177,9 @@ controls in the current working tree does not change that broader assessment.
 | Auto-Level and Posterize | **Yes** | **Yes** | **Yes** |
 | Destructive filter catalog | About forty artistic, blur, color, distort, noise, photo, render, and stylize effects | Broad mature catalog plus plugins | Very broad professional catalog plus plugins |
 | Interactive filter preview | **Yes** | **Yes** | **Yes** |
-| OpenGL effect acceleration | **Dormant**: the renderer exists but the regular effect UI does not call it | GPU acceleration for nearly all built-in effects | Broad GPU acceleration |
+| OpenGL effect acceleration | **Yes**: GPU-mapped adjustments and effects use the canvas OpenGL context when Heavy GPU Optimization is enabled, with capability-based chunking and automatic CPU fallback | GPU acceleration for nearly all built-in effects | Broad GPU acceleration |
 | Metal/MPS effect acceleration | **Partial**: macOS only, optional, and disabled by default | Not applicable | Metal acceleration on macOS where supported |
-| GPU result integrated with undo | **WIP**: accepted MPS previews can replace cel pixels without a normal pixel command | **Yes** | **Yes** |
+| GPU result integrated with undo | **Yes**: accepted OpenGL and MPS previews commit the same pixel-history command shape as CPU effects | **Yes** | **Yes** |
 | Node-based image effects | **Yes**: GraphEffect has a large node catalog, validation, live preview, and graph save/load | No | No native node graph |
 | Non-destructive graph attachment to a layer | **No**: Apply rasterizes the graph result into the active cel | Not applicable | No node graph, but Smart Filters and adjustment layers are non-destructive |
 | Depth-map generation | **WIP**: ONNX Runtime or OpenCV DNN, tiling, progress, and cancellation | No | Neural Depth Blur and related workflows |
@@ -257,7 +257,7 @@ controls in the current working tree does not change that broader assessment.
 | Feature | PixelArt98 | Paint.NET 5.1.12 | Photoshop desktop 27.x |
 |---|---|---|---|
 | Native application architecture | C++23, Qt 6 Widgets, and OpenGL | .NET and Windows graphics stack | Native Adobe desktop stack |
-| Local automated tests | **Yes**: 16 of 16 currently pass in a full local build | Not evaluated here | Not evaluated here |
+| Local automated tests | **Yes**: 17 of 17 currently pass in a full local build | Not evaluated here | Not evaluated here |
 | End-user validation depth | **WIP**: tests are mostly fast unit, integration, and offscreen UI checks | Long production history | Industrial production validation |
 | Release CI builds the full registered test suite | **No**: several registered test executables are omitted from the explicit build target list | Mature release infrastructure | Mature release infrastructure |
 | Depth dependencies bundled in release archives | **No** | Not applicable | **Yes** for supported Adobe features |
@@ -339,20 +339,35 @@ with the following limitations kept explicit:
    texture, scatter, tilt/rotation dynamics, device curves, predictive
    stabilization, or paint mixing.
 
+## Completed Gap Work: Production GPU Paths (24 July 2026)
+
+The dormant OpenGL paths are now part of normal application workflows. The Qt
+canvas owns a `GLTiledCanvasTexture`, initializes it in the widget's production
+OpenGL context, uploads only visible 512-pixel tiles under a per-frame budget,
+and schedules follow-up paints while visible uploads remain. Zoomed-out images
+of at least 8192 × 8192 pixels use a CPU-built level-of-detail pyramid; display
+revisions invalidate stale tiles and pyramids, while unavailable OpenGL
+contexts retain the previous QPainter rendering path.
+
+Effect and adjustment dialogs now try the optional Metal/MPS backend first when
+requested, then the OpenGL renderer through the canvas context, and finally the
+existing CPU implementation. Accepted GPU results create normal undoable pixel
+commands instead of replacing cel pixels outside document history. Shader
+compilation, direct tiled drawing, normal-widget tiled presentation, OpenGL
+effect routing, and GPU-effect undo are covered by tests.
+
 ## Highest-Priority Remaining Gaps
 
 The most important missing work is not another effect. Product credibility
 depends first on:
 
-1. either wiring the OpenGL tiled/effect renderers into production paths or
-   removing GPU and large-image claims;
-2. finishing the real animation timeline before documenting shortcuts, cues,
+1. finishing the real animation timeline before documenting shortcuts, cues,
    drag reordering, or ping-pong controls;
-3. shipping and testing the depth backend in release packages before calling it
+2. shipping and testing the depth backend in release packages before calling it
    a distributed feature;
-4. fixing the release workflow so every registered test is built and run;
-5. expanding static import/export beyond the current small format set;
-6. deciding whether PixelArt98 is a pixel-art application or a professional
+3. fixing the release workflow so every registered test is built and run;
+4. expanding static import/export beyond the current small format set;
+5. deciding whether PixelArt98 is a pixel-art application or a professional
    photo editor, then aligning the roadmap and documentation with that scope.
 
 ## Maintenance Rule

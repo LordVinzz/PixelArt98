@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "render/GLTiledCanvasTexture.hpp"
 #include "ui/EditorController.hpp"
 #include "ui/TextRasterizer.hpp"
 
@@ -12,6 +13,7 @@
 #include <QRectF>
 
 #include <functional>
+#include <cstdint>
 #include <optional>
 
 class QEvent;
@@ -23,6 +25,7 @@ namespace px {
 class QtCanvasWidget final : public QOpenGLWidget {
 public:
     explicit QtCanvasWidget(EditorController& controller, QWidget* parent = nullptr);
+    ~QtCanvasWidget() override;
 
     void set_grid_visible(bool visible);
     void set_checker_visible(bool visible);
@@ -33,6 +36,10 @@ public:
     void fit_to_canvas();
     [[nodiscard]] double zoom() const noexcept { return zoom_; }
     [[nodiscard]] bool onion_visible() const noexcept { return onion_visible_; }
+    [[nodiscard]] bool gl_ready() const noexcept { return gl_ready_; }
+    [[nodiscard]] const GLTiledCanvasTexture::DrawStats& tiled_draw_stats() const {
+        return tiled_texture_.last_draw_stats();
+    }
     void set_raster_text_preview(int x, int y, RasterTextImage preview);
     void clear_raster_text_preview();
     void set_raster_text_box(int x, int y, int width, int height);
@@ -76,6 +83,7 @@ protected:
     void keyReleaseEvent(QKeyEvent* event) override;
 
 private:
+    static void* load_gl_proc(const char* name);
     [[nodiscard]] QRectF image_rect() const;
     [[nodiscard]] QPoint pixel_at(const QPointF& position) const;
     [[nodiscard]] bool valid_pixel(const QPoint& pixel) const;
@@ -119,6 +127,12 @@ private:
     int raster_text_box_height_ = 1;
     SelectionTransformHandle raster_text_box_handle_ = SelectionTransformHandle::None;
     QRect raster_text_box_before_resize_;
+    GLTiledCanvasTexture tiled_texture_;
+    std::uint64_t tiled_display_revision_ = 0;
+    std::uint64_t pyramid_display_revision_ = 0;
+    int tiled_document_width_ = 0;
+    int tiled_document_height_ = 0;
+    bool gl_ready_ = false;
 };
 
 } // namespace px

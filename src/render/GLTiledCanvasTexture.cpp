@@ -9,13 +9,36 @@
 #include <glad/gl.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <string>
 
 namespace px {
 
 namespace {
+
+constexpr const char* kTiledCanvasVertexShader = R"GLSL(
+#version 330 core
+layout(location = 0) in vec2 a_position;
+layout(location = 1) in vec2 a_uv;
+out vec2 v_uv;
+void main() {
+    v_uv = a_uv;
+    gl_Position = vec4(a_position, 0.0, 1.0);
+}
+)GLSL";
+
+constexpr const char* kTiledCanvasFragmentShader = R"GLSL(
+#version 330 core
+in vec2 v_uv;
+uniform sampler2D u_texture;
+out vec4 frag_color;
+void main() {
+    frag_color = texture(u_texture, v_uv);
+}
+)GLSL";
 
 int ceil_div(int value, int divisor) {
     return (value + divisor - 1) / divisor;
@@ -59,6 +82,14 @@ std::size_t GLTiledCanvasTexture::CpuPyramid::pixel_count() const {
 
 GLTiledCanvasTexture::~GLTiledCanvasTexture() {
     destroy();
+}
+
+const char* GLTiledCanvasTexture::vertex_shader_source() {
+    return kTiledCanvasVertexShader;
+}
+
+const char* GLTiledCanvasTexture::fragment_shader_source() {
+    return kTiledCanvasFragmentShader;
 }
 
 bool GLTiledCanvasTexture::should_use_pyramid(int document_width, int document_height) {
@@ -264,9 +295,16 @@ void GLTiledCanvasTexture::destroy() {
     levels_.clear();
     upload_queue_.clear();
     scratch_.clear();
+    if (vertex_buffer_ != 0) glDeleteBuffers(1, &vertex_buffer_);
+    if (vertex_array_ != 0) glDeleteVertexArrays(1, &vertex_array_);
+    if (shader_program_ != 0) glDeleteProgram(shader_program_);
+    vertex_buffer_ = 0;
+    vertex_array_ = 0;
+    shader_program_ = 0;
     document_width_ = 0;
     document_height_ = 0;
     generation_ = 1;
+    last_error_.clear();
 }
 
 GLTiledCanvasTexture::Tile& GLTiledCanvasTexture::tile_at(Level& level, int tile_x, int tile_y) {
@@ -434,6 +472,203 @@ bool GLTiledCanvasTexture::upload_tile(Level& level,
     tile.generation = generation;
     (void)level;
     return true;
+}
+
+bool GLTiledCanvasTexture::ensure_program() {
+    if (shader_program_ != 0) return true;
+    const auto compile = [this](unsigned int type, const char* source) {
+        const unsigned int shader = glCreateShader(type);
+        glShaderSource(shader, 1, &source, nullptr);
+        glCompileShader(shader);
+        int ok = 0;
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+        if (ok != 0) return shader;
+        std::array<char, 1024> log{};
+        glGetShaderInfoLog(shader, static_cast<int>(log.size()), nullptr, log.data());
+        last_error_ = std::string("Tiled canvas shader compile failed: ") + log.data();
+        glDeleteShader(shader);
+        return 0U;
+    };
+    const unsigned int vertex = compile(GL_VERTEX_SHADER, vertex_shader_source());
+    if (vertex == 0) return false;
+    const unsigned int fragment = compile(GL_FRAGMENT_SHADER, fragment_shader_source());
+    if (fragment == 0) {
+        glDeleteShader(vertex);
+        return false;
+    }
+    shader_program_ = glCreateProgram();
+    glAttachShader(shader_program_, vertex);
+    glAttachShader(shader_program_, fragment);
+    glLinkProgram(shader_program_);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    int ok = 0;
+    glGetProgramiv(shader_program_, GL_LINK_STATUS, &ok);
+    if (ok != 0) return true;
+    std::array<char, 1024> log{};
+    glGetProgramInfoLog(shader_program_, static_cast<int>(log.size()), nullptr, log.data());
+    last_error_ = std::string("Tiled canvas shader link failed: ") + log.data();
+    glDeleteProgram(shader_program_);
+    shader_program_ = 0;
+    return false;
+}
+
+bool GLTiledCanvasTexture::ensure_geometry() {
+    if (vertex_array_ != 0 && vertex_buffer_ != 0) return true;
+    glGenVertexArrays(1, &vertex_array_);
+    glGenBuffers(1, &vertex_buffer_);
+    glBindVertexArray(vertex_array_);
+    glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(16 * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * static_cast<int>(sizeof(float)), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * static_cast<int>(sizeof(float)),
+                          reinterpret_cast<void*>(2 * sizeof(float)));
+    glBindVertexArray(0);
+    return vertex_array_ != 0 && vertex_buffer_ != 0;
+}
+
+void GLTiledCanvasTexture::draw_tile(const Level& level,
+                                     const Tile& tile,
+                                     float zoom,
+                                     float target_left,
+                                     float target_top,
+                                     int viewport_width,
+                                     int viewport_height) {
+    const float document_x = static_cast<float>(tile.x * level.downsample);
+    const float document_y = static_cast<float>(tile.y * level.downsample);
+    const float document_right = static_cast<float>(
+        std::min(document_width_, (tile.x + tile.width) * level.downsample));
+    const float document_bottom = static_cast<float>(
+        std::min(document_height_, (tile.y + tile.height) * level.downsample));
+    const float left = target_left + document_x * zoom;
+    const float top = target_top + document_y * zoom;
+    const float right = target_left + document_right * zoom;
+    const float bottom = target_top + document_bottom * zoom;
+    const auto ndc_x = [viewport_width](float x) {
+        return x * 2.0f / static_cast<float>(viewport_width) - 1.0f;
+    };
+    const auto ndc_y = [viewport_height](float y) {
+        return 1.0f - y * 2.0f / static_cast<float>(viewport_height);
+    };
+    const float vertices[] = {
+        ndc_x(left),  ndc_y(top),    0.0f, 0.0f,
+        ndc_x(right), ndc_y(top),    1.0f, 0.0f,
+        ndc_x(left),  ndc_y(bottom), 0.0f, 1.0f,
+        ndc_x(right), ndc_y(bottom), 1.0f, 1.0f
+    };
+    glBindTexture(GL_TEXTURE_2D, tile.texture_id);
+    glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(sizeof(vertices)), vertices);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+bool GLTiledCanvasTexture::draw(const std::vector<Pixel>& base_pixels,
+                                int document_width,
+                                int document_height,
+                                float zoom,
+                                float target_left,
+                                float target_top,
+                                int viewport_width,
+                                int viewport_height,
+                                int visible_left,
+                                int visible_top,
+                                int visible_right,
+                                int visible_bottom) {
+    last_draw_stats_ = {};
+    last_error_.clear();
+    const std::size_t expected = static_cast<std::size_t>(std::max(0, document_width)) *
+                                 static_cast<std::size_t>(std::max(0, document_height));
+    if (document_width <= 0 || document_height <= 0 || zoom <= 0.0f ||
+        viewport_width <= 0 || viewport_height <= 0 || base_pixels.size() != expected) {
+        last_error_ = "Tiled canvas draw received invalid input";
+        return false;
+    }
+    if (document_width != document_width_ || document_height != document_height_ || levels_.empty()) {
+        reset_levels(document_width, document_height);
+    }
+
+    const int selected = choose_level(zoom);
+    Level& level = levels_[static_cast<std::size_t>(selected)];
+    last_draw_stats_.selected_level = selected;
+    const int left = std::clamp(visible_left / level.downsample, 0, level.width);
+    const int top = std::clamp(visible_top / level.downsample, 0, level.height);
+    const int right = std::clamp(ceil_div(visible_right, level.downsample), left, level.width);
+    const int bottom = std::clamp(ceil_div(visible_bottom, level.downsample), top, level.height);
+    if (left >= right || top >= bottom) return false;
+
+    const int first_tile_x = left / kTileSize;
+    const int first_tile_y = top / kTileSize;
+    const int last_tile_x = (right - 1) / kTileSize;
+    const int last_tile_y = (bottom - 1) / kTileSize;
+    upload_queue_.clear();
+    for (int tile_y = first_tile_y; tile_y <= last_tile_y; ++tile_y) {
+        for (int tile_x = first_tile_x; tile_x <= last_tile_x; ++tile_x) {
+            const int tile_index = tile_y * level.columns + tile_x;
+            ++last_draw_stats_.visible_tiles;
+            if (!tile_ready(selected, tile_index)) enqueue_tile(selected, tile_index);
+        }
+    }
+    process_upload_queue(base_pixels, document_width);
+    last_draw_stats_.pending_tiles = static_cast<int>(upload_queue_.size());
+    if (!ensure_program() || !ensure_geometry()) return false;
+
+    int previous_program = 0;
+    int previous_array_buffer = 0;
+    int previous_vertex_array = 0;
+    int previous_active_texture = 0;
+    int previous_texture_2d = 0;
+    int previous_blend_src_rgb = 0;
+    int previous_blend_dst_rgb = 0;
+    int previous_blend_src_alpha = 0;
+    int previous_blend_dst_alpha = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &previous_program);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &previous_array_buffer);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vertex_array);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture_2d);
+    glGetIntegerv(GL_BLEND_SRC_RGB, &previous_blend_src_rgb);
+    glGetIntegerv(GL_BLEND_DST_RGB, &previous_blend_dst_rgb);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &previous_blend_src_alpha);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &previous_blend_dst_alpha);
+    const bool blend_enabled = glIsEnabled(GL_BLEND) != 0;
+    const bool depth_enabled = glIsEnabled(GL_DEPTH_TEST) != 0;
+    const bool scissor_enabled = glIsEnabled(GL_SCISSOR_TEST) != 0;
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(shader_program_);
+    glUniform1i(glGetUniformLocation(shader_program_, "u_texture"), 0);
+    glBindVertexArray(vertex_array_);
+    bool drew = false;
+    for (int tile_y = first_tile_y; tile_y <= last_tile_y; ++tile_y) {
+        for (int tile_x = first_tile_x; tile_x <= last_tile_x; ++tile_x) {
+            const int tile_index = tile_y * level.columns + tile_x;
+            if (!tile_ready(selected, tile_index)) continue;
+            draw_tile(level, level.tiles[static_cast<std::size_t>(tile_index)], zoom,
+                      target_left, target_top, viewport_width, viewport_height);
+            drew = true;
+        }
+    }
+    last_draw_stats_.drew_lod = drew && selected > 0;
+
+    glBindVertexArray(static_cast<unsigned int>(previous_vertex_array));
+    glBindBuffer(GL_ARRAY_BUFFER, static_cast<unsigned int>(previous_array_buffer));
+    glUseProgram(static_cast<unsigned int>(previous_program));
+    glBindTexture(GL_TEXTURE_2D, static_cast<unsigned int>(previous_texture_2d));
+    glActiveTexture(static_cast<unsigned int>(previous_active_texture));
+    glBlendFuncSeparate(static_cast<unsigned int>(previous_blend_src_rgb),
+                        static_cast<unsigned int>(previous_blend_dst_rgb),
+                        static_cast<unsigned int>(previous_blend_src_alpha),
+                        static_cast<unsigned int>(previous_blend_dst_alpha));
+    if (!blend_enabled) glDisable(GL_BLEND);
+    if (depth_enabled) glEnable(GL_DEPTH_TEST);
+    if (scissor_enabled) glEnable(GL_SCISSOR_TEST);
+    return drew;
 }
 
 } // namespace px

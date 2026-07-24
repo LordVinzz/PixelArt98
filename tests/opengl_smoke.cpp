@@ -7,6 +7,7 @@
 #include "core/Model.hpp"
 #include "render/GpuEffectRenderer.hpp"
 #include "render/GLCanvasTexture.hpp"
+#include "render/GLTiledCanvasTexture.hpp"
 #include "render/MpsEffectRenderer.hpp"
 #include "render/Renderer3D.hpp"
 #include "qt_offscreen_gl.hpp"
@@ -349,6 +350,55 @@ int main() {
             });
         }
         ok = report_step("OpenGL 3D model render with transparent texture", transparent_model_ok) && ok;
+
+        {
+            constexpr int viewport_width = 64;
+            constexpr int viewport_height = 64;
+            unsigned int target_texture = 0;
+            unsigned int target_framebuffer = 0;
+            glGenTextures(1, &target_texture);
+            glBindTexture(GL_TEXTURE_2D, target_texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, viewport_width, viewport_height,
+                         0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glGenFramebuffers(1, &target_framebuffer);
+            glBindFramebuffer(GL_FRAMEBUFFER, target_framebuffer);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                   target_texture, 0);
+            glViewport(0, 0, viewport_width, viewport_height);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+
+            const std::vector<Pixel> tile_pixels = {
+                rgba(255, 0, 0), rgba(0, 255, 0),
+                rgba(0, 0, 255), rgba(255, 255, 255)
+            };
+            GLTiledCanvasTexture tiled;
+            const bool tiled_draw_ok = tiled.draw(
+                tile_pixels, 2, 2, 16.0f, 8.0f, 8.0f,
+                viewport_width, viewport_height, 0, 0, 2, 2);
+            std::vector<Pixel> rendered(static_cast<std::size_t>(viewport_width * viewport_height));
+            glReadPixels(0, 0, viewport_width, viewport_height, GL_RGBA,
+                         GL_UNSIGNED_BYTE, rendered.data());
+            const auto screen_pixel = [&](int x, int y) {
+                return rendered[static_cast<std::size_t>(
+                    (viewport_height - 1 - y) * viewport_width + x)];
+            };
+            const bool colors_match =
+                pixels_close(screen_pixel(12, 12), rgba(255, 0, 0)) &&
+                pixels_close(screen_pixel(28, 12), rgba(0, 255, 0)) &&
+                pixels_close(screen_pixel(12, 28), rgba(0, 0, 255)) &&
+                pixels_close(screen_pixel(28, 28), rgba(255, 255, 255));
+            const auto stats = tiled.last_draw_stats();
+            const bool production_stats =
+                stats.visible_tiles == 1 && stats.tiles_uploaded == 1 &&
+                stats.pending_tiles == 0 && stats.selected_level == 0;
+            ok = report_step("OpenGL tiled canvas draws visible pixels", tiled_draw_ok && colors_match) && ok;
+            ok = report_step("OpenGL tiled canvas reports production upload stats", production_stats) && ok;
+            tiled.destroy();
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &target_framebuffer);
+            glDeleteTextures(1, &target_texture);
+        }
     }
 
     if (!ok) {

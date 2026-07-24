@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,9 @@ public:
     [[nodiscard]] const std::vector<Pixel>& display_pixels();
     [[nodiscard]] const std::vector<Pixel>& onion_skin_pixels();
     void invalidate_display() noexcept;
+    [[nodiscard]] std::uint64_t display_revision() const noexcept {
+        return display_revision_;
+    }
     [[nodiscard]] const std::array<int, 256>& histogram_luma();
 
     void begin_stroke(int x, int y, bool secondary, SelectionCombineMode selection_mode,
@@ -117,6 +121,7 @@ private:
     bool histogram_dirty_ = true;
     bool histogram_approximate_ = false;
     bool interaction_active_ = false;
+    std::uint64_t display_revision_ = 1;
     bool selection_transform_active_ = false;
     SelectionTransformHandle selection_transform_handle_ = SelectionTransformHandle::None;
     FloatingSelection selection_transform_source_;

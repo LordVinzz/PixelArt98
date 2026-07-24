@@ -460,4 +460,9 @@ QtMainWindow::~QtMainWindow() {
         save_ui_state();
         mark_clean_shutdown();
     }
+    if (canvas_ != nullptr && canvas_->context() != nullptr && canvas_->isValid()) {
+        canvas_->makeCurrent();
+        gpu_effect_renderer_.destroy();
+        canvas_->doneCurrent();
+    }
 }

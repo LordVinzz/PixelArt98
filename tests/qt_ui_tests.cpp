@@ -35,6 +35,7 @@
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
+#include <QSurfaceFormat>
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTest>
@@ -501,6 +502,8 @@ private slots:
     void graph_effect_source_refresh_is_deferred_until_the_tab_is_visible();
     void zoom_shortcuts_only_affect_the_active_workspace_tab();
     void configurable_adjustments_preview_on_cpu_and_cancel_cleanly();
+    void tiled_canvas_renderer_is_used_by_normal_widget();
+    void opengl_effect_preview_uses_canvas_context_and_is_undoable();
     void animation_buttons_keep_frame_operations_working();
 
 private:
@@ -509,5 +512,16 @@ private:
 
 #include "qt_ui_advanced_tests.inc"
 
-QTEST_MAIN(QtUiTests)
+int main(int argc, char** argv) {
+    QSurfaceFormat format;
+    format.setVersion(3, 3);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    format.setDepthBufferSize(24);
+    format.setStencilBufferSize(8);
+    QSurfaceFormat::setDefaultFormat(format);
+    QApplication application(argc, argv);
+    QtUiTests tests;
+    return QTest::qExec(&tests, argc, argv);
+}
+
 #include "qt_ui_tests.moc"

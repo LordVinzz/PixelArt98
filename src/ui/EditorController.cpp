@@ -21,6 +21,11 @@ std::size_t environment_limit(const char* name, std::size_t fallback) {
     return end == value ? fallback : static_cast<std::size_t>(parsed);
 }
 
+void advance_revision(std::uint64_t& revision) {
+    ++revision;
+    if (revision == 0) revision = 1;
+}
+
 } // namespace
 
 EditorController::EditorController() = default;
@@ -53,6 +58,7 @@ void EditorController::replace_project(Document document, ModelDocument model) {
         pasted_selection_before_ = document_.snapshot_active_cel();
     }
     display_dirty_ = true;
+    advance_revision(display_revision_);
     onion_skin_dirty_ = true;
     histogram_dirty_ = true;
     modified_ = false;
@@ -61,13 +67,14 @@ void EditorController::replace_project(Document document, ModelDocument model) {
 void EditorController::mark_changed(std::string status) {
     status_ = std::move(status);
     modified_ = true;
-    display_dirty_ = true;
+    invalidate_display();
     onion_skin_dirty_ = true;
     histogram_dirty_ = true;
 }
 
 void EditorController::invalidate_display() noexcept {
     display_dirty_ = true;
+    advance_revision(display_revision_);
 }
 
 const std::vector<Pixel>& EditorController::display_pixels() {

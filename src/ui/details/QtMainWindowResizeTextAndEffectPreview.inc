@@ -336,9 +336,10 @@ void QtMainWindow::show_effect_preview(const QString& name, const EffectOperatio
     apply_button->setAutoDefault(true);
     cancel_button->setDefault(false);
     cancel_button->setAutoDefault(false);
-    const auto preview = [this, &original, operation, gpu_request](int setting) {
+    const auto preview = [this, &original, operation, gpu_request, name](int setting) {
         controller_.document() = original;
-        if (!gpu_request || !apply_mps_preview(controller_.document(), gpu_request(setting))) {
+        if (!gpu_request ||
+            !apply_accelerated_preview(controller_.document(), gpu_request(setting), name)) {
             operation(controller_.document(), setting);
             last_effect_backend_ = "cpu";
         }
@@ -361,15 +362,33 @@ void QtMainWindow::show_effect_preview(const QString& name, const EffectOperatio
     refresh_all();
 }
 
-bool QtMainWindow::apply_mps_preview(Document& document, const GpuEffectRequest& request) {
-    if (!settings_.heavy_gpu_optimization || !settings_.mps_backend) return false;
+bool QtMainWindow::apply_accelerated_preview(Document& document,
+                                             const GpuEffectRequest& request,
+                                             const QString& undo_name) {
+    if (!settings_.heavy_gpu_optimization || !document.has_active_cel()) return false;
+    std::vector<Pixel> before = document.snapshot_active_cel();
     std::vector<Pixel> output;
-    const bool rendered = mps_effect_renderer_.render_active_cel(document, request) &&
-                          mps_effect_renderer_.read_output_pixels(output) &&
-                          output.size() == document.active_cel().pixels.size();
+    if (settings_.mps_backend &&
+        mps_effect_renderer_.render_active_cel(document, request) &&
+        mps_effect_renderer_.read_output_pixels(output) &&
+        output.size() == before.size()) {
+        document.active_cel().pixels = std::move(output);
+        document.commit_active_cel_edit(undo_name.toStdString(), std::move(before));
+        last_effect_backend_ = "mps";
+        return true;
+    }
+
+    if (canvas_ == nullptr || !canvas_->gl_ready() || canvas_->context() == nullptr) return false;
+    canvas_->makeCurrent();
+    const bool context_ready = QOpenGLContext::currentContext() == canvas_->context();
+    const bool rendered = context_ready &&
+                          gpu_effect_renderer_.render_active_cel(document, request) &&
+                          gpu_effect_renderer_.read_output_pixels(output) &&
+                          output.size() == before.size();
+    canvas_->doneCurrent();
     if (!rendered) return false;
     document.active_cel().pixels = std::move(output);
-    last_effect_backend_ = "mps";
+    document.commit_active_cel_edit(undo_name.toStdString(), std::move(before));
+    last_effect_backend_ = "opengl";
     return true;
 }
-

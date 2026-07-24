@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace px {
@@ -67,7 +68,25 @@ public:
                            int y,
                            int width,
                            int height);
+    bool draw(const std::vector<Pixel>& base_pixels,
+              int document_width,
+              int document_height,
+              float zoom,
+              float target_left,
+              float target_top,
+              int viewport_width,
+              int viewport_height,
+              int visible_left,
+              int visible_top,
+              int visible_right,
+              int visible_bottom);
     const DrawStats& last_draw_stats() const { return last_draw_stats_; }
+    [[nodiscard]] bool has_pending_uploads() const noexcept {
+        return !upload_queue_.empty();
+    }
+    [[nodiscard]] const std::string& last_error() const noexcept {
+        return last_error_;
+    }
     void set_prepared_pyramid(CpuPyramid&& pyramid);
     void clear_prepared_pyramid();
     bool has_prepared_pyramid() const;
@@ -88,6 +107,8 @@ public:
                                                         const std::vector<Pixel>& pixels,
                                                         std::size_t min_pixels,
                                                         const PyramidProgressCallback& progress = {});
+    [[nodiscard]] static const char* vertex_shader_source();
+    [[nodiscard]] static const char* fragment_shader_source();
 
 private:
     struct Tile {
@@ -125,6 +146,15 @@ private:
     bool tile_ready(int level_index, int tile_index) const;
     void process_upload_queue(const std::vector<Pixel>& base_pixels, int document_width);
     bool upload_tile(Level& level, Tile& tile, const std::vector<Pixel>& source, int source_width, std::uint64_t generation);
+    bool ensure_program();
+    bool ensure_geometry();
+    void draw_tile(const Level& level,
+                   const Tile& tile,
+                   float zoom,
+                   float target_left,
+                   float target_top,
+                   int viewport_width,
+                   int viewport_height);
 
     static constexpr int kTileSize = 512;
     static constexpr int kPyramidMinDimension = 512;
@@ -139,6 +169,10 @@ private:
     int document_height_ = 0;
     std::uint64_t generation_ = 1;
     DrawStats last_draw_stats_;
+    unsigned int shader_program_ = 0;
+    unsigned int vertex_array_ = 0;
+    unsigned int vertex_buffer_ = 0;
+    std::string last_error_;
 };
 
 } // namespace px

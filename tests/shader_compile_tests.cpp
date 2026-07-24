@@ -3,6 +3,7 @@
 // See LICENSE for details.
 
 #include "render/GpuEffectRenderer.hpp"
+#include "render/GLTiledCanvasTexture.hpp"
 #include "render/MeshUvOverlayRenderer.hpp"
 #include "render/Renderer3D.hpp"
 #include "qt_offscreen_gl.hpp"
@@ -120,6 +121,9 @@ bool compile_glsl_shaders() {
     ok = compile_gl_program("GpuEffectRenderer",
                             px::GpuEffectRenderer::vertex_shader_source(),
                             px::GpuEffectRenderer::fragment_shader_source()) && ok;
+    ok = compile_gl_program("GLTiledCanvasTexture",
+                            px::GLTiledCanvasTexture::vertex_shader_source(),
+                            px::GLTiledCanvasTexture::fragment_shader_source()) && ok;
     ok = compile_gl_program("Renderer3D",
                             px::Renderer3D::vertex_shader_source(),
                             px::Renderer3D::fragment_shader_source()) && ok;

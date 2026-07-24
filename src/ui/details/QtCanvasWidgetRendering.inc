@@ -13,6 +13,8 @@
 #include <QTabletEvent>
 #include <QWheelEvent>
 
+#include <glad/gl.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -154,8 +156,21 @@ QtCanvasWidget::QtCanvasWidget(EditorController& controller, QWidget* parent)
     setMinimumSize(320, 240);
 }
 
+QtCanvasWidget::~QtCanvasWidget() {
+    if (context() != nullptr && isValid()) {
+        makeCurrent();
+        tiled_texture_.destroy();
+        doneCurrent();
+    }
+}
+
+void* QtCanvasWidget::load_gl_proc(const char* name) {
+    return reinterpret_cast<void*>(QOpenGLContext::currentContext()->getProcAddress(name));
+}
+
 void QtCanvasWidget::initializeGL() {
-    QOpenGLContext::currentContext()->functions()->glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
+    gl_ready_ = gladLoadGL(load_gl_proc) != 0;
+    if (gl_ready_) glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
 }
 
 void QtCanvasWidget::resizeGL(int, int) {
@@ -171,6 +186,37 @@ QRectF QtCanvasWidget::image_rect() const {
 }
 
 void QtCanvasWidget::paintGL() {
+    const int document_width = controller_.document().width;
+    const int document_height = controller_.document().height;
+    const auto& pixels = controller_.display_pixels();
+    if (gl_ready_) {
+        const bool dimensions_changed = document_width != tiled_document_width_ ||
+                                        document_height != tiled_document_height_;
+        if (dimensions_changed) {
+            tiled_texture_.destroy();
+            tiled_document_width_ = document_width;
+            tiled_document_height_ = document_height;
+            tiled_display_revision_ = 0;
+            pyramid_display_revision_ = 0;
+        }
+        const std::uint64_t revision = controller_.display_revision();
+        if (revision != tiled_display_revision_) {
+            if (tiled_texture_.has_prepared_pyramid()) tiled_texture_.clear_prepared_pyramid();
+            tiled_texture_.invalidate();
+            tiled_display_revision_ = revision;
+        }
+        if (zoom_ < 1.0 &&
+            GLTiledCanvasTexture::should_use_pyramid(document_width, document_height) &&
+            pyramid_display_revision_ != revision) {
+            auto pyramid = GLTiledCanvasTexture::build_cpu_pyramid(
+                document_width, document_height, pixels);
+            if (!pyramid.empty()) {
+                tiled_texture_.set_prepared_pyramid(std::move(pyramid));
+                pyramid_display_revision_ = revision;
+            }
+        }
+    }
+
     QPainter painter(this);
     painter.fillRect(rect(), QColor(25, 28, 33));
     const QRectF target = image_rect();
@@ -205,14 +251,25 @@ void QtCanvasWidget::paintGL() {
         painter.fillRect(visible_target, Qt::white);
     }
 
-    const auto& pixels = controller_.display_pixels();
-    draw_pixel_buffer(painter,
-                      target,
-                      zoom_,
-                      visible,
-                      pixels,
-                      controller_.document().width,
-                      controller_.document().height);
+    bool used_tiled_renderer = false;
+    if (gl_ready_) {
+        painter.beginNativePainting();
+        used_tiled_renderer = tiled_texture_.draw(
+            pixels, document_width, document_height, static_cast<float>(zoom_),
+            static_cast<float>(target.left()), static_cast<float>(target.top()),
+            width(), height(), visible.left, visible.top, visible.right, visible.bottom);
+        painter.endNativePainting();
+        if (tiled_texture_.has_pending_uploads()) update();
+    }
+    if (!used_tiled_renderer) {
+        draw_pixel_buffer(painter,
+                          target,
+                          zoom_,
+                          visible,
+                          pixels,
+                          document_width,
+                          document_height);
+    }
 
     if (onion_visible_ && controller_.document().active_frame > 0) {
         constexpr qreal onion_opacity = 0.30;
@@ -343,4 +400,3 @@ void QtCanvasWidget::paintGL() {
     draw_selection_transform_handles(painter);
     draw_raster_text_box_handles(painter);
 }
-

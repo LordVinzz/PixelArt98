@@ -582,6 +582,84 @@ void QtUiTests::configurable_adjustments_preview_on_cpu_and_cancel_cleanly() {
         }
     }
 
+void QtUiTests::tiled_canvas_renderer_is_used_by_normal_widget() {
+        QtMainWindow window(cpu_settings());
+        window.show();
+        QApplication::processEvents();
+        auto* canvas = dynamic_cast<QtCanvasWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("CanvasWidget")));
+        QVERIFY(canvas != nullptr);
+        if (!canvas->gl_ready()) {
+            QSKIP("The Qt test platform did not provide an OpenGL 3.3 canvas context");
+        }
+
+        Document document = Document::create(2, 2);
+        document.active_cel().pixels = {
+            rgba(255, 0, 0), rgba(0, 255, 0),
+            rgba(0, 0, 255), rgba(255, 255, 255)
+        };
+        window.replace_document_for_testing(std::move(document));
+        canvas->update();
+        QTRY_VERIFY(canvas->tiled_draw_stats().visible_tiles > 0);
+        QTRY_COMPARE(canvas->tiled_draw_stats().pending_tiles, 0);
+
+        const QImage framebuffer = canvas->grabFramebuffer();
+        QVERIFY(!framebuffer.isNull());
+        const double framebuffer_scale =
+            static_cast<double>(framebuffer.width()) / static_cast<double>(canvas->width());
+        const int pixel_size = static_cast<int>(
+            std::lround(canvas->zoom() * framebuffer_scale));
+        const int left = (framebuffer.width() - pixel_size * 2) / 2;
+        const int top = (framebuffer.height() - pixel_size * 2) / 2;
+        const auto sampled = [&](int x, int y) {
+            return framebuffer.pixelColor(left + x * pixel_size + pixel_size / 2,
+                                          top + y * pixel_size + pixel_size / 2);
+        };
+        QCOMPARE(sampled(0, 0), QColor(255, 0, 0));
+        QCOMPARE(sampled(1, 0), QColor(0, 255, 0));
+        QCOMPARE(sampled(0, 1), QColor(0, 0, 255));
+        QCOMPARE(sampled(1, 1), QColor(255, 255, 255));
+    }
+
+void QtUiTests::opengl_effect_preview_uses_canvas_context_and_is_undoable() {
+        AppSettings settings = cpu_settings();
+        settings.heavy_gpu_optimization = true;
+        QtMainWindow window(settings);
+        window.show();
+        QApplication::processEvents();
+        auto* canvas = dynamic_cast<QtCanvasWidget*>(
+            window.findChild<QWidget*>(QStringLiteral("CanvasWidget")));
+        QVERIFY(canvas != nullptr);
+        if (!canvas->gl_ready()) {
+            QSKIP("The Qt test platform did not provide an OpenGL 3.3 canvas context");
+        }
+
+        Document source = patterned_document();
+        const std::vector<Pixel> before = source.active_cel().pixels;
+        window.replace_document_for_testing(std::move(source));
+        auto* action = window.findChild<QAction*>(QStringLiteral("adjustment.posterize"));
+        QVERIFY(action != nullptr);
+        QTimer::singleShot(0, &window, [&window] {
+            auto* dialog = window.findChild<QDialog*>(
+                QStringLiteral("AdjustmentDialog.posterize"));
+            QVERIFY(dialog != nullptr);
+            auto* levels = dialog->findChild<QSlider*>(
+                QStringLiteral("AdjustmentControl.levels"));
+            QVERIFY(levels != nullptr);
+            levels->setValue(3);
+            dialog->findChild<QPushButton*>(QStringLiteral("AdjustmentApply"))->click();
+        });
+        action->trigger();
+
+        QCOMPARE(window.last_effect_backend(), std::string("opengl"));
+        QVERIFY(window.document().active_cel().pixels != before);
+        QCOMPARE(window.document().undo_history_for_recovery().size(), std::size_t{1});
+        auto* undo = window.findChild<QPushButton*>(QStringLiteral("HistoryUndo"));
+        QVERIFY(undo != nullptr);
+        undo->click();
+        QCOMPARE(window.document().active_cel().pixels, before);
+    }
+
 void QtUiTests::animation_buttons_keep_frame_operations_working() {
         QtMainWindow window(cpu_settings());
         auto* add = window.findChild<QToolButton*>(QStringLiteral("animation.newFrame"));

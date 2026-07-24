@@ -52,7 +52,7 @@ void QtMainWindow::show_curves_dialog(const QString& name) {
     help_layout->addWidget(reset);
     layout.addWidget(help_row);
 
-    const auto preview = [this, &original, editor] {
+    const auto preview = [this, &original, editor, name] {
         controller_.document() = original;
         if (editor->is_identity()) {
             last_effect_backend_ = "none";
@@ -68,7 +68,7 @@ void QtMainWindow::show_curves_dialog(const QString& name) {
         request.curve_point_count = settings.point_count;
         request.params2 = {settings.luma ? 1.0f : 0.0f, settings.red ? 1.0f : 0.0f,
                            settings.green ? 1.0f : 0.0f, settings.blue ? 1.0f : 0.0f};
-        if (!apply_mps_preview(controller_.document(), request)) {
+        if (!apply_accelerated_preview(controller_.document(), request, name)) {
             apply_curves(controller_.document(), settings);
             last_effect_backend_ = "cpu";
         }
@@ -147,7 +147,9 @@ void QtMainWindow::show_adjustment_dialog(const AdjustmentSpec& adjustment) {
         std::vector<int> values;
         values.reserve(sliders.size());
         for (const QSlider* slider : sliders) values.push_back(slider->value());
-        if (!adjustment.gpu_request || !apply_mps_preview(controller_.document(), adjustment.gpu_request(values))) {
+        if (!adjustment.gpu_request ||
+            !apply_accelerated_preview(controller_.document(), adjustment.gpu_request(values),
+                                       adjustment.name)) {
             adjustment.operation(controller_.document(), values);
             last_effect_backend_ = "cpu";
         }
@@ -246,7 +248,9 @@ void QtMainWindow::show_levels_dialog(const AdjustmentSpec& adjustment) {
         std::vector<int> values;
         values.reserve(sliders.size());
         for (const QSlider* slider : sliders) values.push_back(slider->value());
-        if (!adjustment.gpu_request || !apply_mps_preview(controller_.document(), adjustment.gpu_request(values))) {
+        if (!adjustment.gpu_request ||
+            !apply_accelerated_preview(controller_.document(), adjustment.gpu_request(values),
+                                       adjustment.name)) {
             adjustment.operation(controller_.document(), values);
             last_effect_backend_ = "cpu";
         }
@@ -429,4 +433,3 @@ void QtMainWindow::check_for_updates() {
         }
     });
 }
-

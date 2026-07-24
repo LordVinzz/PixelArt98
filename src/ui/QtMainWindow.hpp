@@ -154,7 +154,9 @@ private:
     void show_adjustment_dialog(const AdjustmentSpec& adjustment);
     void show_levels_dialog(const AdjustmentSpec& adjustment);
     void show_curves_dialog(const QString& name);
-    bool apply_mps_preview(Document& document, const GpuEffectRequest& request);
+    bool apply_accelerated_preview(Document& document,
+                                   const GpuEffectRequest& request,
+                                   const QString& undo_name);
     QAction* add_effect_action(QMenu* menu, const QString& name, EffectOperation operation,
                               GpuEffectRequestFactory gpu_request = {});
     QAction* add_effect_action(QMenu* menu, AdjustmentSpec effect);
@@ -210,6 +212,7 @@ private:
     bool recovery_shutting_down_ = false;
     bool has_recoverable_session_ = false;
     MpsEffectRenderer mps_effect_renderer_;
+    GpuEffectRenderer gpu_effect_renderer_;
     std::string last_effect_backend_ = "none";
     std::vector<QDockWidget*> docks_;
     std::vector<QDockWidget*> canvas_only_docks_;

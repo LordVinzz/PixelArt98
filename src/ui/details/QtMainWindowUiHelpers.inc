@@ -51,6 +51,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QOpenGLContext>
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
