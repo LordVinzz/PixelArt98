@@ -108,6 +108,8 @@ typedef void (APIENTRYP PFNGLBINDRENDERBUFFERPROC)(GLenum target, GLuint renderb
 typedef void (APIENTRYP PFNGLBINDTEXTUREPROC)(GLenum target, GLuint texture);
 typedef void (APIENTRYP PFNGLBINDVERTEXARRAYPROC)(GLuint array);
 typedef void (APIENTRYP PFNGLBUFFERDATAPROC)(GLenum target, GLsizeiptr size, const void* data, GLenum usage);
+typedef void (APIENTRYP PXGLADBUFFERSUBDATAPROC)(GLenum target, ptrdiff_t offset, GLsizeiptr size, const void* data);
+typedef void (APIENTRYP PXGLADBLENDFUNCSEPARATEPROC)(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
 typedef GLenum (APIENTRYP PFNGLCHECKFRAMEBUFFERSTATUSPROC)(GLenum target);
 typedef void (APIENTRYP PFNGLCLEARPROC)(GLbitfield mask);
 typedef void (APIENTRYP PFNGLCLEARCOLORPROC)(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
@@ -163,6 +165,8 @@ extern PFNGLBINDRENDERBUFFERPROC glad_glBindRenderbuffer;
 extern PFNGLBINDTEXTUREPROC glad_glBindTexture;
 extern PFNGLBINDVERTEXARRAYPROC glad_glBindVertexArray;
 extern PFNGLBUFFERDATAPROC glad_glBufferData;
+extern PXGLADBUFFERSUBDATAPROC glad_glBufferSubData;
+extern PXGLADBLENDFUNCSEPARATEPROC glad_glBlendFuncSeparate;
 extern PFNGLCHECKFRAMEBUFFERSTATUSPROC glad_glCheckFramebufferStatus;
 extern PFNGLCLEARPROC glad_glClear;
 extern PFNGLCLEARCOLORPROC glad_glClearColor;
@@ -223,6 +227,8 @@ void gladLoaderUnloadGL(void);
 #define glBindTexture glad_glBindTexture
 #define glBindVertexArray glad_glBindVertexArray
 #define glBufferData glad_glBufferData
+#define glBufferSubData glad_glBufferSubData
+#define glBlendFuncSeparate glad_glBlendFuncSeparate
 #define glCheckFramebufferStatus glad_glCheckFramebufferStatus
 #define glClear glad_glClear
 #define glClearColor glad_glClearColor
